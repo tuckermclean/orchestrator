@@ -16,8 +16,10 @@ faithfully.
 
 Three facts that govern everything:
 
-- All durable state lives in **forge labels**. No separate database for entity state. A
-  process crash at any point is recoverable by the reconciler on the next cron tick.
+- All durable state lives in **forge state** — labels for discrete entity states, and the
+  orchestrator's own namespaced marker comments for counters (redispatch counts, retry
+  counts). No separate database for entity state. A process crash at any point is
+  recoverable by the reconciler on the next cron tick.
 - The harness is **single-shot**. `HarnessPort.dispatch` returns immediately. Agents must
   commit early and often; there is no resume path.
 - Decision functions are **pure and synchronous**. The async boundary is at I/O only.
@@ -158,7 +160,7 @@ given changed_paths: list[str], round: int → list[AgentRef]:
 Constants (single-sourced in `SPEC.md §7`):
 - `CONVERGE_REVIEW_BASE = ["engineering-security-engineer.md", "engineering-code-reviewer.md"]`
 - `PARALLEL_SPECIALIST_CAP = 4`
-- `SPECIALIST_ROUTING` = 4-entry routing table (auth/* → security, db/* → database, ui/* → a11y, api/* → api-tester)
+- `SPECIALIST_ROUTING` = 3-entry routing table (db/schema → `engineering-database-optimizer.md`, ui → `testing-accessibility-auditor.md`, api → `testing-api-tester.md`). Security is always-on via `CONVERGE_REVIEW_BASE` and is the default for auth/session/crypto patterns (already included in the base set — no separate routing row).
 
 ### §7.4 Specialist spawn model
 
@@ -192,8 +194,9 @@ further sub-agents.
 Work through these in order. Don't start a phase until the previous phase's tests pass.
 
 **Phase 1 — Decision Functions and Types.** Domain types from `SPEC.md §7` + all 13
-decision functions (`SPEC.md §8.1–§8.12` + `derive_issue_state`/`derive_pr_state`). Write
-every truth-table test from `TESTING.md §2` alongside each function.
+decision functions (`SPEC.md §8.1–§8.12`; note §8.10 defines two functions:
+`derive_issue_state` and `derive_pr_state`). Write every truth-table test from
+`TESTING.md §2` alongside each function.
 
 **Phase 2 — Port Fakes and Contract Suites.** `FakeForgePort`, `FakeHarnessPort`,
 `FakeSessionPort` with call log, configurable returns, fault injection, reset. Pass shared
@@ -295,11 +298,12 @@ Before marking any PR ready, verify that none of your changes weakens:
 
 Do not silently fix these. Flagged for human decision.
 
-**OQ-1: `ci-red` recovery checks 3 of 6 blocking CI checks.** The `escalate:ci-red`
-recovery path in `Engine.converge` re-polls only the first three checks after re-triggering
-CI, not all six. A PR that recovers code checks but whose Docker/Helm checks are still red
-can be auto-approved. Mirrors reference implementation behavior. Open an issue if you
-believe it needs changing.
+**OQ-1 (resolved): `ci-red` recovery now re-polls all 6 blocking CI checks.** The
+former 3-of-6 behaviour (from the reference implementation) was a soundness hole: a PR
+whose Docker Build / Helm Lint / Helm Kubeconform checks were still red could be
+auto-approved. `Engine.converge §10.2` step 4g now polls all `BLOCKING_CI_CHECKS`
+(SPEC.md §7) before approving on the `ci-red` recovery path. A new negative test
+(`test_converge_ci_red_docker_still_red_escalates`) locks in the corrected behaviour.
 
 **OQ-2: `MAX_REDISPATCHES` was duplicated in the reference implementation.** Now
 single-sourced in `SPEC.md §7`. Never hardcode `2`. The CI gate will catch it.

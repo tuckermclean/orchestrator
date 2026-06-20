@@ -19,10 +19,20 @@ Three workflows act on those labels:
 | **Converge** | A bounded 3-round Review→Fix loop that drives a Change Set to APPROVED or ESCALATED |
 | **Reconciler** | Cron-driven (`*/15 * * * *`) orthogonal supervisor; detects and recovers stranded entities |
 
-**Crash-only durability.** The engine holds no in-process durable state. A crashed
-process leaves every entity in its last-written forge-label state; the reconciler recovers
-it on the next tick. The harness is single-shot: `HarnessPort.dispatch` returns
-immediately and the engine never blocks awaiting an agent. Durability comes from agents
+**Crash-only durability.** The engine holds no in-process durable state. Entity state is
+encoded in **forge state** — labels for discrete states, and the orchestrator's own
+namespaced marker comments (written into forge comments via `ForgePort.post_comment`) for
+counter values such as `redispatch_count` and `retry_count`. No separate state store. A
+crashed process leaves every entity in its last-written forge state; the reconciler
+recovers it on the next tick.
+
+**Single-shot harness.** `HarnessPort.dispatch` returns immediately; the *control plane*
+(`handle_event` → `Engine.dispatch`) never blocks awaiting an agent. `Engine.converge` is
+different: it runs as the **converge job** (P7) — a single bounded workflow run that
+legitimately awaits its own spawned reviewers and fixers and polls CI within one run
+(≤ `CI_WAIT_S` per round). If the converge job crashes mid-run, reconciler RC-3 re-arms
+it (P14); the in-flight round is recoverable from the highest committed
+`.converge-verdict-rN.json`. Durability of agent work-in-progress comes from agents
 committing early and often plus the reconciler as supervisor.
 
 ---
@@ -203,6 +213,13 @@ Single-source home. All implementation code must import from this table; never h
 | `LABEL_TRIAGE` | `"triage"` |
 | `LABEL_AWAITING_PROMOTION` | `"awaiting-promotion"` |
 
+> **Note on counter state.** Discrete entity states (QUEUED, BUILDING, …) are fully
+> encoded in these labels. Counter values (`redispatch_count`, `retry_count`) are not
+> label-encoded; they are derived at runtime by `derive_redispatch_count` and
+> `derive_retry_count` (§8.2a) by counting namespaced marker comments in forge history
+> via `ForgePort.list_comments`. No separate store is needed — forge comments are
+> durable forge state.
+
 ### PROTECTED_PATHS
 
 ```
@@ -240,11 +257,6 @@ PROTECTED_PATHS = [
 
 A check is green when its state is `success`, `skipped`, or `neutral`.
 
-> **Known issue:** The `ci-red` recovery path in `Engine.converge` re-polls only the
-> first 3 checks (Type Check, Lint, Integration Tests), not all 6. A PR that recovers
-> its code checks but has red Docker/Helm checks can be auto-approved on this path. The
-> 6-check gate applies on the normal `approve` path.
-
 ---
 
 ## §8 Decision Functions
@@ -252,8 +264,9 @@ A check is green when its state is `success`, `skipped`, or `neutral`.
 All decision functions are **pure and synchronous** unless noted. No network, no file I/O,
 no side effects. They must never be made async.
 
-Exceptions: `resolve_blockers` and `pipeline_health` are impure unless their forge-call
-dependency is injected (DI env vars in tests).
+Exceptions: `resolve_blockers`, `pipeline_health`, `derive_redispatch_count`, and
+`derive_retry_count` are impure (they call `ForgePort.list_comments`). In tests, the fake
+`ForgePort` is injected to keep them deterministic and network-free.
 
 Priority tables are evaluated top-to-bottom; first match fires.
 
@@ -294,6 +307,38 @@ A verdict is sentinel iff `blocker_signatures` contains `"verdict-file-not-writt
 `parse_comment_blockers` extracts `🔴 <N> blockers` via regex. When both stale and
 current footers exist, the in-round filter (`createdAt >= CONVERGE_ROUND_STARTED`) is
 applied before selecting the most recent; empty `CONVERGE_ROUND_STARTED` reads any footer.
+
+### §8.2a `derive_redispatch_count` / `derive_retry_count`
+
+Impure helpers that reconstruct counter values from durable forge comment history.
+Each engine action that increments a counter also posts (or appends to) a comment bearing
+a namespaced HTML comment marker; these helpers count those markers.
+
+**Markers** (hidden HTML, never rendered, ride on existing action comments):
+
+| Helper | Marker string | Posted on | Feeds |
+|---|---|---|---|
+| `derive_redispatch_count(entity_ref, "converge")` | `<!-- orchestrator:redispatch ch=converge -->` | issue | `decide_cap_action` (`MAX_REDISPATCHES`) |
+| `derive_redispatch_count(entity_ref, "stale-pr")` | `<!-- orchestrator:redispatch ch=stale-pr -->` | PR | `decide_stale_action` (`RECONCILER_STALE_REDISPATCH_CAP`) |
+| `derive_redispatch_count(entity_ref, "orphan")` | `<!-- orchestrator:redispatch ch=orphan -->` | issue | `decide_redispatch_action` (`ISSUE_REDISPATCH_CAP`) |
+| `derive_retry_count(pr_ref)` | `<!-- orchestrator:converge-retry -->` | PR | `retry_count` (`NO_VERDICT_RETRY_CAP`) |
+
+```
+async derive_redispatch_count(entity_ref, channel: str) -> int:
+  comments = await forge.list_comments(entity_ref)
+  marker = f"<!-- orchestrator:redispatch ch={channel} -->"
+  return sum(1 for c in comments if marker in c.body)
+
+async derive_retry_count(pr_ref) -> int:
+  comments = await forge.list_comments(pr_ref)
+  return sum(1 for c in comments if "<!-- orchestrator:converge-retry -->" in c.body)
+```
+
+The marker is written **atomically with the action comment** via a single
+`forge.post_comment` call; the action comment body always contains the marker. The Engine
+must write the marker whenever it re-dispatches or re-arms (see §10.2, §10.3). Because
+forge comments are append-only durable forge state, a crash-recovered reconciler reading
+only comments will reconstruct the same count and enforce the same cap.
 
 ### §8.3 `decide_round`
 
@@ -558,10 +603,13 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
 1. **Idempotency gate** — read PR label state; return immediately if closed/merged/terminal.
 2. **Protected-path check** — `forge.get_changed_files(pr)` vs `PROTECTED_PATHS`. On match:
    `forge.add_label(pr, LABEL_NEEDS_HUMAN)` → return `ESCALATED` (P6, E1).
-3. **EMPTY check** — 0 changed files: `decide_cap_action(redispatch_count, has_issue)`:
-   - `redispatch` → `@claude` re-dispatch on issue (P15, I5)
+3. **EMPTY check** — 0 changed files: derive `redispatch_count = await derive_redispatch_count(issue_ref, "converge")` then `decide_cap_action(redispatch_count, has_issue)`:
+   - `redispatch` → post `@claude` comment on issue containing `<!-- orchestrator:redispatch ch=converge -->` marker (P15, I5)
    - `escalate` → `forge.add_label(pr, LABEL_NEEDS_HUMAN)` → `ESCALATED` (P16, E6)
-4. **Converge loop** (rounds 1–3):
+4. **Converge loop** (rounds 1–3). This loop executes inside one converge-job run (P7);
+   it legitimately awaits its own spawned agents and polls CI within that run. The in-flight
+   round is always recoverable from the highest committed `.converge-verdict-rN.json`, so
+   RC-3 re-arm (P14) can resume at the correct round:
    a. Seed init sentinel verdict.
    b. Dispatch reviewers via `decide_specialists` → `harness.dispatch` (up to `PARALLEL_SPECIALIST_CAP`).
    c. Await reviewers; write `.converge-verdict-rN.json`.
@@ -572,9 +620,9 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
       - `approve` → add `LABEL_READY`, remove `LABEL_CONVERGE`, post approving review, collect nits into follow-up issue → `APPROVED` (P8).
       - `fix` (R1/R2) → `harness.dispatch` fixer agent(s); advance round.
       - `escalate:no-progress` → `forge.add_label(pr, LABEL_NEEDS_HUMAN)` → `ESCALATED` (P10, E2).
-      - `escalate:no-verdict` → retry < `NO_VERDICT_RETRY_CAP`: re-arm via `trigger_workflow` (P12); else `LABEL_NEEDS_HUMAN` (P10, E3).
-      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll 3 checks up to `CI_WAIT_S`; if green → `approve` (P9); else `LABEL_NEEDS_HUMAN` (P10, E4).
-      - `escalate:cap-reached` → `decide_cap_action(redispatch_count, has_issue)`: `redispatch` (P11) or `LABEL_NEEDS_HUMAN` (P10, E5).
+      - `escalate:no-verdict` → derive `retry_count = await derive_retry_count(pr_ref)` then: retry < `NO_VERDICT_RETRY_CAP`: post re-arm comment containing `<!-- orchestrator:converge-retry -->` marker, re-arm via `trigger_workflow` (P12); else `LABEL_NEEDS_HUMAN` (P10, E3).
+      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll **all 6 `BLOCKING_CI_CHECKS`** up to `CI_WAIT_S`; if all green → `approve` (P9); else `LABEL_NEEDS_HUMAN` (P10, E4).
+      - `escalate:cap-reached` → derive `redispatch_count = await derive_redispatch_count(issue_ref, "converge")` then `decide_cap_action(redispatch_count, has_issue)`: `redispatch` (post comment with `<!-- orchestrator:redispatch ch=converge -->` marker on issue, P11) or `LABEL_NEEDS_HUMAN` (P10, E5).
 
 ### §10.3 `Engine.reconcile`
 
@@ -588,6 +636,10 @@ ReconcileReport {
 
 Channels are independent and may run concurrently (they operate on disjoint entity sets).
 Within each channel, entities are processed serially to avoid conflicting label writes.
+
+**Counter derivation in reconcile channels:**
+- **RC-1 (stale-draft):** derive `redispatch_count = await derive_redispatch_count(pr_ref, "stale-pr")` before calling `decide_stale_action`. When acting `redispatch`, include `<!-- orchestrator:redispatch ch=stale-pr -->` marker in the action comment posted on the PR.
+- **RC-4 (orphan-issue):** derive `redispatch_count = await derive_redispatch_count(issue_ref, "orphan")` before calling `decide_redispatch_action`. When acting `redispatch`, include `<!-- orchestrator:redispatch ch=orphan -->` marker in the `@claude` comment posted on the issue.
 
 ### §10.4 `Engine.intake`
 
@@ -736,11 +788,12 @@ stateDiagram-v2
 
 ## §13 Known Issues
 
-**OQ-1: `ci-red` recovery checks 3 of 6 blocking CI checks.** The `escalate:ci-red`
-recovery path re-polls only checks 1–3 (Type Check, Lint, Integration Tests) after
-re-triggering CI, not all 6. A PR that recovers its code checks but has red Docker/Helm
-checks can be auto-approved on this path. This mirrors the reference implementation exactly.
-Do not change without a human decision.
+**OQ-1 (resolved): `ci-red` recovery now re-polls all 6 blocking CI checks.** The former
+3-of-6 behaviour (inherited from the reference bash implementation) was a soundness hole:
+a PR that recovered Type Check / Lint / Integration Tests but still had red Docker Build,
+Helm Lint, or Helm Kubeconform could be auto-approved (P9). `Engine.converge §10.2` step
+4g now polls all `BLOCKING_CI_CHECKS` (§7) before approving. The negative test
+`test_converge_ci_red_docker_still_red_escalates` locks in the corrected behaviour.
 
 **OQ-2: `MAX_REDISPATCHES` was duplicated in three places** in the reference bash
 scripts. It is now single-sourced here. Never hardcode `2` in implementation code.

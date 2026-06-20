@@ -403,6 +403,27 @@ in `tests/contracts/` parameterized over the implementation under test. Any new 
 
 **Minimum: 6.**
 
+### §3.5 Counter Derivation Helpers — `SPEC.md §8.2a`
+
+These helpers use `ForgePort.list_comments` to reconstruct `redispatch_count` and
+`retry_count` from durable forge comment history. Tests use the fake `ForgePort`.
+
+| Test name | Setup | Expected |
+|---|---|---|
+| `test_derive_redispatch_count_zero` | issue has 0 comments with `ch=converge` marker | `0` |
+| `test_derive_redispatch_count_from_markers` | issue has 3 comments, 2 contain `<!-- orchestrator:redispatch ch=converge -->` | `2` |
+| `test_derive_redispatch_count_channel_isolation` | issue has `ch=converge` (×2) and `ch=orphan` (×1) markers; channel=`"converge"` | `2` (orphan not counted) |
+| `test_derive_redispatch_count_stale_pr_channel` | PR has 3 `ch=stale-pr` markers | `3` |
+| `test_derive_redispatch_count_orphan_channel` | issue has 3 `ch=orphan` markers | `3` |
+| `test_derive_retry_count_zero` | PR has 0 `<!-- orchestrator:converge-retry -->` markers | `0` |
+| `test_derive_retry_count_from_markers` | PR has 2 comments containing the converge-retry marker | `2` |
+| `test_derive_retry_count_unrelated_comments` | PR has comments with no marker | `0` |
+
+Key invariant: markers are counted independently per channel; a comment may contain only
+one marker. Partial comment matches (e.g. wrong channel slug) must not be counted.
+
+**Minimum: 8.**
+
 ---
 
 ## §4 Engine Integration Tests (Over Fakes)
@@ -450,8 +471,9 @@ engine internals.
 | `test_converge_empty_pr_escalate_cap` | `changed_files=0`, `has_issue=true`, `redispatch_count=2` | Returns `ESCALATED` (P16, E6 via cap) |
 | `test_converge_no_verdict_retry` | R3: `blockers="unknown"`, `retry_count=0` | `harness.trigger_workflow` called; returns `CONVERGING` (P12) |
 | `test_converge_no_verdict_escalate` | R3: `blockers="unknown"`, `retry_count=2` | Returns `ESCALATED` after retries exhausted (E3) |
-| `test_converge_ci_red_recovers` | R3: `blockers=0`, CI red → re-trigger → CI green | Returns `APPROVED` (P9) |
-| `test_converge_ci_red_escalates` | R3: `blockers=0`, CI red → re-trigger → still red | Returns `ESCALATED` (E4) |
+| `test_converge_ci_red_recovers` | R3: `blockers=0`, CI red → re-trigger → **all 6** `BLOCKING_CI_CHECKS` green | Returns `APPROVED` (P9) |
+| `test_converge_ci_red_escalates` | R3: `blockers=0`, CI red → re-trigger → all 6 checks still red | Returns `ESCALATED` (E4) |
+| `test_converge_ci_red_docker_still_red_escalates` | R3: `blockers=0`, code checks 1–3 recover, Docker/Helm checks 4–6 still red | Returns `ESCALATED` (E4); partial recovery is not approved (OQ-1 regression guard) |
 | `test_converge_nit_followup_issue` | R1 approve with nits | `forge.create_issue` called once with deduplicated nits |
 
 ### §4.4 Reconciler Channels RC-1..RC-4 — `SPEC.md §4`
@@ -518,6 +540,8 @@ PROTECTED_PATHS` (currently 6) and assert E1 for each.
 | `test_partial_state_recovery_building_pr` | PR in BUILDING (stale) + reconciler → RC-1 applies correct `StaleAction`; no panic or label corruption |
 | `test_partial_state_recovery_converge_pr_no_workflow` | Non-draft `converge` PR, no recent run → RC-3 re-arms; `trigger_workflow` called exactly once |
 | `test_engine_no_in_process_state` | Two sequential `Engine.converge` calls on the same PR share no state; each reads fresh labels at idempotency gate |
+| `test_redispatch_count_survives_crash` | Fake forge seeded with 2 `ch=orphan` marker comments (simulating prior re-dispatches before a crash); fresh `Engine.reconcile` call → `derive_redispatch_count` returns `2` → `decide_redispatch_action` returns `redispatch` (not yet at cap 3); a third cycle → count `3` → `escalate` (E10, I4). No in-process state carries over between calls. |
+| `test_retry_count_survives_crash` | Fake forge seeded with 1 converge-retry marker comment; fresh `Engine.converge` on the same PR → `derive_retry_count` returns `1` → `NO_VERDICT_RETRY_CAP=2` not yet hit → re-arm triggered; second crash + recover with 2 markers → `retry_count=2` → `ESCALATED` (E3). |
 
 ---
 
@@ -537,6 +561,7 @@ tests/
     fake_forge_port.py  fake_harness_port.py  fake_session_port.py
   contracts/
     test_forge_port_contract.py  test_harness_port_contract.py  test_session_port_contract.py
+    test_counter_derivation.py
   integration/
     test_intake.py  test_dispatch.py  test_converge.py  test_reconciler.py
   security/
@@ -590,12 +615,13 @@ test must be impossible to land.
 | §3.2 | `ForgePort` contract | 25 |
 | §3.3 | `HarnessPort` contract | 8 |
 | §3.4 | `SessionPort` contract | 6 |
+| §3.5 | Counter derivation helpers | 8 |
 | §4.1 | Intake paths | 6 |
 | §4.2 | Dispatch lifecycle | 5 |
-| §4.3 | Converge sub-machine | 17 |
+| §4.3 | Converge sub-machine | 18 |
 | §4.4 | Reconciler channels | 18 |
 | §5 | Security / trust | 11 |
-| §6 | Idempotency / crash-only | 11 |
-| **Total** | | **~264** |
+| §6 | Idempotency / crash-only | 13 |
+| **Total** | | **~275** |
 
 Floors, not ceilings. The coverage check enforces the floor automatically.
