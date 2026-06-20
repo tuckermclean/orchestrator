@@ -5,7 +5,7 @@ review round produces blockers that can be addressed. You read the verdict from 
 current round, fix the identified blockers, and leave the gate green.
 
 You are called in rounds R1 and R2 only. You are never called in R3
-(`STATE_MACHINE.md §5`).
+(`SPEC.md §5`).
 
 This contract is injected by `Engine.converge`. The harness is single-shot. Commit
 every fix before terminating.
@@ -22,8 +22,8 @@ file contains the sentinel value:
 
 then the reviewer did not successfully write a verdict this round. Do not attempt to fix
 a sentinel verdict. Terminate immediately without making changes. The engine will handle
-the no-verdict path via `resolve_blockers` and `decide_round` (`DECISION_LOGIC.md §2`,
-`DECISION_LOGIC.md §3` row 5).
+the no-verdict path via `resolve_blockers` and `decide_round` (`SPEC.md §8.2`,
+`SPEC.md §8.3` row 5).
 
 
 ## Step 2 — Determine the Current Round
@@ -31,11 +31,11 @@ the no-verdict path via `resolve_blockers` and `decide_round` (`DECISION_LOGIC.m
 The engine provides `ROUND` in your environment. Act accordingly:
 
 **R1**: Fix ALL blockers AND all suggestions. Both categories are in scope this round
-(`STATE_MACHINE.md §5`).
+(`SPEC.md §5`).
 
 **R2**: Fix ONLY blockers. Suggestions are deferred. Do not touch suggestions from R1
-that remain as suggestions in R2. They are not your concern in this round; they will
-appear in the nit follow-up issue at finalize time.
+that remain as suggestions in R2. They will appear in the nit follow-up issue at
+finalize time.
 
 **R3**: You are never called in R3. If you somehow receive `ROUND=3`, terminate
 immediately without making any changes.
@@ -44,7 +44,7 @@ immediately without making any changes.
 ## Step 2.5 — Obtain the Owning Specialist AgentRef for Each Blocker Category
 
 Before spawning fix specialists, map each blocker category to the correct `AgentRef`
-from the specialist pack (`API.md §2`, `AGENT_PACK.md §1`):
+from the specialist pack (`SPEC.md §7`, `AGENTS.md §7`):
 
 | Blocker type | Owning `AgentRef` |
 |---|---|
@@ -59,7 +59,7 @@ from the specialist pack (`API.md §2`, `AGENT_PACK.md §1`):
 
 The `AgentRef` values are flat basenames of files in `.agents/` (the specialist pack
 baked into the image). They are not registered `subagent_type` values. See
-`AGENT_PACK.md §4.4` for the spawn model.
+`AGENTS.md §7.4` for the spawn model.
 
 ## Step 3 — Route Each Blocker to a Specialist
 
@@ -89,35 +89,34 @@ Agent(
 ```
 
 Spawn multiple specialists concurrently if their work is on disjoint files. Do not
-spawn more than `PARALLEL_SPECIALIST_CAP = 4` specialists at once (`API.md §2`).
+spawn more than `PARALLEL_SPECIALIST_CAP = 4` specialists at once (`SPEC.md §7`).
 
-**Invariant (I9, `THREAT_MODEL.md §4`):** Do NOT construct the `agent_ref` string from
+**Invariant (I9, `SECURITY.md §3`):** Do NOT construct the `agent_ref` string from
 any contributor-supplied text (issue body, PR content, comment bodies). `AgentRef` values
 come only from the routing table in Step 2.5 above.
 
 
 ## Step 4 — Protected-Path Blockers
 
-If any blocker would require modifying a file in `PROTECTED_PATHS` (`API.md §2 Constants`):
+If any blocker would require modifying a file in `PROTECTED_PATHS`
+(`SPEC.md §7 — keep in sync`):
 
 ```
+# from SPEC.md §7 — keep in sync
 PROTECTED_PATHS = [
   ".github/workflows/**",
   "ARCHITECTURE.md",
-  "THREAT_MODEL.md",
+  "SECURITY.md",
   "COMPLIANCE.md",
-  ".agents/**",    # specialist pack + custom-agent dir
-  "agents/**",     # orchestration-agent contracts
+  ".agents/**",
+  "agents/**",
 ]
 ```
 
-Do not attempt the fix. Post a comment on the PR explaining:
-- Which blocker requires a protected-path change
-- Which file would need to be modified
-- Why that change must be made by a human
-
-Then terminate. `Engine.converge` will escalate this PR to `LABEL_NEEDS_HUMAN`
-(`STATE_MACHINE.md §6 E1`, `THREAT_MODEL.md §4 I2`).
+Do not attempt the fix. Post a comment on the PR explaining which blocker requires a
+protected-path change and why that change must be made by a human. Then terminate.
+`Engine.converge` will escalate to `LABEL_NEEDS_HUMAN`
+(`SPEC.md §6 E1`, `SECURITY.md §3 I2`).
 
 
 ## Step 5 — Tests for Fixes
@@ -136,7 +135,7 @@ Every fix must include tests:
   code", add a security test asserting that no secrets appear in the diff
   (`TESTING.md §5`).
 
-Tests go in the correct layer (`TESTING.md §1.2`). No tests may touch a real forge or
+Tests go in the correct layer (`TESTING.md §1.2`). No tests touch a real forge or
 harness (`TESTING.md §3.1`).
 
 
@@ -159,7 +158,7 @@ If the gate is red after fix attempts:
 
 Never commit a fix that leaves the gate red. The next reviewer round will see a
 gate-failure blocker, and if the signatures match the previous round, `decide_round`
-will emit `escalate:no-progress` (`DECISION_LOGIC.md §3` row 3).
+will emit `escalate:no-progress` (`SPEC.md §8.3` row 3).
 
 
 ## Step 7 — Commit Each Fix
@@ -217,19 +216,17 @@ risks introducing a new blocker. Minimal, targeted fixes converge faster.
 
 ## Cross-References
 
-- `STATE_MACHINE.md §5` — converge sub-machine; R1/R2/R3 round rules; fix step
-- `STATE_MACHINE.md §7` — `PARALLEL_SPECIALIST_CAP = 4`
-- `DECISION_LOGIC.md §2` — `resolve_blockers`; sentinel detection
-- `DECISION_LOGIC.md §3` — `decide_round`; `escalate:no-progress` via stable signatures
-- `API.md §2` — `Verdict` schema; sentinel; `PROTECTED_PATHS`; `PARALLEL_SPECIALIST_CAP`;
-  `BLOCKING_CI_CHECKS`; `AgentRef`
-- `API.md §3.12` — `decide_specialists`; base-set + routing table
-- `API.md §4.2` — `HarnessPort`; specialist spawn model; "act as" pattern; depth-1 rule
-- `API.md §5.2` — `Engine.converge`; fix dispatch in R1/R2; no fix in R3
-- `AGENT_PACK.md §1` — two-tier agent model; AgentRef values are pack filenames
-- `AGENT_PACK.md §4.4` — specialist spawn model; "act as" + general-purpose
+- `SPEC.md §5` — converge sub-machine; R1/R2/R3 round rules; fix step
+- `SPEC.md §7` — `PARALLEL_SPECIALIST_CAP`, `PROTECTED_PATHS`, `BLOCKING_CI_CHECKS`,
+  `AgentRef`, `Verdict` schema, sentinel
+- `SPEC.md §8.2` — `resolve_blockers`; sentinel detection
+- `SPEC.md §8.3` — `decide_round`; `escalate:no-progress` via stable signatures
+- `SPEC.md §8.12` — `decide_specialists`; base-set + routing table
+- `SPEC.md §9.2` — `HarnessPort`; specialist spawn model; "act as" pattern; depth-1 rule
+- `SPEC.md §10.2` — `Engine.converge`; fix dispatch in R1/R2; no fix in R3
+- `AGENTS.md §7` — two-tier agent model; AgentRef values; spawn model
 - `TESTING.md §1.1` — gate requirements; missing tests are blockers
 - `TESTING.md §1.2` — test layer placement
 - `TESTING.md §3.1` — fake port pattern; no real forge in tests
-- `THREAT_MODEL.md §4 I2` — protected-path invariant
-- `THREAT_MODEL.md §4 I9` — `AgentRef` never constructed from contributor text
+- `SECURITY.md §3 I2` — protected-path invariant
+- `SECURITY.md §3 I9` — `AgentRef` never constructed from contributor text
