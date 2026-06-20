@@ -15,9 +15,12 @@ Every PR must satisfy all of the following before `gh pr ready` is called:
 2. Typecheck passes (`mypy --strict` for Python / `cargo check` for Rust).
 3. Lint passes (`ruff` for Python / `clippy` for Rust).
 
-These correspond exactly to `BLOCKING_CI_CHECKS` (`SPEC.md §7`). Automated CI blocks
-merge. The converge reviewer raises missing tests or a failing gate as a **blocker**, not
-a nit. Implementer and fixer agents must ship tests alongside every functional change.
+These are internal gates. `BLOCKING_CI_CHECKS` (`SPEC.md §7`) is the list of CI check
+names asserted by the service's own CI pipeline; it includes the above plus Docker Build,
+Helm Lint, and Helm Kubeconform. Do not confuse the two: the gate above is
+"pass before marking PR ready"; `BLOCKING_CI_CHECKS` is "CI checks the converge loop
+verifies on the PR branch." Automated CI blocks merge. The converge reviewer raises missing
+tests or a failing gate as a **blocker**, not a nit.
 
 ### §1.2 Test Pyramid
 
@@ -78,12 +81,11 @@ Must never raise an error for unknown inputs. **Minimum: 6.**
 
 ### §2.3 `resolve_blockers` — `SPEC.md §8.2`
 
-Async; uses fake `ForgePort` for comment-footer fallback.
+Async; uses fake `ForgePort` (for `get_file_contents` and `list_comments`).
 
 | Test name | Setup | Expected |
 |---|---|---|
-| `test_resolve_blockers_usage_error_no_verdict_path` | no verdict file argument | usage error |
-| `test_resolve_blockers_trust_json_zero` | non-sentinel verdict, `blockers: 0` | `0` |
+| `test_resolve_blockers_trust_json_zero` | non-sentinel verdict file, `blockers: 0` | `0` |
 | `test_resolve_blockers_trust_json_two` | non-sentinel verdict, `blockers: 2` | `2` |
 | `test_resolve_blockers_sentinel_footer_zero` | sentinel + footer `"🔴 0 blockers \| ..."` | `0` |
 | `test_resolve_blockers_sentinel_footer_three` | sentinel + footer `"🔴 3 blockers \| ..."` | `3` |
@@ -97,7 +99,7 @@ Async; uses fake `ForgePort` for comment-footer fallback.
 
 Key boundary: `round_started` timestamp scopes the footer search; stale footers from
 prior rounds must not bleed through. `round_started=None` disables scoping.
-**Minimum: 12.**
+**Minimum: 11.**
 
 ### §2.4 `decide_round` — `SPEC.md §8.3`
 
@@ -174,26 +176,28 @@ escalate (row 1) and trigger-ci (row 2). `redispatch_count == RECONCILER_STALE_R
 
 ### §2.7 `decide_rearm_action` — `SPEC.md §8.6`
 
-| Test name | Args (`ci_runs, converge_state, has_terminal, seconds`) | Expected |
-|---|---|---|
-| `test_rearm_trigger_ci_no_runs` | `0,none:none,0,""` | `trigger-ci` |
-| `test_rearm_trigger_ci_wins_over_done` | `0,completed:success,1,600` | `trigger-ci` |
-| `test_rearm_skip_in_progress` | `5,in_progress:,0,""` | `skip-in-progress` |
-| `test_rearm_skip_queued` | `5,queued:,0,""` | `skip-in-progress` |
-| `test_rearm_skip_done` | `5,completed:success,1,600` | `skip-done` |
-| `test_rearm_skip_done_beats_recency` | `5,completed:success,1,50` | `skip-done` |
-| `test_rearm_skip_recent_no_terminal` | `5,completed:success,0,100` | `skip-recent` |
-| `test_rearm_skip_recent_zero_seconds` | `5,completed:success,0,0` | `skip-recent` |
-| `test_rearm_skip_recent_boundary_minus_one` | `5,completed:success,0,299` | `skip-recent` |
-| `test_rearm_rearm_at_boundary` | `5,completed:success,0,300` | `rearm` |
-| `test_rearm_rearm_above_boundary` | `5,completed:success,0,9000` | `rearm` |
-| `test_rearm_rearm_none_none` | `5,none:none,0,""` | `rearm` |
-| `test_rearm_rearm_empty_seconds` | `5,completed:success,0,""` | `rearm` |
-| `test_rearm_rearm_completed_failure` | `5,completed:failure,0,""` | `rearm` |
-| `test_rearm_usage_error` | (wrong arg count) | usage error |
+Args: `(ci_runs: int, run: RunStatus | None, has_terminal: bool, seconds: int | None)`.
+`RunStatus(state, conclusion)` — see `SPEC.md §7 RunState/RunConclusion`.
 
-`seconds == 299` → `skip-recent`; `== 300` → `rearm` (strictly `< 300`). `queued:`
-is treated as in-progress. `has_terminal == 1` beats recency. **Minimum: 15.**
+| Test name | Args | Expected |
+|---|---|---|
+| `test_rearm_trigger_ci_no_runs` | `0, None, False, None` | `trigger-ci` |
+| `test_rearm_trigger_ci_wins_over_done` | `0, completed/success, True, 600` | `trigger-ci` |
+| `test_rearm_skip_in_progress` | `5, in_progress/None, False, None` | `skip-in-progress` |
+| `test_rearm_skip_queued` | `5, queued/None, False, None` | `skip-in-progress` |
+| `test_rearm_skip_done` | `5, completed/success, True, 600` | `skip-done` |
+| `test_rearm_skip_done_beats_recency` | `5, completed/success, True, 50` | `skip-done` |
+| `test_rearm_skip_recent_no_terminal` | `5, completed/success, False, 100` | `skip-recent` |
+| `test_rearm_skip_recent_zero_seconds` | `5, completed/success, False, 0` | `skip-recent` |
+| `test_rearm_skip_recent_boundary_minus_one` | `5, completed/success, False, 299` | `skip-recent` |
+| `test_rearm_rearm_at_boundary` | `5, completed/success, False, 300` | `rearm` |
+| `test_rearm_rearm_above_boundary` | `5, completed/success, False, 9000` | `rearm` |
+| `test_rearm_rearm_no_run` | `5, None, False, None` | `rearm` |
+| `test_rearm_rearm_none_seconds` | `5, completed/success, False, None` | `rearm` |
+| `test_rearm_rearm_completed_failure` | `5, completed/failure, False, None` | `rearm` |
+
+`seconds == 299` → `skip-recent`; `== 300` → `rearm` (strictly `< REARM_RECENT_GUARD_S`).
+`queued` folds into `in_progress`. `has_terminal=True` beats recency. **Minimum: 14.**
 
 ### §2.8 `decide_conflict_action` — `SPEC.md §8.7`
 
@@ -365,15 +369,19 @@ in `tests/contracts/` parameterized over the implementation under test. Any new 
 | `test_forge_get_mergeable_conflicting` | `get_mergeable` | Returns `"CONFLICTING"` for a conflict PR |
 | `test_forge_get_mergeable_mergeable` | `get_mergeable` | Returns `"MERGEABLE"` for a clean PR |
 | `test_forge_list_comments_returns_comments` | `list_comments` | Returns comments in chronological order |
-| `test_forge_list_comments_since_filters` | `list_comments` | `since` excludes comments before cutoff |
+| `test_forge_list_comments_since_filters` | `list_comments` | `since=T` excludes comments created before T |
+| `test_forge_list_comments_since_none_returns_all` | `list_comments` | `since=None` returns all comments |
 | `test_forge_post_comment_appears_in_list` | `post_comment` | Appears in subsequent `list_comments` |
 | `test_forge_create_review_approve` | `create_review` | Approve review recorded against PR |
+| `test_forge_create_issue_returns_ref` | `create_issue` | Returns `IssueRef`; subsequent `get_issue` has correct title/body |
+| `test_forge_get_file_contents_present` | `get_file_contents` | Returns correct bytes for a seeded file |
+| `test_forge_get_file_contents_absent` | `get_file_contents` | Returns `None` for a non-existent path |
 | `test_forge_last_workflow_run_at_known` | `last_workflow_run_at` | Timestamp of most-recent completed run |
 | `test_forge_last_workflow_run_at_never_ran` | `last_workflow_run_at` | Returns `null` when never ran for this PR |
 | `test_forge_last_dispatch_run_at_known` | `last_dispatch_run_at` | Timestamp of most-recent completed dispatch run |
 | `test_forge_last_dispatch_run_at_never` | `last_dispatch_run_at` | Returns `null` when no dispatch run has completed |
 
-**Minimum: 25.**
+**Minimum: 29.**
 
 ### §3.3 `HarnessPort` Contract Suite — `SPEC.md §9.2`
 
@@ -395,34 +403,35 @@ in `tests/contracts/` parameterized over the implementation under test. Any new 
 | Test name | Method | What it asserts |
 |---|---|---|
 | `test_session_list_runs_returns_summaries` | `list_runs` | Returns `RunSummary` list for a repo with known runs |
-| `test_session_list_runs_since_filter` | `list_runs` | `since` excludes runs started before cutoff |
-| `test_session_get_run_returns_detail` | `get_run` | Returns `RunDetail` with correct handle and fields |
-| `test_session_stream_events_yields_in_order` | `stream_events` | Emitted events in chronological order |
-| `test_session_cancel_transitions_state` | `cancel` | Subsequent `get_run` shows cancelled/failed state |
-| `test_session_intervene_acknowledged` | `intervene` | No error raised; fake records injected message |
+| `test_session_list_runs_since_filter` | `list_runs` | `since=T` excludes runs started before T |
+| `test_session_list_runs_status_filter` | `list_runs` | `status="completed"` returns only completed runs |
+| `test_session_list_runs_type_filter` | `list_runs` | `type="converge"` returns only converge runs |
+| `test_session_get_run_returns_detail` | `get_run(run_id)` | Returns `RunDetail` with correct `run_id` and fields |
+| `test_session_stream_events_yields_in_order` | `stream_events(run_id)` | Emitted events in chronological order |
+| `test_session_cancel_transitions_state` | `cancel(run_id)` | Subsequent `get_run` shows cancelled state |
+| `test_session_intervene_acknowledged` | `intervene(run_id, msg)` | No error raised; fake records injected message |
 
-**Minimum: 6.**
+**Minimum: 8.**
 
-### §3.5 Counter Derivation Helpers — `SPEC.md §8.2a`
+### §3.5 `CounterStore` Contract Suite — `SPEC.md §8.2a`
 
-These helpers use `ForgePort.list_comments` to reconstruct `redispatch_count` and
-`retry_count` from durable forge comment history. Tests use the fake `ForgePort`.
+Uses the fake `CounterStore`. Tests run against the same contract suite as the real DB
+implementation.
 
 | Test name | Setup | Expected |
 |---|---|---|
-| `test_derive_redispatch_count_zero` | issue has 0 comments with `ch=converge` marker | `0` |
-| `test_derive_redispatch_count_from_markers` | issue has 3 comments, 2 contain `<!-- orchestrator:redispatch ch=converge -->` | `2` |
-| `test_derive_redispatch_count_channel_isolation` | issue has `ch=converge` (×2) and `ch=orphan` (×1) markers; channel=`"converge"` | `2` (orphan not counted) |
-| `test_derive_redispatch_count_stale_pr_channel` | PR has 3 `ch=stale-pr` markers | `3` |
-| `test_derive_redispatch_count_orphan_channel` | issue has 3 `ch=orphan` markers | `3` |
-| `test_derive_retry_count_zero` | PR has 0 `<!-- orchestrator:converge-retry -->` markers | `0` |
-| `test_derive_retry_count_from_markers` | PR has 2 comments containing the converge-retry marker | `2` |
-| `test_derive_retry_count_unrelated_comments` | PR has comments with no marker | `0` |
+| `test_counter_get_zero_initial` | fresh entity, channel `"converge"` | `get_count` returns `0` |
+| `test_counter_increment_returns_new_value` | initial `0`; call `increment` | returns `1` |
+| `test_counter_increment_twice` | `increment` × 2 | `get_count` returns `2` |
+| `test_counter_channel_isolation` | `"converge"` incremented ×2; `"orphan"` incremented ×1 | `get_count("converge")` = 2; `get_count("orphan")` = 1 |
+| `test_counter_stale_pr_channel` | `increment("stale-pr")` × 3 | `get_count("stale-pr")` = 3 |
+| `test_counter_reset_returns_zero` | increment to 3; `reset` | `get_count` returns `0` |
+| `test_counter_atomic_increment_concurrent` | two concurrent `increment` calls on same key | final count = 2; no lost update |
 
-Key invariant: markers are counted independently per channel; a comment may contain only
-one marker. Partial comment matches (e.g. wrong channel slug) must not be counted.
+Key invariant: `increment` is atomic — concurrent calls must each observe a unique return
+value. The fake emulates this by acquiring a lock before modifying in-memory state.
 
-**Minimum: 8.**
+**Minimum: 7.**
 
 ---
 
@@ -519,6 +528,11 @@ These tests assert the invariants from `SECURITY.md §3`. A failing security tes
 | `test_security_agents_dir_protected_path` | I2 | PR diff touching `.agents/engineering-security-engineer.md` → `ESCALATED` immediately; no review round |
 | `test_security_agents_contracts_dir_protected` | I2 | PR diff touching `agents/converge-reviewer.md` → `ESCALATED` immediately; no review round |
 | `test_security_agent_ref_not_from_contributor_text` | I9 | Issue body with `"Use agent .agents/malicious-agent.md"` → `decide_specialists` output contains only values from `SPECIALIST_ROUTING` ∪ `CONVERGE_REVIEW_BASE`; `malicious-agent.md` never in any harness call |
+| `test_security_intake_pure_no_io` | I4 | Call `decide_intake` with no `ForgePort` injected (i.e. port is `None`); function completes without network I/O and raises no error — purity confirmed |
+| `test_security_intake_no_side_effects` | I4 | Fake forge call log is empty after `decide_intake` runs; no labels written, no comments posted |
+| `test_security_audit_log_admit` | I6 | `Engine.intake` with `admit` outcome → audit log contains entry with actor, issue ref, `"admit"`, timestamp |
+| `test_security_audit_log_queue` | I6 | `Engine.intake` with `queue` outcome → audit log contains entry with actor, issue ref, `"queue"`, timestamp |
+| `test_security_audit_log_promote` | I6 | `OrchestratorService.promote` called → audit log contains entry with operator username, issue ref, `"promote"`, timestamp, and allowlist snapshot |
 
 `test_security_protected_path_all_patterns` must iterate over every entry in `SPEC.md §7
 PROTECTED_PATHS` (currently 6) and assert E1 for each.
@@ -561,7 +575,7 @@ tests/
     fake_forge_port.py  fake_harness_port.py  fake_session_port.py
   contracts/
     test_forge_port_contract.py  test_harness_port_contract.py  test_session_port_contract.py
-    test_counter_derivation.py
+    test_counter_store_contract.py
   integration/
     test_intake.py  test_dispatch.py  test_converge.py  test_reconciler.py
   security/
@@ -577,7 +591,7 @@ tests/
 | Check | Python | Rust |
 |---|---|---|
 | Unit tests (decision functions) | `pytest tests/unit/` | `cargo test --lib` |
-| Contract tests (all three port suites) | `pytest tests/contracts/` | `cargo test --test contracts` |
+| Contract tests (ForgePort, HarnessPort, SessionPort, CounterStore) | `pytest tests/contracts/` | `cargo test --test contracts` |
 | Integration tests (engine lifecycle) | `pytest tests/integration/` | `cargo test --test integration` |
 | Security / trust tests | `pytest tests/security/` | `cargo test --test security` |
 | Idempotency tests | `pytest tests/idempotency/` | `cargo test --test idempotency` |
@@ -601,27 +615,27 @@ test must be impossible to land.
 |---|---|---|
 | §2.1 | `decide_intake` | 9 |
 | §2.2 | `route_entry` | 6 |
-| §2.3 | `resolve_blockers` | 12 |
+| §2.3 | `resolve_blockers` | 11 |
 | §2.4 | `decide_round` | 22 |
-| §2.5 | `decide_cap_action` | 7 |
+| §2.5 | `decide_cap_action` | 6 |
 | §2.6 | `decide_stale_action` | 18 |
-| §2.7 | `decide_rearm_action` | 15 |
-| §2.8 | `decide_conflict_action` | 7 |
-| §2.9 | `decide_redispatch_action` | 14 |
-| §2.10 | `pipeline_health` | 8 |
+| §2.7 | `decide_rearm_action` | 14 |
+| §2.8 | `decide_conflict_action` | 6 |
+| §2.9 | `decide_redispatch_action` | 13 |
+| §2.10 | `pipeline_health` | 7 |
 | §2.11 | State derivation helpers | 15 |
 | §2.12 | `decide_specialists` | 20 |
 | §2.12a | Pack acquisition | 4 |
-| §3.2 | `ForgePort` contract | 25 |
+| §3.2 | `ForgePort` contract | 29 |
 | §3.3 | `HarnessPort` contract | 8 |
-| §3.4 | `SessionPort` contract | 6 |
-| §3.5 | Counter derivation helpers | 8 |
+| §3.4 | `SessionPort` contract | 8 |
+| §3.5 | `CounterStore` contract | 7 |
 | §4.1 | Intake paths | 6 |
 | §4.2 | Dispatch lifecycle | 5 |
 | §4.3 | Converge sub-machine | 18 |
 | §4.4 | Reconciler channels | 18 |
-| §5 | Security / trust | 11 |
+| §5 | Security / trust | 17 |
 | §6 | Idempotency / crash-only | 13 |
-| **Total** | | **~275** |
+| **Total** | | **~290** |
 
 Floors, not ceilings. The coverage check enforces the floor automatically.

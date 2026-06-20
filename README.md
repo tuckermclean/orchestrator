@@ -23,9 +23,9 @@ coordinating loops:
 - **Reconciler** is an orthogonal supervisor (cron every 15 min) that detects and
   recovers stranded entities.
 
-Entity state is encoded entirely in **forge labels** — there is no separate state store
-(crash-only durability). The decision logic is a set of small **pure synchronous
-functions** (~264 required test cases specified in `TESTING.md`).
+Entity lifecycle state is encoded in **forge labels**; counters live in the service DB
+with atomic increment. The decision logic is a set of small **pure synchronous functions**
+(~290 required test cases specified in `TESTING.md`).
 
 ---
 
@@ -82,12 +82,15 @@ model, supply-chain controls, and how to update the pinned SHA.
 
 ## Known issues
 
-Two latent concerns documented in `SPEC.md §13`:
+Documented in `SPEC.md §13`:
 
-1. The `ci-red` recovery path re-checks only 3 of the 6 blocking CI checks — a PR with
-   red Docker/Helm checks can be auto-approved on that path.
-2. `MAX_REDISPATCHES = 2` was duplicated in the reference implementation; now
-   single-sourced in `SPEC.md §7 Constants`.
+1. **OQ-2** — `MAX_REDISPATCHES = 2` was duplicated in the reference implementation; now
+   single-sourced in `SPEC.md §7`. Never hardcode `2`.
+2. **OQ-3** — Three redispatch caps with different values govern overlapping situations;
+   they are intentionally distinct. See `SPEC.md §13` before unifying them.
+3. **OQ-4** — `COMPLIANCE.md` is reserved in `PROTECTED_PATHS` but not yet authored.
+
+*(OQ-1 resolved: `ci-red` recovery now re-polls all 6 `BLOCKING_CI_CHECKS`.)*
 
 ---
 

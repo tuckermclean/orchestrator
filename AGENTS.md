@@ -16,13 +16,15 @@ faithfully.
 
 Three facts that govern everything:
 
-- All durable state lives in **forge state** — labels for discrete entity states, and the
-  orchestrator's own namespaced marker comments for counters (redispatch counts, retry
-  counts). No separate database for entity state. A process crash at any point is
-  recoverable by the reconciler on the next cron tick.
-- The harness is **single-shot**. `HarnessPort.dispatch` returns immediately. Agents must
-  commit early and often; there is no resume path.
-- Decision functions are **pure and synchronous**. The async boundary is at I/O only.
+- **Entity lifecycle state** (QUEUED, BUILDING, CONVERGING, …) lives in **forge labels**.
+  Entity counters (`redispatch_count`, `retry_count`) and service-level data (repo
+  registry, operator accounts, dedup cache) live in the service DB with atomic increment.
+  A process crash leaves every entity in its last-written forge label state; the reconciler
+  recovers it on the next tick.
+- **Harness dispatch is fire-and-forget.** `HarnessPort.dispatch` returns immediately; the
+  control plane never blocks awaiting an agent. The converge job may legitimately await its
+  own spawned sub-agents within a single execution.
+- **Decision functions are pure and synchronous.** The async boundary is at I/O only.
 
 ---
 
@@ -37,7 +39,7 @@ implement a compromise — escalate to human by opening an issue and stopping.
 | 2 | `SECURITY.md` | Security invariants — protected path |
 | 3 | `SPEC.md §7–§13` | Constants, decision functions, ports, service contract |
 | 4 | `ARCHITECTURE.md` | System architecture — implementation must match |
-| 5 | `TESTING.md` | Test contract — binding, ~264+ cases |
+| 5 | `TESTING.md` | Test contract — binding, ~275+ cases |
 | 6 | `WEBUI.md` | PWA spec |
 | 7 | `agents/*.md` | Runtime swarm contracts — implement as harness-fed prompt templates |
 | 8 | `README.md` | Index only — lowest authority |
@@ -154,7 +156,9 @@ given changed_paths: list[str], round: int → list[AgentRef]:
   for entry in SPECIALIST_ROUTING:
     if any path matches entry.pattern for path in changed_paths:
       specialists |= set(entry.agent_refs)
-  return list(specialists)[:PARALLEL_SPECIALIST_CAP]  # cap at 4; base set always included
+  # Cap: base set always retained; routing additions dropped in insertion order
+  extras = [r for r in specialists if r not in set(CONVERGE_REVIEW_BASE)]
+  return (list(CONVERGE_REVIEW_BASE) + extras)[:PARALLEL_SPECIALIST_CAP]
 ```
 
 Constants (single-sourced in `SPEC.md §7`):
@@ -222,14 +226,24 @@ HTTP API. No PWA code calls forge or harness APIs directly.
 **Phase 7 — Container and Kubernetes.** Container image + Helm chart per
 `ARCHITECTURE.md §5–§8`. The Dockerfile pack acquisition step must:
 ```dockerfile
+ARG AGENT_PACK_REPO_URL="https://github.com/msitarzewski/agency-agents"
 ARG AGENT_PACK_PINNED_REF="d6553e261e595c651064f899a6c33dd5aa71c9e3"
-RUN git clone --no-tags --depth 1 ${AGENT_PACK_REPO_URL} /tmp/agency-agents \
- && git -C /tmp/agency-agents fetch --depth 1 origin ${AGENT_PACK_PINNED_REF} \
+RUN git clone --no-tags --filter=blob:none ${AGENT_PACK_REPO_URL} /tmp/agency-agents \
  && git -C /tmp/agency-agents checkout ${AGENT_PACK_PINNED_REF} \
+ && [ "$(git -C /tmp/agency-agents rev-parse HEAD)" = "${AGENT_PACK_PINNED_REF}" ] \
  && mkdir -p /app/.agents \
- && find /tmp/agency-agents -mindepth 2 -name "*.md" -exec cp {} /app/.agents/ \; \
+ && find /tmp/agency-agents -mindepth 2 -name "*.md" | while IFS= read -r f; do \
+      target="/app/.agents/$(basename "$f")"; \
+      [ -e "$target" ] && { echo "ERROR: basename collision: $f" >&2; exit 1; }; \
+      cp "$f" "$target"; \
+    done \
  && rm -rf /tmp/agency-agents
 ```
+`--filter=blob:none` (blobless clone) reliably fetches any pinned SHA without shallow-clone
+server-capability issues. The `rev-parse HEAD` assertion fails the build if the checkout
+silently landed on the wrong commit. The basename-collision guard fails loudly if the pack
+ever introduces two `*.md` files with the same name at different paths.
+
 Verify the pack SHA appears in the image SBOM. Do not defer pack acquisition to runtime.
 
 ---
@@ -291,6 +305,33 @@ Before marking any PR ready, verify that none of your changes weakens:
   (`test_security_protected_path_all_patterns` includes `SECURITY.md`)
 - **I9** — `AgentRef` values come only from `decide_specialists` output.
   (`test_security_agent_ref_not_from_contributor_text`)
+
+---
+
+## §13 Agent Selection for Tasks
+
+**Override the default Explore reflex for any review, audit, or design task.** A
+plan-mode workflow may default to the Explore subagent for "Phase 1 exploration." That
+default is wrong whenever the task requires deep reading, cross-file comparison, or
+design judgment. Use the purpose-built specialist agents:
+
+| Task type | Right agent |
+|---|---|
+| Spec / design / buildability audit | Software Architect |
+| Code correctness / logic review | Code Reviewer |
+| Security analysis | Security Engineer |
+| Workflow, branch, and recovery coverage | Workflow Architect |
+| Test coverage and contract audit | Test Results Analyzer |
+| "Where is X defined?" / file lookup | Explore |
+
+**Why Explore is the wrong choice for reviews:** Explore reads file excerpts and is
+optimized for "find the symbol / find the file." It cannot hold an 800-line spec in
+context, compare sections, detect contradictions, or exercise design judgment. Using it
+for audits or reviews produces shallow, single-angle output.
+
+**How to override:** Select the matching specialist above. Make the agent prompt explicit:
+"Read SPEC.md fully." Do not let the plan-mode Phase 1 default constrain specialist
+selection — the phase boundary is workflow guidance, not a restriction on agent type.
 
 ---
 
