@@ -48,3 +48,11 @@
 # "I7-invariant-awaiting-and-agent-work-never-coexist":
 #   tests: ["test_security_awaiting_and_agent_work_never_coexist"]
 #   # implemented in Step 2 (tests/security/test_intake_security.py)
+
+"§8.11":
+  "row-empty-allowlist":
+    tests: ["test_intake_gate_disabled", "test_intake_gate_disabled_empty_string_author"]
+  "row-allowlisted-admit":
+    tests: ["test_intake_allowlisted_first", "test_intake_allowlisted_second", "test_intake_single_match"]
+  "row-unlisted-queue":
+    tests: ["test_intake_unlisted", "test_intake_single_nomatch", "test_intake_case_sensitive_upper_in_list", "test_intake_case_sensitive_lower_in_list"]

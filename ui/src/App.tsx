@@ -2,6 +2,7 @@ import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Runs from "./pages/Runs";
 import RunDetail from "./pages/RunDetail";
+import Triage from "./pages/Triage";
 
 const styles = {
   nav: {
@@ -43,12 +44,16 @@ export default function App() {
         <Link to="/runs" style={styles.link}>
           Runs
         </Link>
+        <Link to="/triage" style={styles.link}>
+          Triage
+        </Link>
       </nav>
       <main style={styles.main}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:run_id" element={<RunDetail />} />
+          <Route path="/triage" element={<Triage />} />
         </Routes>
       </main>
     </BrowserRouter>

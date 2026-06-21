@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
+from src.db.audit import AuditLog
 from src.decisions.pipeline_health import pipeline_health
 from src.domain.types import (
+    LABEL_AGENT_WORK,
+    LABEL_AWAITING_PROMOTION,
+    LABEL_TRIAGE,
     HealthReport,
     IssueRef,
     PRRef,
@@ -14,8 +19,10 @@ from src.domain.types import (
     RunEvent,
     RunHandle,
     RunSummary,
+    TriageItem,
 )
 from src.engine.dispatch import Engine
+from src.engine.intake import IntakeEngine
 from src.ports.base import ForgePort, HarnessPort, SessionPort
 
 
@@ -37,11 +44,29 @@ class OrchestratorService:
         forge: ForgePort,
         harness: HarnessPort,
         session: SessionPort,
+        audit: AuditLog | None = None,
+        allowlist: list[str] | None = None,
     ) -> None:
         self.engine = Engine(forge, harness, session)
         self.forge = forge
         self.harness = harness
         self.session = session
+
+        # Audit log — default to in-memory if none provided
+        self._audit = audit if audit is not None else AuditLog()
+        self._allowlist = allowlist if allowlist is not None else []
+
+        self._intake_engine = IntakeEngine(
+            forge=forge,
+            harness=harness,
+            session=session,
+            audit=self._audit,
+            allowlist=self._allowlist,
+        )
+
+    async def startup(self) -> None:
+        """Initialise async resources (call once from the ASGI lifespan handler)."""
+        await self._audit.init()
 
     async def handle_event(self, event_name: str, payload: dict[str, object]) -> None:
         """Route forge webhook events to the engine."""
@@ -75,12 +100,15 @@ class OrchestratorService:
             if isinstance(comment_data, dict):
                 comment_body = str(comment_data.get("body", ""))
 
-        await self.engine.dispatch(
-            event_name,
-            issue_ref=issue_ref,
-            pr_ref=pr_ref,
-            comment_body=comment_body,
-        )
+        if event_name == "issues" and issue_ref is not None:
+            await self.run_intake(issue_ref)
+        else:
+            await self.engine.dispatch(
+                event_name,
+                issue_ref=issue_ref,
+                pr_ref=pr_ref,
+                comment_body=comment_body,
+            )
 
     async def list_runs(self, repo: RepoRef) -> list[RunSummary]:
         return await self.session.list_runs(repo)
@@ -114,3 +142,98 @@ class OrchestratorService:
             )
             handle = await self.harness.dispatch(context)
         return handle
+
+    # -----------------------------------------------------------------------
+    # Triage (human intake gate) — SPEC §11.3
+    # -----------------------------------------------------------------------
+
+    async def run_intake(self, issue_ref: IssueRef) -> RunHandle | None:
+        """Run the intake gate for an issue (called by event routing)."""
+        return await self._intake_engine.intake(issue_ref)
+
+    async def list_triage(self, repo: RepoRef) -> list[TriageItem]:
+        """List issues currently in AWAITING_PROMOTION state.
+
+        queued_at reflects the actual time the issue was queued (intake:queue audit entry).
+        Falls back to current time if no audit entry is found (e.g. legacy data).
+        """
+        issues = await self.forge.list_issues(repo, [LABEL_AWAITING_PROMOTION])
+        now = datetime.now(tz=UTC)
+        items: list[TriageItem] = []
+        for issue in issues:
+            entries = await self._audit.list_entries(repo, issue.ref)
+            queue_entries = [e for e in entries if e["action"] == "intake:queue"]
+            if queue_entries:
+                queued_at = datetime.fromisoformat(str(queue_entries[0]["ts"]))
+                if queued_at.tzinfo is None:
+                    queued_at = queued_at.replace(tzinfo=UTC)
+            else:
+                queued_at = now
+            items.append(
+                TriageItem(
+                    issue_ref=issue.ref,
+                    title=issue.title,
+                    body=issue.body,
+                    author=issue.author,
+                    labels=issue.labels,
+                    queued_at=queued_at,
+                )
+            )
+        return items
+
+    async def promote(self, issue_ref: IssueRef, operator: str) -> RunHandle:
+        """Promote an issue from AWAITING_PROMOTION to AGENT_WORK.
+
+        Steps (SPEC §11.3, I7):
+          1. Atomic label swap: set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK]).
+          2. Dispatch agent — bypasses dedup guard (explicit human promotion always dispatches).
+          3. Write audit record (I6 + I7) — after observable state is changed.
+
+        # TODO: operator must be derived from an authenticated session before production use.
+        """
+        from src.decisions.route_entry import route_entry as _route_entry
+        from src.domain.types import DispatchContext
+
+        # Step 1: atomic label swap (PUT semantics — I7, no TOCTOU)
+        await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+        # Step 2: dispatch directly via harness — bypasses dedup guard so an explicit
+        # human promotion always results in a real agent run, never a silent no-op.
+        result = _route_entry("issues")
+        context = DispatchContext(
+            issue_ref=issue_ref,
+            contract=result.contract,
+            model=result.model,
+            max_turns=result.max_turns,
+            forge_token_scope="repo-branch",
+            allowed_agent_refs=None,
+        )
+        handle = await self.harness.dispatch(context)
+
+        # Step 3: audit the human promotion (I6) — written after observable state is set
+        await self._audit.record(
+            repo=issue_ref.repo,
+            entity_ref=issue_ref,
+            action="promote",
+            operator=operator,
+        )
+
+        return handle
+
+    async def decline(self, issue_ref: IssueRef, operator: str) -> None:
+        """Decline an issue: close it via label removal + audit.
+
+        In a real forge adapter, decline would call close_issue(); here we
+        remove the awaiting-promotion label so it no longer appears in triage
+        and record the decline in the audit log.
+        """
+        # Remove awaiting-promotion label (issue remains open; real impl would close)
+        await self.forge.remove_label(issue_ref, LABEL_AWAITING_PROMOTION)
+
+        # Audit the decline (I6)
+        await self._audit.record(
+            repo=issue_ref.repo,
+            entity_ref=issue_ref,
+            action="decline",
+            operator=operator,
+        )

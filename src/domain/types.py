@@ -232,3 +232,17 @@ CONVERGE_REVIEW_BASE = [
     "engineering-security-engineer.md",
     "engineering-code-reviewer.md",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Triage item — issued queued in AWAITING_PROMOTION state
+# ---------------------------------------------------------------------------
+
+
+class TriageItem(BaseModel):
+    issue_ref: IssueRef
+    title: str
+    body: str
+    author: str
+    labels: list[str]
+    queued_at: datetime
