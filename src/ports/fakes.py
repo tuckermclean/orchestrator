@@ -645,6 +645,8 @@ class FakeSessionPort:
         )
 
     async def stream_events(self, run_id: str) -> AsyncGenerator[RunEvent, None]:  # noqa: UP007
+        # Single-consumer only: drains the shared queue including its terminating None;
+        # a second concurrent subscriber on the same run_id would block.
         self.stream_events_calls.append(run_id)
         # If there's a live queue (wired from harness), drain it
         if run_id in self._event_queues:
