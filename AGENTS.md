@@ -165,9 +165,7 @@ given changed_paths: list[str], round: int → list[AgentRef]:
   return base + extras[:PARALLEL_SPECIALIST_CAP - len(base)]
 ```
 
-The algorithm is **deterministic**: iterating `SPECIALIST_ROUTING` in definition order
-guarantees the same result for the same inputs. The previous set-based formulation was
-non-deterministic and could silently drop base-set members under adversarial cap values.
+**Deterministic**: `SPECIALIST_ROUTING` iterated in definition order; same inputs → same output.
 
 Constants (single-sourced in `SPEC.md §7`):
 - `CONVERGE_REVIEW_BASE = ["engineering-security-engineer.md", "engineering-code-reviewer.md"]`
@@ -187,13 +185,10 @@ may spawn fix-specialists; a fix-specialist must not spawn further sub-agents. "
 is measured from the orchestration agent, not from the Engine — this allows the fixer to
 spawn fix-specialists (depth-1 from the fixer, depth-2 from the Engine). See `SPEC.md §9.2`.
 
-**Allow-set enforcement (D2 / I9).** Before dispatching a reviewer or fixer, the Engine
-computes `allowed_agent_refs = decide_specialists(changed_paths, round)` and passes it in
-`DispatchContext.allowed_agent_refs`. The harness adapter **must reject** any sub-agent
-spawn whose `AgentRef` is not in `allowed_agent_refs`. Reviewer/fixer contracts must read
-`context.allowed_agent_refs` rather than recomputing the specialist set. This ensures the
-spawn set is always Engine-controlled, not LLM-controlled — the diff cannot steer the
-spawn even if the reviewer is deceived by injected content.
+**Allow-set enforcement (D2 / I9).** Engine sets `DispatchContext.allowed_agent_refs =
+decide_specialists(changed_paths, round)`; harness adapter must reject out-of-set spawns.
+Reviewer/fixer contracts must read `context.allowed_agent_refs`, not recompute it. See
+`SPEC.md §9.2`, `SECURITY.md §3 I9`.
 
 ### §7.5 Pack supply-chain controls
 
@@ -347,14 +342,9 @@ design judgment. Use the purpose-built specialist agents:
 | Test coverage and contract audit | Test Results Analyzer |
 | "Where is X defined?" / file lookup | Explore |
 
-**Why Explore is the wrong choice for reviews:** Explore reads file excerpts and is
-optimized for "find the symbol / find the file." It cannot hold an 800-line spec in
-context, compare sections, detect contradictions, or exercise design judgment. Using it
-for audits or reviews produces shallow, single-angle output.
-
-**How to override:** Select the matching specialist above. Make the agent prompt explicit:
-"Read SPEC.md fully." Do not let the plan-mode Phase 1 default constrain specialist
-selection — the phase boundary is workflow guidance, not a restriction on agent type.
+Explore is optimized for file/symbol lookup — it reads excerpts and cannot hold an
+800-line spec in context. For audits and reviews, always use the specialist above.
+Make the prompt explicit: "Read SPEC.md fully."
 
 ---
 
@@ -362,20 +352,12 @@ selection — the phase boundary is workflow guidance, not a restriction on agen
 
 Do not silently fix these. Flagged for human decision.
 
-**OQ-1 (resolved): `ci-red` recovery now re-polls all 6 blocking CI checks.** The
-former 3-of-6 behaviour (from the reference implementation) was a soundness hole: a PR
-whose Docker Build / Helm Lint / Helm Kubeconform checks were still red could be
-auto-approved. `Engine.converge §10.2` step 4g now polls all `BLOCKING_CI_CHECKS`
-(SPEC.md §7) before approving on the `ci-red` recovery path. A new negative test
-(`test_converge_ci_red_docker_still_red_escalates`) locks in the corrected behaviour.
+**OQ-1 (resolved): `ci-red` recovery re-polls all 6 `BLOCKING_CI_CHECKS`** (formerly 3-of-6;
+soundness hole). `test_converge_ci_red_docker_still_red_escalates` locks in the fix.
 
-**OQ-2: `MAX_REDISPATCHES` was duplicated in the reference implementation.** Now
-single-sourced in `SPEC.md §7`. Never hardcode `2`. The CI gate will catch it.
-
-**OQ-3: Two redispatch caps with different values govern overlapping situations.**
-`MAX_REDISPATCHES = 2` (converge loop), `RECONCILER_STALE_REDISPATCH_CAP = 3` (stale PR
-recovery), `ISSUE_REDISPATCH_CAP = 3` (orphan issue recovery). Distinct caps for distinct
-situations. Do not unify without a human decision.
+**OQ-2/OQ-3: `MAX_REDISPATCHES`** was duplicated; now single-sourced in `SPEC.md §7`.
+Never hardcode `2`. Two remaining active caps: `RECONCILER_STALE_REDISPATCH_CAP=3` (RC-1),
+`ISSUE_REDISPATCH_CAP=3` (RC-4). Do not unify without a human decision. See `SPEC.md §13`.
 
 **OQ-4: `COMPLIANCE.md` is in PROTECTED_PATHS but not yet authored.** Do not invent its
 content. The namespace is reserved.

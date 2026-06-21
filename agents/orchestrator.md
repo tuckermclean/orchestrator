@@ -157,16 +157,6 @@ Scope creep produces diffs that are harder for the converge reviewer to evaluate
 increases the risk of accidentally touching a protected path.
 
 
-## Single-Shot Durability
-
-This agent runs once and terminates. If the run is interrupted, the reconciler's RC-1 channel detects the stale draft PR
-(last dispatch run older than `STALE_DRAFT_THRESHOLD_S = 1200` seconds) and takes a
-recovery action (`SPEC.md §8.5`, `SPEC.md §4 RC-1`). Recovery depends on the state
-of the draft: if there is a diff and CI is clean, the reconciler marks the PR ready;
-if CI is failing or absent, it may re-dispatch. Commit partial work at every meaningful
-checkpoint so the reconciler has real state to reason about.
-
-
 ## Cross-References
 
 - `SPEC.md §3` — transitions I2, P1, P2; BUILDING and CONVERGING states

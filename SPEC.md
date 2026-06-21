@@ -44,11 +44,8 @@ legitimately awaits its own spawned reviewers and fixers within one execution.
 | **ESCALATED** | `needs-human` (`agent-work` removed) | Human decision required |
 | **CLOSED** | (closed by forge merge) | Terminal-success |
 
-> **PENDING visibility note.** PENDING issues carry only `awaiting-promotion`; no core
-> machine labels are present. The reconciler's RC-5 channel provides stale-notification
-> recovery (§4). If the operator neither promotes nor declines within
-> `AWAITING_PROMOTION_NUDGE_S` seconds (§7), RC-5 fires a push notification; it does
-> not auto-promote (promotion is always a human action).
+> PENDING issues carry only `awaiting-promotion`. RC-5 (§4) nudges the operator after
+> `AWAITING_PROMOTION_NUDGE_S` (§7); promotion is always a human action.
 
 ### Change Set (PR)
 
@@ -61,12 +58,9 @@ legitimately awaits its own spawned reviewers and fixers within one execution.
 | **MERGED** | (PR merged) | Terminal-success |
 | **EMPTY** | (transient) | 0-diff PR; not a label; detected at converge gate |
 
-Notes: `agent:implementing` is not removed when a PR is marked ready; only converge
-labels toggle. A **ready or converging** EMPTY PR (0 diff) always escalates to
-`ESCALATED`; the agent should never finish with an empty diff (D4). A **stale draft** with 0
-diff (agent crashed before committing) is eligible for reconciler RC-1 re-dispatch only when
-`is_draft == true AND agent:converge ∉ labels AND stale` — all discriminators are
-forge-observable, not reliant on agent self-reporting.
+Notes: `agent:implementing` is not removed when a PR is marked ready. A ready/converging
+0-diff PR always escalates (D4). A stale draft 0-diff (crashed agent) is RC-1-eligible
+when `is_draft AND agent:converge ∉ labels AND stale`.
 
 ---
 
@@ -108,11 +102,8 @@ forge-observable, not reliant on agent self-reporting.
 | P16 | ESCALATED (PR) | CONVERGING | Human removes `needs-human` | `converge ∈ labels`; RC-3 re-arms next tick |
 | P17 | ESCALATED (PR) | BUILDING | Human removes `needs-human` | `agent:implementing ∈ labels`, no `converge`; RC-1 recovers next tick |
 
-**Idempotency gate** guards every CONVERGING entry: before the loop runs, returns
-`proceed=false` when the PR is closed/merged, already labeled `needs-human` or
-`agent:ready`, **still a draft (`PR.draft == true`)**, or empty. The draft check prevents
-a `pull_request:synchronize` event fired by the implementing agent's own commits from
-entering the converge loop against an actively-building PR.
+**Idempotency gate** returns `proceed=false` when the PR is closed/merged, labeled
+`needs-human` or `agent:ready`, still a draft, or empty (see §10.2 step 1 for full gate).
 
 ---
 
@@ -131,10 +122,8 @@ idempotent and re-entrant.
 
 RC-1 priority order (first match wins): redispatch_count ≥ `RECONCILER_STALE_REDISPATCH_CAP` → `escalate`; ci_runs == 0 → `trigger-ci`; has_diff == 0 AND is_draft AND has_issue → `redispatch` (row 2.5a: crash-draft with issue — eligible for re-dispatch); has_diff == 0 AND is_draft AND NOT has_issue → `needs-human` (row 2.5b: crash-draft with no issue); has_diff == 0 AND NOT is_draft → `needs-human` (row 2.5c: non-draft 0-diff always escalates, D4); has_converge → `mark-ready`; failing == 0 → `mark-ready-and-converge`; else → `redispatch`/`needs-human`.
 
-> **B8a fix.** The widened RC-1 scope catches non-draft PRs that carry `agent:implementing`
-> but no `converge` or terminal label — a state that occurs when the engine crashes between
-> marking a PR ready and adding the `converge` label. Those PRs project to BUILDING (the
-> else branch of `derive_pr_state`) and were invisible to the old draft-only RC-1.
+> **B8a.** RC-1 scope includes non-draft PRs with `agent:implementing` but no `converge`
+> or terminal label — a crash-window state invisible to the old draft-only RC-1.
 
 ---
 
@@ -248,12 +237,9 @@ Single-source home. All implementation code must import from this table; never h
 | `LABEL_TRIAGE` | `"triage"` |
 | `LABEL_AWAITING_PROMOTION` | `"awaiting-promotion"` |
 
-> **Note on counter state.** Discrete entity states (QUEUED, BUILDING, …) are fully
-> encoded in these labels. Counter values (`redispatch_count`, `retry_count`) are stored in
-> the service DB with atomic increment/read (`CounterStore`). Marker comments (§8.2a) are
-> posted alongside each counter-incrementing action as a human-visible audit trail, but the
-> DB is the authoritative counter store — not the comment count. Converge round state
-> (`ConvergeState`) is also persisted to the DB for RC-3 crash recovery.
+> Entity states are encoded in these labels. Counters (`CounterStore`, §8.2a) and converge
+> round state (`ConvergeStateStore`, §9.4) are DB-backed. The DB counter is authoritative;
+> audit marker comments (§8.2a) are human-visible but not the source of truth.
 
 ### PROTECTED_PATHS
 
@@ -398,11 +384,10 @@ async reset(entity_ref, channel: str) -> void
 | `"orphan"` | issue | `ISSUE_REDISPATCH_CAP` | `decide_redispatch_action` |
 | `"converge-retry"` | PR | `NO_VERDICT_RETRY_CAP` | converge no-verdict retry |
 
-> **D3 note.** The former `"converge"` issue channel (cap `MAX_REDISPATCHES`, consumer `decide_cap_action`) was removed when D3 simplified `decide_cap_action` to always escalate. No Engine method increments it; `MAX_REDISPATCHES` is retained as a named constant for tests only.
+> **D3 note.** The former `"converge"` channel was removed when D3 simplified
+> `decide_cap_action` to always escalate; `MAX_REDISPATCHES` is retained for tests only.
 
-Each Engine action that increments a counter also posts a human-visible action comment on
-the forge entity (for audit trail). The comment body includes a namespaced marker for
-human readability, but the **DB counter is authoritative** — not the comment count:
+Each counter increment also posts an audit marker comment (human-visible; DB is authoritative):
 
 | Channel | Marker (audit trail only) |
 |---|---|
@@ -410,8 +395,7 @@ human readability, but the **DB counter is authoritative** — not the comment c
 | `"orphan"` | `<!-- orchestrator:redispatch ch=orphan -->` |
 | `"converge-retry"` | `<!-- orchestrator:converge-retry -->` |
 
-The `CounterStore` is injected into the `Engine` alongside the three port interfaces; the
-fake `CounterStore` is used in all unit and integration tests.
+`CounterStore` is injected into the `Engine`; `FakeCounterStore` is used in tests.
 
 ### §8.3 `decide_round`
 
@@ -441,13 +425,10 @@ comparing. This ensures no-progress detection is stable regardless of reviewer o
 | 6 | `round == 3 and blockers == 0` (ci not green, else row 1) | `escalate:ci-red` |
 | 7 | `round == 3` else (blockers ≥ 1) | `escalate:cap-reached` |
 
-Key edges:
-- `"unknown"` never produces `approve`.
-- Empty `prev==curr==[]` is NOT no-progress (row 3 requires non-empty `curr_sigs`).
-- Row 3 fires before rows 5–7 in R3.
-- **R1/R2 with `blockers == "unknown"`** falls through to row 2 or row 4 → `fix`. The
-  fixer is dispatched so a reviewer can try again next round; the unknown verdict is not
-  treated as a blocker count of 0 (row 1 requires an integer 0).
+Key edges: `"unknown"` never produces `approve`. `prev==curr==[]` is NOT no-progress
+(row 3 requires non-empty `curr_sigs`). Row 3 fires before rows 5–7 in R3.
+R1/R2 `unknown` falls through to `fix` (not approve) — fixer dispatches so reviewer
+can try again; row 1 requires integer 0.
 
 ### §8.4 `decide_cap_action`
 
@@ -455,10 +436,8 @@ When converge cap is reached with blockers, returns the escalation action.
 
 **Inputs**: `redispatch_count: int`, `has_issue: bool`
 
-> **D3 simplification.** A stuck converge is a human problem; work is never discarded by
-> re-dispatching from a converging PR. The `redispatch` branch is removed. The function
-> always returns `escalate`. `MAX_REDISPATCHES` is retained as a named constant for tests
-> and reference; never hardcode `2`.
+> **D3.** The `redispatch` branch is removed; a stuck converge is always a human problem.
+> `MAX_REDISPATCHES` is retained as a named constant for tests; never hardcode `2`.
 
 | # | Condition | Output |
 |---|---|---|
@@ -484,12 +463,9 @@ see widened RC-1 scope in §4).
 | 5 | `has_issue` | `redispatch` |
 | 6 | else (failing, no issue) | `needs-human` |
 
-Row 2.5 key (D4): the `is_draft` discriminator separates crash-recovery (agent died before
-committing anything — draft, 0-diff, eligible for re-dispatch bounded by
-`RECONCILER_STALE_REDISPATCH_CAP`) from agent-finished-empty (non-draft, 0-diff — always
-escalates; a finished agent must never produce an empty diff). Rows 1 and 2 win over all
-2.5 variants. RC-1 will only see non-draft 0-diff PRs if the converge gate itself crashed
-before setting `needs-human`; rows 2.5c correctly escalates that edge.
+Row 2.5 (D4): `is_draft` distinguishes crash-recovery (draft, 0-diff → re-dispatch bounded
+by `RECONCILER_STALE_REDISPATCH_CAP`) from finished-empty (non-draft, 0-diff → always
+escalates). Rows 1 and 2 take priority over all 2.5 variants.
 
 ### §8.6 `decide_rearm_action`
 
@@ -514,10 +490,9 @@ remains correctly callable in isolation.
 | 4 | `seconds_since_last_run is not None and seconds_since_last_run < REARM_RECENT_GUARD_S` | `skip-recent` |
 | 5 | else | `rearm` |
 
-Row 0 short-circuits for ESCALATED converge PRs (belt-and-suspenders, since RC-3 scope
-excludes them). Row 2 folds `queued` and `in_progress` to prevent duplicate dispatch.
-Exactly `REARM_RECENT_GUARD_S` seconds = NOT recent. `None` seconds skips the recency
-guard. Any `completed` run with non-`success` conclusion falls through to `rearm`.
+Row 0: belt-and-suspenders (RC-3 scope already excludes `needs-human` PRs). Row 2 folds
+`queued`/`in_progress` to prevent duplicate dispatch. Exactly `REARM_RECENT_GUARD_S` = NOT
+recent. `None` skips the recency guard. Any `completed` non-`success` conclusion → `rearm`.
 
 **`seconds_since_last_run` derivation (caller responsibility).** The RC-3 channel computes
 this value before calling `decide_rearm_action`. When `run` is not `None`, use
@@ -536,8 +511,6 @@ otherwise pass `None` so the recency guard is skipped and the function proceeds 
 | 1 | `mergeable == "CONFLICTING" and not already_needs_human` | `escalate` |
 | 2 | else | `skip` |
 
-Only exact string `"CONFLICTING"` triggers escalation.
-
 ### §8.8 `decide_redispatch_action`
 
 For an `agent-work` issue with no open PR.
@@ -552,7 +525,7 @@ For an `agent-work` issue with no open PR.
 | 3 | `redispatch_count >= ISSUE_REDISPATCH_CAP` | `escalate` |
 | 4 | else | `redispatch` |
 
-Exactly `ISSUE_COOLDOWN_S` seconds = NOT recent. `None` (never touched) skips recency guard.
+Exactly `ISSUE_COOLDOWN_S` = NOT recent. `None` skips recency guard.
 
 ### §8.9 `pipeline_health`
 
@@ -565,9 +538,8 @@ Reports pipeline health for a repo. Impure — calls `ForgePort.list_prs`.
 Counts: `implementing` = PRs with `agent:implementing`; `converge` = PRs with `converge`;
 `ready` = PRs with `agent:ready`; `needs_human` = PRs with `needs-human`;
 `stale_drafts` = draft PRs with `agent:implementing`;
-`in_flight` = count of **distinct PRs** in the union `{PRs with agent:implementing} ∪ {PRs with converge}`.
-Do not sum `implementing + converge` — PRs that carry both labels (CONVERGING PRs also retain
-`agent:implementing`) would be double-counted, causing `AT_RISK` to fire at ~half the real PR count.
+`in_flight` = **distinct PRs** in `{PRs with agent:implementing} ∪ {PRs with converge}`
+(do not sum — CONVERGING PRs carry both labels and would be double-counted).
 
 | # | Condition | verdict |
 |---|---|---|
@@ -595,18 +567,12 @@ Pure label→state projection functions. Synchronous. No I/O.
 - `converge ∈ labels AND NOT draft` → `CONVERGING`
 - else → `BUILDING` (draft, or no state labels)
 
-`EMPTY` is a derived-only state — it has no label encoding. A draft PR with `changed_files==0`
-derives to `BUILDING` (the crash-recovery case; RC-1 handles it via `decide_stale_action`
-rows 2.5a/b). `PRState` must be defined as an enum that includes `EMPTY`.
+`EMPTY` has no label encoding (derived-only). Draft + 0-diff → `BUILDING` (crash-recovery;
+RC-1 rows 2.5a/b). `PRState` must include `EMPTY` as an enum member.
 
-**`PR.changed_files` and `get_changed_files` equivalence.** `PR.changed_files` (the integer
-in `get_pr`/`list_prs` responses) and `len(forge.get_changed_files(pr))` (the live path list)
-must return the same value for the same PR at the same HEAD commit. `derive_pr_state` uses
-the integer field; `Engine.converge` step 3 uses the list length. Implementations must ensure
-these are derived from the same source. The forge adapter must not return a cached integer
-count that could diverge from the live file list. If the forge API can return these
-inconsistently (e.g., due to caching), the adapter must resolve the inconsistency before
-surfacing either value to the Engine.
+**`PR.changed_files` / `get_changed_files` equivalence.** `PR.changed_files` (integer from
+`get_pr`/`list_prs`) and `len(forge.get_changed_files(pr))` must agree for the same HEAD
+commit. The adapter must not return a cached count that could diverge from the live path list.
 
 ### §8.11 `decide_intake`
 
@@ -729,39 +695,23 @@ async last_workflow_run_at(pr_ref, workflow_name) -> datetime | null
 async last_dispatch_run_at(pr_ref) -> datetime | null
 ```
 
-`list_comments` returns comments in chronological order. When `since` is provided, only
-comments created at or after that timestamp are returned. Implementations must paginate
-transparently — callers always receive the full result.
+`list_comments` — chronological order; `since` filters to `created_at >= since`; paginate
+transparently.
 
-`get_file_contents` fetches a file at `path` from the HEAD of the PR's branch; returns
-`None` when the file does not exist. Used by `resolve_blockers` to read `.converge-verdict.json`.
+`get_file_contents` — fetches from the PR branch HEAD; returns `None` when absent.
 
-`put_file_on_branch(pr_ref, path, content, commit_message)` writes arbitrary bytes to
-`path` on the PR's HEAD branch in a single atomic commit. Used by `Engine.converge` step
-4b to seed the init sentinel before each reviewer dispatch. Creates the file if absent,
-overwrites if present. `path` is a repo-root-relative POSIX path.
+`put_file_on_branch` — writes bytes to `path` in a single atomic commit; creates or
+overwrites. All paths are repo-root-relative POSIX.
 
-`copy_file_on_branch(pr_ref, src_path, dest_path)` copies the file at `src_path` to
-`dest_path` on the PR's HEAD branch in a single commit (e.g., via the forge Contents API
-or a git command on the server-side clone). Used by `Engine.converge` step 4b to archive
-the live verdict file as `.converge-verdict-rN.json` (B3 verdict history). `src_path` and
-`dest_path` are repo-root-relative POSIX paths. Raises if `src_path` does not exist.
+`copy_file_on_branch` — copies `src_path` → `dest_path` in a single commit; raises if
+`src_path` absent. Used by `Engine.converge` to archive `.converge-verdict.json` as
+`.converge-verdict-rN.json` (B3 verdict history).
 
-`get_closing_issue(pr_ref) -> IssueRef | None` parses the PR body for a `Closes #N` /
-`Fixes #N` / `Resolves #N` reference (case-insensitive, any of these three keywords) and
-returns the corresponding `IssueRef` in the same repo, or `None` if no such reference is
-present. **`has_issue`** is `True` iff `get_closing_issue(pr_ref)` returns a non-`None`
-value; **`issue_ref`** is that return value. The Engine calls `get_closing_issue` early in
-`Engine.converge` (step 2a) so all downstream branches can use `has_issue`/`issue_ref`
-without re-fetching.
+`get_closing_issue` — parses PR body for `Closes #N` / `Fixes #N` / `Resolves #N`
+(case-insensitive); returns `IssueRef` or `None`. `has_issue = get_closing_issue() is not None`.
 
-`set_labels(entity_ref, labels)` atomically replaces the entity's full label set with
-`labels` (equivalent to GitHub's `PUT /issues/:number/labels`). Use for the
-`LABEL_AWAITING_PROMOTION → LABEL_AGENT_WORK` swap in `promote` to prevent the
-`LABEL_AWAITING_PROMOTION + LABEL_AGENT_WORK` coexistence window (invariant I7).
-`last_dispatch_run_at(pr_ref)` returns the start-time of the most recent harness dispatch
-run for this PR's branch. Used by RC-1 to detect stale implementing PRs; "stale" means
-`now - last_dispatch_run_at(pr) >= STALE_DRAFT_THRESHOLD_S`.
+`set_labels` — atomically replaces the full label set (`PUT` semantics; I7). Used by
+`promote` to swap `LABEL_AWAITING_PROMOTION → LABEL_AGENT_WORK` atomically.
 
 **`CheckRun` type** (returned by `get_check_runs`):
 
@@ -778,15 +728,13 @@ A check is green when `state == "completed"` AND `conclusion ∈ {"success", "sk
 A check that has never run is absent from the list; the Engine treats an absent check as red
 (conservative: not yet green).
 
-`last_dispatch_run_at(pr_ref)` returns harness-world data (when the most recent
-`HarnessPort.dispatch` run started for this PR's branch). It is placed on `ForgePort`
-because the concrete GitHub adapter reads this via the GitHub Actions Workflow Runs API —
-a forge-native endpoint. The placement is intentional; do not move it to `HarnessPort`
+`last_dispatch_run_at` — placed on `ForgePort` because GitHub exposes it via the Actions
+Workflow Runs API (a forge-native endpoint), not the harness. Do not move to `HarnessPort`
 without a human decision.
 
-`RunHandle` is a value type serialisable to/from a stable string `run_id`. The serialisation
-round-trip must be lossless: `RunHandle.from_run_id(h.run_id) == h`. `run_id` is the form
-stored in the DB and passed to `SessionPort` methods.
+`RunHandle` — value type serialisable to/from a stable string `run_id`; round-trip must
+be lossless: `RunHandle.from_run_id(h.run_id) == h`. `run_id` is stored in the DB and
+passed to `SessionPort` methods.
 
 ### §9.2 HarnessPort
 
@@ -817,104 +765,45 @@ the post-cancel state as "no longer in-flight" and proceeds immediately.
 
 ```
 DispatchContext {
-  # Entity context (one of the following)
-  issue_ref:   IssueRef | None
-  pr_ref:      PRRef    | None
+  issue_ref:          IssueRef | None
+  pr_ref:             PRRef    | None
+  contract:           string                     # agents/*.md path
+  model:              string                     # from route_entry
+  max_turns:          int                        # from route_entry
 
-  # Agent selection
-  contract:    string          # path to orchestration-agent contract file (agents/*.md)
+  # Harness injects an ephemeral forge token scoped to this value (I3 / D1):
+  #   "repo-comment" — triager only: read repo + post comments; CANNOT add labels,
+  #                    create/close PRs, trigger workflows, or write code.
+  #   "repo-branch"  — all other agents: read/write own branch and PR.
+  # Operator credentials (FORGE_TOKEN, HARNESS_API_KEY) are NEVER injected.
+  # SEALED: any field not in this list MUST NOT be passed to harness.dispatch;
+  # the adapter MUST reject unrecognised fields (schema sealing enforces I3).
+  forge_token_scope:  "repo-comment" | "repo-branch"
 
-  # Run parameters
-  model:       string          # from route_entry
-  max_turns:   int             # from route_entry
-
-  # Credential scope (D1 / I3)
-  # The harness injects an ephemeral forge token whose scope depends on the agent type:
-  #   "repo-comment" — triager only; may read the repo and post comments; CANNOT add
-  #                    labels, create/close PRs, trigger workflows, or write code. This
-  #                    is the narrowest scope the forge platform supports for write access.
-  #   "repo-branch"  — implementer, orchestrator, reviewer, fixer; may read/write the
-  #                    agent's own branch and PR (gh pr ready, add_label, create_pr, etc.).
-  #
-  # The orchestrator's FORGE_TOKEN, HARNESS_API_KEY, and operator-level credentials are
-  # NEVER injected. PortProvider holds those and never surfaces them here.
-  #
-  # SEALED SCHEMA: no field outside this list may be added to DispatchContext. Any field
-  # not listed here MUST NOT be passed to harness.dispatch. The harness adapter MUST
-  # reject DispatchContext objects containing unrecognized fields. This is the mechanical
-  # enforcement of I3 — a field-name check alone is insufficient; schema sealing prevents
-  # credential leakage under any field name.
-  forge_token_scope: "repo-comment" | "repo-branch"   # literal; harness reads this to issue the correct token
-
-  # Specialist spawn allow-set (D2 / I9)
-  # Set by the Engine before dispatching any reviewer or fixer. The harness MUST
-  # reject any sub-agent spawn whose AgentRef is not in this list.
-  #
-  # Semantics of None:
-  #   None  → no harness-level allow-set restriction. The harness MUST NOT reject
-  #            sub-agent spawns solely because allowed_agent_refs is absent.
-  #            Contract-level I9 enforcement applies instead (agent contract forbids
-  #            constructing AgentRef from contributor-supplied text).
-  #            Used for implementer and orchestrator dispatches where the implementer
-  #            may spawn specialist sub-agents from the pack (see agents/implementer.md §2).
-  #   list  → harness MUST reject any spawn whose AgentRef is not in this list.
-  #            Used for converge reviewer/fixer dispatches (D2).
-  #
-  # The two cases address different threat models:
-  #   - Converge: the diff is contributor-controlled content that could inject
-  #     adversarial AgentRef strings to steer specialist selection; harness-level
-  #     enforcement is required.
-  #   - Implementer/orchestrator: AgentRef selection is from a hardcoded routing
-  #     table in the contract; contract-level I9 ("never construct from contributor
-  #     text") is sufficient.
+  # Harness MUST reject sub-agent spawns whose AgentRef is not in this list (I9 / D2).
+  # None → no harness-level restriction (implementer/orchestrator dispatches; I9 enforced
+  #         by agent contract instead). list → reject out-of-set spawns (converge dispatches,
+  #         where contributor-controlled diff content could inject adversarial AgentRefs).
   allowed_agent_refs: list[AgentRef] | None
 }
 ```
 
-**Triager dispatch:** use `forge_token_scope: "repo-comment"` (narrowest write scope).
-**All other dispatches:** use `forge_token_scope: "repo-branch"`.
+**Triager dispatch:** use `forge_token_scope: "repo-comment"`. **All others:** `"repo-branch"`.
 
-**Allowlist injection for the triager.** The triager contract requires the configured
-allowlist to report admit/queue status in its structured comment. The harness injects the
-allowlist via an `ALLOWLIST` environment variable in the sandbox (comma-separated
-usernames). `DispatchContext` does not carry the allowlist directly (it would be visible
-to the agent as a prompt field and could be confused with an instruction); the harness
-reads it from `RepoConfig` at dispatch time and sets `ALLOWLIST` in the sandbox
-environment alongside the forge token.
+**Allowlist injection for the triager.** The harness injects the allowlist via an `ALLOWLIST`
+environment variable in the sandbox (comma-separated). `DispatchContext` does not carry it
+directly (to prevent confusion with an instruction); the harness reads it from `RepoConfig`
+at dispatch time.
 
-> **Security note (I3 / D1).** The sandbox credential is an ephemeral, repo-scoped token
-> sufficient for the agent to read/write its own branch and PR — the minimum needed for
-> `gh pr ready`, `create_pr`, `add_label`, and similar operations. It does NOT include the
-> orchestrator's service `FORGE_TOKEN`, `HARNESS_API_KEY`, or any multi-repo operator
-> credentials. The `PortProvider` holds those and never surfaces them via `DispatchContext`.
+**Depth-1 rule.** Measured from the dispatching *orchestration agent* (reviewer/fixer),
+not from the Engine. Orchestration agents may spawn fix-specialists (`subagent_type:
+"general-purpose"`) at depth-1; fix-specialists are leaves and must not spawn further
+sub-agents. Orchestration agents must never spawn another orchestration agent.
 
-> **Security note (I9 / D2).** The Engine computes `allowed_agent_refs =
-> decide_specialists(changed_paths, round)` and sets it in `DispatchContext` before
-> dispatching the reviewer. The harness adapter **must** enforce this list: any sub-agent
-> spawn by the reviewer or fixer with an `AgentRef` not in `allowed_agent_refs` must be
-> rejected with an error, not silently allowed. This mechanises I9 for converge dispatches —
-> contributor-injected text in the diff cannot steer the spawn even if the reviewer LLM is
-> deceived. When `allowed_agent_refs` is `None` (implementer/orchestrator dispatches),
-> harness-level enforcement is disabled; I9 is enforced via agent contract discipline.
-
-Specialists are spawned by orchestration agents (reviewer/fixer) via `dispatch`, using the
-`allowed_agent_refs` gate. `AgentRef` values come only from `decide_specialists` output
-(invariant I9).
-
-**Depth-1 rule.** Depth is measured from the dispatching *orchestration agent*, not from
-the Engine. An orchestration agent (reviewer, fixer) may spawn fix-specialists
-(`subagent_type: "general-purpose"`) — those are depth-1 from the orchestration agent
-(depth-2 from the Engine). Fix-specialists must not spawn further sub-agents — they are
-the leaf level. An orchestration agent must never spawn another orchestration agent.
-Implementer/orchestrator dispatches are depth-0 from the Engine; they may spawn pack
-specialists at depth-1 from themselves.
-
-**`SpawnDenied` error.** When the harness rejects an out-of-allow-set spawn attempt, it
-raises `SpawnDenied(attempted: AgentRef, allowed: list[AgentRef])`. This error type must
-be importable from the harness adapter module. `FakeHarnessPort` exposes a
-`simulate_spawn_attempt(agent_ref: AgentRef)` method that raises `SpawnDenied` if
-`agent_ref` is not in the current `DispatchContext.allowed_agent_refs` (or never raises
-if `allowed_agent_refs` is `None`).
+**`SpawnDenied` error.** Raised by the harness on an out-of-allow-set spawn:
+`SpawnDenied(attempted: AgentRef, allowed: list[AgentRef])`. `FakeHarnessPort` exposes
+`simulate_spawn_attempt(agent_ref)` which raises `SpawnDenied` if `agent_ref` is not in
+`DispatchContext.allowed_agent_refs` (never raises when `allowed_agent_refs` is `None`).
 
 ### §9.3 SessionPort
 
@@ -992,18 +881,15 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
 2a. **Protected-path check** — `changed_paths` vs `PROTECTED_PATHS`. On match:
    `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
    `converge_state.clear_converge_state(pr_ref)` → return `ESCALATED` (P6, E1).
-   _Note: `clear_converge_state` is called here so that if the PR is later de-escalated
-   via P16 (deescalate_pr), the converge loop restarts at R1 rather than a stale round.
-   Engine.converge will re-check PROTECTED_PATHS on re-entry and immediately re-escalate
-   if the protected-path change is still present._
-3. **EMPTY check** — `len(changed_paths) == 0` AND PR is not draft (ready/converging):
+   (`clear_converge_state` ensures P16 de-escalation restarts at R1; on re-entry the check
+   fires again immediately if the protected-path change is still present.)
+3. **EMPTY check** — `len(changed_paths) == 0` AND PR is not draft:
    `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-   `converge_state.clear_converge_state(pr_ref)` → return `ESCALATED` (P14, E6).
-   _D4: A finished agent must never produce a 0-diff PR. No re-dispatch; human reviews why._
-4. **Converge loop** (rounds 1–`CONVERGE_ROUNDS`). This loop runs inside one converge job
-   (P7), legitimately awaiting its own spawned agents and polling CI. The Engine persists
-   round state (including `round_started`) to the `ConvergeStateStore` after each
-   advancing decision so RC-3 re-arm (P13) can resume at the correct round:
+   `converge_state.clear_converge_state(pr_ref)` → return `ESCALATED` (P14, E6). _(D4)_
+4. **Converge loop** (rounds 1–`CONVERGE_ROUNDS`). Runs inside one converge job (P7),
+   awaiting its own spawned agents and polling CI. Round state persists to
+   `ConvergeStateStore` after each advancing decision so RC-3 re-arm (P13) resumes
+   at the correct round:
    a. Determine start round: `start = converge_state.get_converge_round(pr_ref) + 1`
       (returns `0` if unset → `start = 1`).
       Initialize `accumulated_nits: list[str] = []` — collects nits across all rounds for
@@ -1042,58 +928,37 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         history file for WEBUI and the next reviewer to diff against).
    c. Act on token:
 
-   > **Escalation write ordering (normative).** For all escalation tokens (`no-progress`,
-   > `no-verdict` at cap, `ci-red` fail, `cap-reached`, fixer-timeout): the forge label
-   > write (`forge.add_label(pr, LABEL_NEEDS_HUMAN)`) MUST precede the DB mutations
-   > (`counter.reset`, `clear_converge_state`). This ordering ensures crash-safety: if the
-   > process crashes between the label write and the DB mutations, the reconciler sees
-   > `LABEL_NEEDS_HUMAN` and ignores the PR. If the process crashes before the label write,
-   > the stale `converge` label causes RC-3 to re-arm — the engine re-enters, re-evaluates,
-   > and re-escalates. A stale `ConvergeState` round after a partial escalation (label
-   > written, DB not cleared) is recovered by `deescalate_pr`, which calls
-   > `clear_converge_state` to reset converge state before P16/P17 recovery begins.
+   > **`terminal_escalate(Ecode)` — normative shorthand used below:**
+   > `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
+   > `await counter.reset(pr_ref, "converge-retry")`;
+   > `converge_state.clear_converge_state(pr_ref)` → return `ESCALATED (P10, Ecode)`.
+   > **Write order is normative:** label write MUST precede DB mutations. On a crash after
+   > the label write, the reconciler sees `LABEL_NEEDS_HUMAN` and skips the PR. On a crash
+   > before it, RC-3 re-arms and the engine re-enters and re-escalates. A stale
+   > `ConvergeState` left by a partial escalation is recovered by `deescalate_pr` (§11.3).
 
       - `approve` → add `LABEL_READY`, remove `LABEL_CONVERGE`, post approving review;
-        `forge.create_issue(repo, "Converge follow-up nits", body)` where `body` is the
-        deduplicated text of `accumulated_nits` (deduplicated by exact string equality,
-        first-seen order preserved; omit `create_issue` if `accumulated_nits` is empty after
-        deduplication);
-        `await counter.reset(pr_ref, "converge-retry")`;
+        `forge.create_issue(repo, "Converge follow-up nits", body)` where `body` is
+        `accumulated_nits` deduplicated by exact string equality, first-seen order (omit
+        if empty); `await counter.reset(pr_ref, "converge-retry")`;
         `converge_state.clear_converge_state(pr_ref)` → `APPROVED` (P8).
-      - `fix` (R1/R2) → build fixer `DispatchContext` with `allowed_agent_refs = specialist_refs`,
-        `forge_token_scope = "repo-branch"`;
-        `harness.dispatch(fixer_context)` → `fixer_handle`;
-        **Await fixer**: poll `harness.get_run_status(fixer_handle)` until `completed` or
-        `CI_WAIT_S` elapses; on timeout: `await harness.cancel(fixer_handle)`;
-        `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-        `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)`; return `ESCALATED` (P10, E11);
-        advance to next round.
-      - `escalate:no-progress` → `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-        `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)` → `ESCALATED` (P10, E2).
+      - `fix` (R1/R2) → build fixer `DispatchContext` (`allowed_agent_refs = specialist_refs`,
+        `forge_token_scope = "repo-branch"`); `harness.dispatch(fixer_context)` → `fixer_handle`;
+        **Await fixer**: poll until `completed` or `CI_WAIT_S` elapses; on timeout:
+        `await harness.cancel(fixer_handle)`; `terminal_escalate(E11)`.
+        If fixer completes in time: advance to next round.
+      - `escalate:no-progress` → `terminal_escalate(E2)`.
       - `escalate:no-verdict` → `retry_count = await counter.get_count(pr_ref, "converge-retry")`;
         if `retry_count < NO_VERDICT_RETRY_CAP`: post re-arm comment
-        (audit marker: `<!-- orchestrator:converge-retry -->`);
+        (`<!-- orchestrator:converge-retry -->`);
         `await counter.increment(pr_ref, "converge-retry")`; do NOT persist round;
-        re-arm (P11) by returning — RC-3 or a direct trigger resumes at the same round;
-        else `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-        `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)` → `ESCALATED` (P10, E3).
-      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll **all `BLOCKING_CI_CHECKS`** up
-        to `CI_WAIT_S`; if all green → execute the full **`approve` token actions** (same
-        as P8): add `LABEL_READY`, remove `LABEL_CONVERGE`, post approving review, create
-        follow-up nit issue if `accumulated_nits` non-empty,
-        `await counter.reset(pr_ref, "converge-retry")`,
-        `converge_state.clear_converge_state(pr_ref)` → `APPROVED` (P9);
-        else `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-        `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)` → `ESCALATED` (P10, E4).
-      - `escalate:cap-reached` → `forge.add_label(pr, LABEL_NEEDS_HUMAN)`;
-        `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)` → `ESCALATED`
-        (P10, E5). _D3: Work is never discarded. The human decides whether to clear the
-        label and continue converging, or close the PR._
+        return — RC-3 or a direct trigger resumes at the same round (P11);
+        else `terminal_escalate(E3)`.
+      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll **all `BLOCKING_CI_CHECKS`**
+        up to `CI_WAIT_S`; if all green → execute full `approve` token actions (P9:
+        add `LABEL_READY`, remove `LABEL_CONVERGE`, post review, nit issue if non-empty,
+        counter.reset, clear_converge_state) → `APPROVED`; else `terminal_escalate(E4)`.
+      - `escalate:cap-reached` → `terminal_escalate(E5)`. _(D3: work never discarded.)_
 
 ### §10.3 `Engine.reconcile`
 
@@ -1142,10 +1007,6 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 5. `queue` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic set; I7)
    → issue appears in PWA triage queue.
 
-> **Step-order note.** `decide_intake` (step 1) runs before the triager dispatch (step 3)
-> so the decision is available to write to the audit log synchronously. The triager is
-> dispatched after the decision is made and logged; it does not influence `decide_intake`.
->
 > **I6 human-promotion audit.** `OrchestratorService.promote` (§11.3) must also write a
 > `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot: list<string>}`
 > audit record to the DB when a human promotes an issue from `AWAITING_PROMOTION` to
@@ -1172,10 +1033,7 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 | cron tick | — | — | `Engine.reconcile` per enabled repo |
 | anything else | — | — | no-op |
 
-`synchronize` is safe because `Engine.converge` begins with the idempotency gate, which
-returns immediately for draft PRs. A `synchronize` event fired by the implementing agent's
-own commits (while the PR is still a draft) is therefore a no-op — it does not enter the
-converge loop.
+`synchronize` is safe: the idempotency gate returns immediately for draft PRs (§3, §10.2).
 
 ### §11.2 Configuration types
 
@@ -1255,24 +1113,21 @@ per-entity advisory lock before mutating labels. Steps:
     dispatch, consistent with the `admit` path in `Engine.intake` step 4);
 (4) write audit record `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot}` to DB;
 (5) release lock.
-Steps (3) and (4) must both complete before releasing the lock. If step (3) fails, do not
-write the audit record. If step (4) fails after a successful step (3), the label state is
-correct but the audit trail is incomplete — surface an error to the operator.
+If step (3) fails, do not write the audit record. If step (4) fails after a successful
+step (3), surface an error to the operator (label state is correct; audit trail incomplete).
 
 **`deescalate_pr` steps** (P16/P17): removes `LABEL_NEEDS_HUMAN` from a PR so the
 reconciler can recover it (RC-1 → P17 BUILDING; RC-3 → P16 CONVERGING). Steps:
 (1) acquire per-entity advisory lock on `pr_ref`;
 (2) read current PR labels for audit record (before removing label);
 (3) `await forge.remove_label(pr_ref, LABEL_NEEDS_HUMAN)`;
-(4) `await counter.reset(pr_ref, "stale-pr")` — clears stale-pr counter so RC-1 does
-    not immediately re-escalate (P17-stale-counter-trap);
-    `await counter.reset(pr_ref, "converge-retry")` — ensures any prior no-verdict retry
-    count does not immediately exhaust retries on next converge entry after P16 recovery;
-    `await converge_state.clear_converge_state(pr_ref)` — resets the persisted converge
-    round to 0 so the next converge loop entry (after P16/P17 recovery) starts at R1.
-    This is essential when the escalation that triggered `deescalate_pr` left a stale
-    `ConvergeState` because the label write succeeded but `clear_converge_state` was not
-    reached before a crash. Without this call, P16 recovery would resume at a stale round;
+(4) `await counter.reset(pr_ref, "stale-pr")` — prevents RC-1 from immediately
+    re-escalating after P17 recovery;
+    `await counter.reset(pr_ref, "converge-retry")` — prevents exhausting retries
+    on next converge entry after P16 recovery;
+    `await converge_state.clear_converge_state(pr_ref)` — resets persisted converge round
+    to 0 so next converge entry starts at R1 (guards against stale ConvergeState left
+    by a partial escalation where `clear_converge_state` was not reached before a crash);
 (5) write audit record to DB:
     `{event: "deescalate_pr", pr_ref, operator, timestamp,
       escalation_cause: str | None,      # E-code or None if not determinable
@@ -1281,14 +1136,8 @@ reconciler can recover it (RC-1 → P17 BUILDING; RC-3 → P16 CONVERGING). Step
     de-escalation time for forensics (enables post-hoc review of which escalation type
     was operator-cleared);
 (6) release lock.
-This call may be made for any escalation type, including E1 (protected-path). For E1,
-`Engine.converge` re-checks PROTECTED_PATHS on the next converge entry and immediately
-re-escalates if the protected-path change is still present.
-For P16 (PR carries `converge`): RC-3 re-arms the PR on its next tick.
-For P17 (PR carries `agent:implementing`, no `converge`): RC-1 recovers the PR once the
-staleness threshold elapses from the last dispatch run's start time (up to
-`STALE_DRAFT_THRESHOLD_S` = 20 minutes after the last implementing-agent run).
-No label is added by this call; the reconciler recovers the PR via its label state alone.
+No label is added; the reconciler recovers via label state alone. For E1, `Engine.converge`
+re-checks PROTECTED_PATHS on re-entry and immediately re-escalates if still present.
 
 ---
 
@@ -1366,16 +1215,12 @@ Helm Lint, or Helm Kubeconform could be auto-approved (P9). `Engine.converge §1
 4g now polls all `BLOCKING_CI_CHECKS` (§7) before approving. The negative test
 `test_converge_ci_red_docker_still_red_escalates` locks in the corrected behaviour.
 
-**OQ-2: `MAX_REDISPATCHES` was duplicated in three places** in the reference bash
-scripts. It is now single-sourced here. Never hardcode `2` in implementation code.
-D3 removed the re-dispatch branch from cap-reached; `decide_cap_action` now always returns
-`escalate`. `MAX_REDISPATCHES` is retained as a named constant — do not inline `2`.
-
-**OQ-3: Three redispatch caps** existed in the original design: `MAX_REDISPATCHES = 2`
-(converge re-dispatch, now removed by D3), `RECONCILER_STALE_REDISPATCH_CAP = 3` (RC-1),
-`ISSUE_REDISPATCH_CAP = 3` (RC-4). After D3, only the two reconciler caps remain active.
-`MAX_REDISPATCHES` is retained for `decide_cap_action` tests. Do not unify or remove
-constants without a human decision.
+**OQ-2/OQ-3: `MAX_REDISPATCHES`** was duplicated in three places in the reference bash
+scripts; it is now single-sourced here. D3 removed the re-dispatch branch from
+`decide_cap_action`; it now always returns `escalate`. The two active reconciler caps are
+`RECONCILER_STALE_REDISPATCH_CAP = 3` (RC-1) and `ISSUE_REDISPATCH_CAP = 3` (RC-4).
+`MAX_REDISPATCHES` is retained for `decide_cap_action` tests. Never hardcode `2`; never
+unify or remove these constants without a human decision.
 
 **OQ-4: `COMPLIANCE.md`** is in `PROTECTED_PATHS` but has not been authored yet. Its
 presence in the list is intentional — it reserves the slot. See `SECURITY.md` for the

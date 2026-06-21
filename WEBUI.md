@@ -9,9 +9,8 @@ installable Progressive Web Application served by the orchestrator process itsel
 binary handles forge webhooks, drives the agent pipeline, and serves PWA static assets at
 `/` and the control-plane API at `/api/*`.
 
-The PWA speaks the same control-plane API as the CLI. Every `OrchestratorService` method
-is reachable from the UI. Operators should be able to stand up, configure, monitor, and
-intervene in the full pipeline without touching the CLI.
+The PWA speaks the same control-plane API as the CLI — operators can stand up, configure,
+monitor, and intervene without touching the CLI.
 
 **Primary mobile use cases**: triage approvals and escalation acknowledgment on a phone.
 **Desktop**: configuration and log inspection.
@@ -211,15 +210,13 @@ CI status at decision time, `decide_round` token.
 
 **Escalation section:** escalation cause code (E1–E10) with plain-language description;
 "Open on forge", "Re-queue" (removes `LABEL_NEEDS_HUMAN`, adds `LABEL_AGENT_WORK` on
-linked issue, only when closing issue exists and cause supports re-queueing), "Acknowledge
-/ close", **"Resume"** (shown when the PR carries `converge` OR `agent:implementing` label
-— i.e. P16/P17 eligible by label state; calls
-`POST /api/prs/:owner/:repo/:number/deescalate` → `OrchestratorService.deescalate_pr`;
-removes `LABEL_NEEDS_HUMAN` from the PR, resets stale-pr and converge-retry counters, and
-writes an audit record; the reconciler recovers the PR on its next tick (P16 via RC-3) or
-within `STALE_DRAFT_THRESHOLD_S` (P17 via RC-1); requires operator confirmation.
-_Note:_ For E1 (protected-path) escalations, the Engine re-checks PROTECTED_PATHS on
-converge re-entry and immediately re-escalates if the change is still present.).
+linked issue; only when closing issue exists and cause supports re-queueing), "Acknowledge
+/ close", **"Resume"** — shown when PR carries `converge` OR `agent:implementing` (P16/P17
+eligible); calls `POST /api/prs/:owner/:repo/:number/deescalate` →
+`OrchestratorService.deescalate_pr`; removes `LABEL_NEEDS_HUMAN`, resets stale-pr and
+converge-retry counters, writes audit record; reconciler recovers on next tick (P16 via
+RC-3) or within `STALE_DRAFT_THRESHOLD_S` (P17 via RC-1); requires confirmation. _Note:_
+E1 escalations re-escalate immediately if the protected-path change is still present.
 
 Cancellation and intervention do not alter forge label state; the entity remains in its
 last-written state and the reconciler recovers it on the next tick.
@@ -319,9 +316,8 @@ All endpoints except `POST /api/auth` require a valid JWT or session cookie.
 | `GET` | `/api/push/subscriptions` | List all subscriptions for current operator |
 | `POST` | `/api/push/test` | Send test push to current device |
 
-Promote and decline audit records must capture: operator username, issue ref, action,
-timestamp, and `RepoConfig.allowlist` state at decision time (satisfies `SECURITY.md §3
-I6`).
+Promote and decline audit records capture: operator, issue ref, action, timestamp, and
+allowlist state at decision time (`SECURITY.md §3 I6`).
 
 ---
 

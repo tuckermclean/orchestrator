@@ -99,25 +99,14 @@ port implementations (`TESTING.md §3.1`).
 
 ## Step 3.5 — You must never finish with an empty diff
 
-**D4 rule: An implementer that produces a 0-diff result must escalate, not hand back.**
+**D4 rule.** If you reach the end with zero files modified or created: post a comment on
+the PR explaining why (ambiguous issue, blocked dependency, PROTECTED_PATHS, etc.), then
+terminate without calling `gh pr ready`. A 0-diff PR escalates in `Engine.converge`
+(`SPEC.md §10.2 step 3`).
 
-If you reach the end of your implementation pass and have made no changes at all — zero
-files modified, zero files created — you must not return control to the orchestrator as
-if the work is done. A 0-diff PR that reaches `Engine.converge` always escalates to
-`needs-human` (`SPEC.md §10.2 step 3`).
-
-Instead:
-1. Post a comment on the PR explaining why you could not make any changes (ambiguous
-   issue, blocked on a dependency, the change would require modifying PROTECTED_PATHS, etc.).
-2. Terminate without calling `gh pr ready`. The orchestrator will see your comment and can
-   decide whether to escalate or attempt a different approach.
-
-**Commit incrementally.** Make your first real commit as soon as you have any working
-change, however small — before running all tests, before the full gate is green. This
-ensures that if your run is interrupted mid-work, the reconciler finds real progress on
-the branch instead of an empty diff (`SPEC.md §4 RC-1`). An empty-branch crash results in
-a stale-draft re-dispatch; a branch with partial commits gives the human operator
-something useful to review if the re-dispatch also fails.
+**Commit incrementally.** Make your first commit as soon as any working change exists —
+before the full gate is green. An empty branch on crash → stale-draft re-dispatch; a
+branch with partial commits gives the operator something to review (`SPEC.md §4 RC-1`).
 
 ## Step 4 — Gate must be green before handing back
 
@@ -174,13 +163,9 @@ responsibility.
 
 ## What Is Out of Scope
 
-- Refactoring code unrelated to the issue
-- Fixing pre-existing test failures unrelated to your change (file a separate issue)
-- Adding features not requested in the issue
-- Modifying `PROTECTED_PATHS` files
-- Adding new dependencies without flagging them as `external-dep-change` to the
-  orchestrator
-- Writing end-to-end tests against a live forge or harness (`TESTING.md §8`)
+Refactoring unrelated code; fixing pre-existing test failures (file a separate issue);
+features not in the issue; touching `PROTECTED_PATHS`; adding dependencies without
+flagging `external-dep-change`; writing tests against a live forge or harness.
 
 
 ## Cross-References

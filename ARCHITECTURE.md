@@ -16,12 +16,10 @@ recovers stranded entities on the next tick. The harness is single-shot: `Harnes
 returns immediately. Durability comes from agents committing early and often, not from
 in-process waiting.
 
-**Reconciler recovery scope.** The reconciler covers all stranded implementing PRs — not just
-drafts (B8a: RC-1 scope includes any PR with `agent:implementing` that lacks `converge` or
-terminal labels). Finished empty-diff PRs (non-draft, 0 diff) escalate to `needs-human` rather
-than re-dispatching (D4). Crash-draft 0-diff PRs (agent died before committing) are eligible
-for RC-1 re-dispatch. Stuck converge (cap-reached after 3 rounds) always escalates to
-`needs-human` on the same PR — work is never discarded by opening a fresh PR (D3).
+**Reconciler recovery scope.** RC-1 covers all PRs with `agent:implementing` lacking `converge`
+or terminal labels (not just drafts — B8a). Non-draft 0-diff PRs → `needs-human` (D4);
+crash-draft 0-diff PRs → eligible for re-dispatch. Cap-reached converge always escalates on the
+same PR — work is never discarded by opening a fresh PR (D3).
 
 The engine is forge-agnostic and harness-agnostic. The GitHub integration and
 `anthropics/claude-code-action` harness are today's implementations of abstract port
@@ -83,11 +81,8 @@ every state-machine transition in `SPEC.md §3–§6`. Holds no durable in-proce
 **ForgePort** — only component that knows forge-native concepts (GitHub API, labels, CI checks).
 A GitLab or Gitea adapter satisfies the same interface with no engine changes.
 
-**HarnessPort** — single-shot dispatch. Returns `RunHandle` immediately. The sandboxed agent
-environment receives only an ephemeral, repo-scoped forge token (sufficient for the agent's
-own branch/PR). The orchestrator's `FORGE_TOKEN`, `HARNESS_API_KEY`, and operator-level
-credentials are held by `PortProvider` only and are never present in `DispatchContext` (I3,
-`SECURITY.md §3`, `SPEC.md §9.2 DispatchContext`).
+**HarnessPort** — single-shot dispatch. Returns `RunHandle` immediately. Operator credentials
+are held by `PortProvider` only and never present in `DispatchContext` (I3, D1, `SPEC.md §9.2`).
 
 **SessionPort** — observability seam. Does not alter forge label state; cancellation leaves the
 entity in its last-written state for the reconciler to recover.
@@ -106,27 +101,24 @@ management. Specified in `WEBUI.md`.
 | **Orchestration agents** | `agents/*.md` in this repo | The operator | `/app/agents/*.md` | Contract file path |
 | **Specialist pack** | External SHA-pinned repo | Pack upstream | `/app/.agents/*.md` (flattened) | `AgentRef` (flat filename) |
 
-**Orchestration agents** are the five runtime contracts: triager, orchestrator, implementer,
-converge-reviewer, converge-fixer. Authored and versioned here.
+**Orchestration agents** — five runtime contracts (triager, orchestrator, implementer,
+converge-reviewer, converge-fixer), authored here.
 
-**Specialist agents** come from `https://github.com/msitarzewski/agency-agents` (default), fetched
-and flattened into the container image at build time (see §5). The operator does not author
-specialists. Specialists are spawned with `subagent_type: "general-purpose"` and the prompt
-`"Act as the agent defined in .agents/<AgentRef>. Read that file first."` Depth-1 only.
+**Specialist agents** — fetched from `https://github.com/msitarzewski/agency-agents` at build
+time, baked flat into the image (see §5). Operator does not author them. Spawned depth-1 via
+`subagent_type: "general-purpose"` with `"Act as the agent defined in .agents/<AgentRef>.
+Read that file first."`.
 
-`decide_specialists` (`SPEC.md §8.12`) maps a PR's diff to the set of `AgentRef`s for a round,
-always including the base set (security + code-quality reviewers), adding routing-matched
-specialists, capped at `PARALLEL_SPECIALIST_CAP = 4`.
-
-Both `agents/**` and `.agents/**` are `PROTECTED_PATHS` entries. Any PR touching them short-
-circuits to E1 / `needs-human` before any specialist runs.
+`decide_specialists` (`SPEC.md §8.12`) builds the `AgentRef` set per round: base set (security
++ code-reviewer) always included; routing additions capped at `PARALLEL_SPECIALIST_CAP = 4`.
+Both `agents/**` and `.agents/**` are PROTECTED_PATHS; any PR touching them → E1/`needs-human`.
 
 ---
 
 ## §3 Public-Issue Intake Front-Stage
 
-Intake is purely additive: it does not alter I1–I6/P1–P17. Its purpose is to gate which public
-issues reach the core machine and ensure every admitted issue has a structured triage comment.
+Intake is purely additive (does not alter I1–I6/P1–P17): gates which public issues reach the
+core machine and ensures a structured triage comment for each.
 
 **Flow:**
 
@@ -181,11 +173,9 @@ Issue and PR states are derived at runtime from forge labels via `derive_issue_s
 `derive_pr_state` (`SPEC.md §8.10`). Any process that can read the forge can reconstruct the
 full pipeline lifecycle state — no separate state store needed for entity-state correctness.
 
-**Verdict files on the PR branch:** The live verdict for the current round is `.converge-verdict.json`.
-After each completed round, the Engine copies it to `.converge-verdict-rN.json` (e.g.
-`.converge-verdict-r1.json`) for per-round history (B3, `SPEC.md §10.2`). The WEBUI reads
-`.converge-verdict-rN.json` files for historical round data. The next reviewer reads
-`.converge-verdict-r{N-1}.json` to compare with the current round's output.
+**Verdict files on the PR branch:** `.converge-verdict.json` is the live verdict. After each
+round the Engine copies it to `.converge-verdict-rN.json` for history (B3, `SPEC.md §10.2`);
+WEBUI reads rN files for historical data; next reviewer reads `r{N-1}` to compare.
 
 ### What is stored
 
@@ -235,11 +225,9 @@ RUN git clone --no-tags --filter=blob:none ${AGENT_PACK_REPO_URL} /tmp/agency-ag
  && rm -rf /tmp/agency-agents
 ```
 
-> `--filter=blob:none` (blobless clone) reliably fetches any pinned SHA without shallow-clone
-> server-capability issues. The `rev-parse HEAD` assertion fails the build if checkout landed on
-> the wrong commit. The basename-collision guard fails loudly if the pack ever introduces two
-> `*.md` files with the same name at different paths — keeping `.agents/` a guaranteed-flat
-> namespace. This snippet is canonical and must match `AGENTS.md §8 Phase 7`.
+> `--filter=blob:none` fetches reliably at any pinned SHA. The `rev-parse HEAD` assertion fails
+> the build on wrong commit. The basename-collision guard fails loudly on duplicate names, keeping
+> `.agents/` flat. Canonical — must match `AGENTS.md §8 Phase 7`.
 
 To update the pack SHA: review the diff at
 `https://github.com/msitarzewski/agency-agents/compare/<old>...<new>` before bumping.
@@ -420,10 +408,8 @@ Full threat catalog, actor taxonomy, and invariants are in `SECURITY.md`.
   triager agent has no credentials to advance the state machine; it can only post one comment.
 - **Default-deny intake gate.** When `RepoConfig.allowlist` is non-empty, `decide_intake` returns
   `queue` for unlisted authors. No code-writing agent is spawned until a human promotes the issue.
-- **Sandboxed harness runs.** The agent sandbox receives only an ephemeral, repo-scoped forge
-  token (sufficient for its own branch/PR). The orchestrator's `FORGE_TOKEN`, `HARNESS_API_KEY`,
-  and operator-level credentials are held by `PortProvider` only and never surfaced in
-  `DispatchContext` (I3, D1, `SPEC.md §9.2`).
+- **Sandboxed harness runs.** Sandbox receives an ephemeral, repo-scoped token only. Operator
+  credentials held by `PortProvider`; never in `DispatchContext` (I3, D1, `SPEC.md §9.2`).
 - **Protected-path short-circuit (E1).** Before any converge round begins, `Engine.converge`
   checks `forge.get_changed_files(pr)` against `PROTECTED_PATHS`. Any match → `LABEL_NEEDS_HUMAN`
   immediately. No specialist ever reviews a protected-path PR autonomously.

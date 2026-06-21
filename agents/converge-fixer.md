@@ -185,13 +185,8 @@ Commits should be in logical units. Do not squash all fixes into one commit.
 
 ## Step 8 — Do Not Re-Open Deferred Suggestions in R2
 
-In R2, your scope is blockers only. Do not:
-- Re-open suggestions from R1 that remain as suggestions in R2
-- Refactor code to address a suggestion that was not a blocker in R2's verdict
-- Expand scope beyond the specific blockers listed in `.converge-verdict.json`
-
-Suggestions not addressed in R1 or R2 will appear in the nit follow-up issue created
-at finalize time. They are not lost; they are deferred.
+In R2, blockers only. Do not re-open R1 suggestions, address non-blocker suggestions,
+or expand scope. Unaddressed suggestions appear in the nit follow-up issue at finalize.
 
 
 ## Step 9 — Terminate
@@ -210,14 +205,8 @@ Those are the reviewer's and engine's responsibilities.
 
 ## Scope Discipline
 
-Fix exactly what the blockers ask. Do not:
-- Refactor unrelated code
-- Fix pre-existing issues not listed as blockers
-- Add features
-- Touch `PROTECTED_PATHS` files (see Step 4)
-
-Each unrelated change you make expands the diff the next reviewer must inspect and
-risks introducing a new blocker. Minimal, targeted fixes converge faster.
+Fix exactly what the blockers list. Unrelated changes expand the diff and risk new
+blockers. Minimal, targeted fixes converge faster.
 
 
 ## Cross-References

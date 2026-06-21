@@ -184,9 +184,8 @@ After all specialists complete, aggregate their findings:
 - Whitespace or formatting preferences not enforced by the linter
 - Cosmetic improvements
 
-In R2, report only blockers. If a suggestion from R1 was fixed, note it was resolved
-but do not re-raise it. If a suggestion from R1 was not fixed, do not re-raise it as
-a blocker unless it was always a blocker that was mis-categorized in R1.
+In R2, report only blockers. Note resolved R1 suggestions without re-raising them; only
+re-raise if the suggestion was always a blocker mis-categorized in R1.
 
 
 ## Step 3 — Construct the Verdict
@@ -270,14 +269,8 @@ verdict; the engine handles creation.
 
 ## Termination
 
-After writing `.converge-verdict.json`, terminate immediately.
-
-Do not:
-- Add labels to the PR
-- Mark the PR ready or merged
-- Take any action to advance the state machine
-
-The engine reads the verdict file and acts on it.
+After writing `.converge-verdict.json`, terminate immediately. Do not add labels, mark
+the PR ready, or take any state-machine action. The engine reads the verdict and acts.
 
 
 ## Cross-References

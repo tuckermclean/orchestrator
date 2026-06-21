@@ -15,12 +15,9 @@ Every PR must satisfy all of the following before `gh pr ready` is called:
 2. Typecheck passes (`mypy --strict` for Python / `cargo check` for Rust).
 3. Lint passes (`ruff` for Python / `clippy` for Rust).
 
-These are internal gates. `BLOCKING_CI_CHECKS` (`SPEC.md §7`) is the list of CI check
-names asserted by the service's own CI pipeline; it includes the above plus Docker Build,
-Helm Lint, and Helm Kubeconform. Do not confuse the two: the gate above is
-"pass before marking PR ready"; `BLOCKING_CI_CHECKS` is "CI checks the converge loop
-verifies on the PR branch." Automated CI blocks merge. The converge reviewer raises missing
-tests or a failing gate as a **blocker**, not a nit.
+`BLOCKING_CI_CHECKS` (`SPEC.md §7`) adds Docker Build, Helm Lint, and Helm Kubeconform
+to the above — those are CI-pipeline gates; the list above is "pass before `gh pr ready`."
+A missing or failing test is a **blocker**, not a nit.
 
 ### §1.2 Test Pyramid
 
@@ -32,8 +29,7 @@ Layer 2 — Port contract tests (fake + real)        (§3)
 Layer 1 — Unit tests — decision functions          (§2)
 ```
 
-Build upward: Layer 1 before Layer 2 fakes exist, Layer 2 before Layer 3, etc.
-No layer touches the network. Layer 1 tests run in milliseconds.
+Build upward. No layer touches the network. Layer 1 tests run in milliseconds.
 
 ### §1.3 Coverage Requirement
 
@@ -99,10 +95,8 @@ Async; uses fake `ForgePort` (for `get_file_contents` and `list_comments`).
 | `test_resolve_blockers_json_blockers_null` | non-sentinel, `"blockers": null` | `unknown` (non-numeric → unknown) |
 | `test_resolve_blockers_json_blockers_string` | non-sentinel, `"blockers": "bad"` | `unknown` (non-numeric → unknown) |
 
-Key boundary: `round_started` timestamp scopes the footer search; stale footers from
-prior rounds must not bleed through. `round_started=None` disables scoping. Any present
-but non-numeric `blockers` value (null, false, string, float if platform rejects) returns
-`"unknown"` — the "missing/non-numeric" clause in §8.2 row 1 covers all such cases.
+`round_started` scopes footer search to current round; `None` disables scoping. Non-numeric
+`blockers` (null, false, string) → `"unknown"` (§8.2 row 1 "missing/non-numeric" clause).
 **Minimum: 13.**
 
 ### §2.4 `decide_round` — `SPEC.md §8.3`
@@ -134,11 +128,10 @@ Validation error tests (`test_decide_round_invalid_round_zero`, `test_decide_rou
 compile error (Rust). The "usage error, exit 2" bash convention is retired; typed function
 signatures enforce correctness at the call site.
 
-Key boundary: `unknown` blockers never produce `approve`. Empty `prev_sigs == curr_sigs
-== []` is NOT no-progress (row 3 requires `curr_sigs != []`). Row 3 (no-progress)
-fires before rows 5–7 even in round 3. `unknown` blockers with non-matching sigs produce
-`fix`, not `escalate:no-progress` — only matching sigs can trigger no-progress. `round`
-typed as `Literal[1,2,3]`; values outside this set raise `TypeError`. **Minimum: 23.**
+`unknown` blockers never produce `approve`. Empty `prev_sigs == curr_sigs == []` is not
+no-progress (row 3 requires `curr_sigs != []`). Row 3 fires before rows 5–7 even in R3.
+`unknown` + non-matching sigs → `fix` (only matching sigs trigger no-progress). `round`
+is `Literal[1,2,3]`; outside values raise `TypeError`. **Minimum: 23.**
 
 ### §2.5 `decide_cap_action` — `SPEC.md §8.4`
 
@@ -184,10 +177,9 @@ Arg order: `redispatch_count, ci_runs, has_converge, failing_count, has_issue, h
 | `test_stale_trigger_ci_beats_empty_pr` | `0,0,1,0,1,0,1` | `trigger-ci` |
 | `test_stale_usage_error` | (wrong arg count) | `TypeError` |
 
-Priority guard: crash-draft 0-diff (`has_diff=0, is_draft=1`) → `redispatch`/`needs-human`
-(rows 2.5a/b); non-draft 0-diff (`is_draft=0`) → always `needs-human` (row 2.5c). Rows 1
-and 2 beat all 2.5 variants. `redispatch_count == RECONCILER_STALE_REDISPATCH_CAP - 1`
-must not escalate; `== RECONCILER_STALE_REDISPATCH_CAP` must. **Minimum: 20.**
+0-diff + draft → `redispatch`/`needs-human` (rows 2.5a/b); 0-diff + non-draft → `needs-human`
+(row 2.5c). Rows 1 and 2 beat all 2.5 variants. Cap boundary: `count == CAP-1` must not
+escalate; `count == CAP` must. **Minimum: 20.**
 
 ### §2.7 `decide_rearm_action` — `SPEC.md §8.6`
 
@@ -212,8 +204,8 @@ Args: `(ci_runs: int, run: RunStatus | None, has_terminal: bool, seconds: int | 
 | `test_rearm_rearm_none_seconds` | `5, completed/success, False, None, False` | `rearm` |
 | `test_rearm_rearm_completed_failure` | `5, completed/failure, False, None, False` | `rearm` |
 
-`seconds == 299` → `skip-recent`; `== 300` → `rearm` (strictly `< REARM_RECENT_GUARD_S`).
-`queued` folds into `in_progress`. `has_terminal=True` beats recency. `has_needs_human=True` beats all other rows. **Minimum: 15.**
+Boundary: 299 → `skip-recent`; 300 → `rearm` (strictly `< REARM_RECENT_GUARD_S`). `queued`
+folds into `in_progress`. `has_terminal` beats recency; `has_needs_human` beats all. **Minimum: 15.**
 
 ### §2.8 `decide_conflict_action` — `SPEC.md §8.7`
 
@@ -424,10 +416,8 @@ in `tests/contracts/` parameterized over the implementation under test. Any new 
 
 ### §3.2a `ContractFixture` Arrange Protocol
 
-Both fake and real adapter must implement the `ContractFixture` arrange protocol so the
-shared contract suite can seed state for "failure injection" tests (e.g.
-`get_mergeable` returning `CONFLICTING`, `get_run_status` returning a failed run) without
-adapter-specific skips.
+Both fake and real adapters must implement `ContractFixture` so the shared suite can seed
+state for failure-injection tests without adapter-specific skips.
 
 ```python
 class ContractFixture(Protocol):
@@ -438,10 +428,8 @@ class ContractFixture(Protocol):
     def seed_file(self, pr_ref, path, content: bytes) -> None: ...
 ```
 
-The fake implements this directly on `FakeForgePort` / `FakeHarnessPort`. The real adapter
-implements it by creating objects in a test repository or test harness project (with teardown).
-No contract test uses adapter-specific skip logic — every test must pass against both fake
-and real.
+Fake: implements directly on `FakeForgePort` / `FakeHarnessPort`. Real: creates objects in
+a test repo or harness project (with teardown). Every test must pass against both.
 
 ### §3.3 `HarnessPort` Contract Suite — `SPEC.md §9.2`
 
@@ -493,10 +481,7 @@ implementation.
 | `test_counter_reset_returns_zero` | increment to 3; `reset` | `get_count` returns `0` |
 | `test_counter_atomic_increment_concurrent` | two concurrent `increment` calls on same key | final count = 2; no lost update |
 
-Key invariant: `increment` is atomic — concurrent calls must each observe a unique return
-value. The fake emulates this by acquiring a lock before modifying in-memory state.
-
-**Minimum: 7.**
+`increment` is atomic; concurrent calls each observe a unique return value (fake enforces via lock). **Minimum: 7.**
 
 ### §3.6 `ConvergeStateStore` Contract Suite — `SPEC.md §9.4`
 
@@ -665,10 +650,9 @@ These tests assert the invariants from `SECURITY.md §3`. A failing security tes
 | `test_security_protected_path_match_matrix` | I2/B1 | For each pattern in PROTECTED_PATHS and a set of matching/non-matching path strings (exercise `**`, `*`, bare filename semantics), assert `Engine.converge` escalates on match and proceeds on non-match; use `pathspec`-compatible matching |
 | `test_security_audit_log_decline` | I6 | Operator calls `OrchestratorService.decline(issue_ref, reason="out-of-scope")` → audit log entry contains `event="decline"`, operator username, issue ref, timestamp, and `reason` field; `LABEL_AWAITING_PROMOTION` removed; issue closed (`SPEC.md §3 I0c`) |
 
-`test_security_protected_path_all_patterns` must iterate over every entry in `SPEC.md §7
-PROTECTED_PATHS` by **programmatically reading the constant at test runtime** — never
-hardcode the entry count. If a new PROTECTED_PATHS entry is added without a matching test
-row in the match matrix, the coverage check fails.
+`test_security_protected_path_all_patterns` reads `SPEC.md §7 PROTECTED_PATHS`
+programmatically at runtime — never hardcode the count. A new entry without a match
+matrix row fails the coverage check.
 
 ---
 
@@ -770,13 +754,9 @@ markers and cross-references against a machine-readable coverage manifest
   # ... one entry per row in every §8 truth table ...
 ```
 
-**Rules:**
-- Every key in `coverage_map.yaml` must have ≥1 test name in its list.
-- Every test name in the list must exist in the test suite (else CI fails with "missing test").
-- When a new truth-table row is added to a `SPEC.md §8` function, a corresponding row
-  must be added to `coverage_map.yaml` and a `@covers`-marked test must be added. The CI
-  gate catches the gap: an uncovered row in `coverage_map.yaml` fails the build.
-- `coverage_map.yaml` is the implementation of the `TESTING.md §1.3` floor guarantee.
+**Rules:** Every key in `coverage_map.yaml` must have ≥1 named test that exists in the
+suite. A new `SPEC.md §8` row requires a new entry in `coverage_map.yaml` and a
+`@covers`-marked test — uncovered rows fail the CI build. This enforces the §1.3 floor.
 
 ---
 
