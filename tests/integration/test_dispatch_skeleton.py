@@ -102,3 +102,111 @@ async def test_dispatch_unknown_event_returns_none() -> None:
 
     assert handle is None
     assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_fixed_keyword() -> None:
+    """Dedup guard fires on 'fixed #N' (past-tense fix variant)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=12)
+
+    pr_ref = PRRef(repo=repo, number=2)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="fixed #12")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_closed_keyword() -> None:
+    """Dedup guard fires on 'closed #N' (past-tense close variant)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=5)
+
+    pr_ref = PRRef(repo=repo, number=3)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="closed #5")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_resolved_keyword() -> None:
+    """Dedup guard fires on 'resolved #N' (past-tense resolve variant)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=99)
+
+    pr_ref = PRRef(repo=repo, number=4)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="resolved #99")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_close_keyword() -> None:
+    """Dedup guard fires on bare 'close #N' keyword."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=7)
+
+    pr_ref = PRRef(repo=repo, number=5)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="close #7")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_fix_keyword() -> None:
+    """Dedup guard fires on bare 'fix #N' keyword."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=8)
+
+    pr_ref = PRRef(repo=repo, number=6)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="fix #8")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0
+
+
+async def test_dispatch_dedup_guard_resolve_keyword() -> None:
+    """Dedup guard fires on bare 'resolve #N' keyword."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    repo = RepoRef(owner="test", name="repo")
+    issue_ref = IssueRef(repo=repo, number=9)
+
+    pr_ref = PRRef(repo=repo, number=7)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], body="resolve #9")
+
+    engine = Engine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert handle is None  # skipped — PR already targets this issue
+    assert len(harness.dispatch_calls) == 0

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,10 +22,10 @@ from src.service.orchestrator import OrchestratorService
 
 def create_app(
     service: OrchestratorService,
-    lifespan: object | None = None,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
 ) -> FastAPI:
     """Create the FastAPI application, mounting static UI if built."""
-    app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)  # type: ignore[arg-type]
+    app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
 
     # CORS for dev (Vite dev server at :5173)
     app.add_middleware(

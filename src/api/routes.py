@@ -11,8 +11,6 @@ from fastapi.responses import StreamingResponse
 from src.domain.types import HealthReport, IssueRef, RepoRef, RunDetail, RunSummary, TriageItem
 from src.service.orchestrator import OrchestratorService
 
-router = APIRouter()
-
 # Default demo repo used in dev mode
 _DEV_REPO = RepoRef(owner="demo", name="repo")
 
@@ -35,7 +33,7 @@ def _make_router(service: OrchestratorService) -> APIRouter:
     @r.get("/api/runs/{run_id}/stream")
     async def stream_run(run_id: str) -> StreamingResponse:
         async def _generate() -> AsyncGenerator[str, None]:
-            async for event in service.session.stream_events(run_id):
+            async for event in service.stream_run(run_id):
                 payload = json.dumps(
                     {
                         "event_type": event.event_type,

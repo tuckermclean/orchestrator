@@ -357,7 +357,7 @@ Maps a forge event name to entry parameters.
 | 2 | `event ∈ {issue_comment, pull_request_review_comment}` | `claude-sonnet-4-6` | `30` |
 | 3 | else (unknown / empty) | `claude-sonnet-4-6` | `30` |
 
-`contract` = `orchestrator-contract.md` (constant across all branches). Exit 0 for all
+`contract` = `agents/orchestrator.md` (constant across all branches). Exit 0 for all
 inputs including unknown/empty.
 
 ### §8.2 `resolve_blockers`
@@ -571,6 +571,7 @@ Pure label→state projection functions. Synchronous. No I/O.
 `derive_issue_state(labels, closed)` → `IssueState`:
 - `closed == true` → `CLOSED` (beats all labels)
 - `needs-human ∈ labels` → `ESCALATED`
+- `awaiting-promotion ∈ labels` → `PENDING` (see §2 state table)
 - else → `QUEUED`
 
 `derive_pr_state(labels, draft, merged, changed_files)` → `PRState ∈ {MERGED, ESCALATED, APPROVED, EMPTY, CONVERGING, BUILDING}`:

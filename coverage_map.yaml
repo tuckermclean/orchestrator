@@ -23,9 +23,11 @@
 
 "§8.10":
   "derive_issue_state-closed":
-    tests: ["test_derive_issue_closed", "test_derive_issue_closed_beats_needs_human", "test_derive_issue_closed_beats_agent_work"]
+    tests: ["test_derive_issue_closed", "test_derive_issue_closed_beats_needs_human", "test_derive_issue_closed_beats_agent_work", "test_derive_issue_closed_beats_awaiting_promotion"]
   "derive_issue_state-escalated":
-    tests: ["test_derive_issue_escalated"]
+    tests: ["test_derive_issue_escalated", "test_derive_issue_needs_human_beats_awaiting_promotion"]
+  "derive_issue_state-pending":  # @covers §8.10 PENDING row (awaiting-promotion label)
+    tests: ["test_derive_issue_pending"]
   "derive_issue_state-queued":
     tests: ["test_derive_issue_queued_agent_work", "test_derive_issue_queued_default"]
   "derive_pr_state-merged":
@@ -40,6 +42,12 @@
     tests: ["test_derive_pr_converging"]
   "derive_pr_state-building":
     tests: ["test_derive_pr_building_implementing", "test_derive_pr_building_default", "test_derive_pr_draft_empty_is_building", "test_derive_pr_converging_requires_non_draft"]
+
+# I7 invariant: awaiting-promotion and agent-work must never coexist on an issue.
+# Test not yet implemented — belongs in Step 2 security test suite.
+# "I7-invariant-awaiting-and-agent-work-never-coexist":
+#   tests: ["test_security_awaiting_and_agent_work_never_coexist"]
+#   # implemented in Step 2 (tests/security/test_intake_security.py)
 
 "§8.11":
   "row-empty-allowlist":
