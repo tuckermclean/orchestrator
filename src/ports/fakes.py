@@ -473,9 +473,7 @@ class FakeHarnessPort:
             self._session._register_run(run_id, handle)
 
         # Emit scripted events asynchronously (fire-and-forget)
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(self._emit_events(run_id, queue))
-        )
+        asyncio.create_task(self._emit_events(run_id, queue))
 
         return handle
 
@@ -525,9 +523,9 @@ class FakeHarnessPort:
         )
 
     async def cancel(self, handle: RunHandle) -> None:
-        # Idempotent — second call is a no-op
+        # Idempotent — any already-terminal run (any conclusion) is a no-op (SPEC §9.2)
         existing = self._runs.get(handle.run_id)
-        if existing is not None and existing.conclusion == "cancelled":
+        if existing is not None and existing.state == "completed":
             return
         self._runs[handle.run_id] = RunStatus(state="completed", conclusion="cancelled")
         self.cancel_calls.append(handle)
@@ -646,7 +644,7 @@ class FakeSessionPort:
             events=events,
         )
 
-    async def stream_events(self, run_id: str) -> AsyncGenerator[RunEvent, None]:
+    async def stream_events(self, run_id: str) -> AsyncGenerator[RunEvent, None]:  # noqa: UP007
         self.stream_events_calls.append(run_id)
         # If there's a live queue (wired from harness), drain it
         if run_id in self._event_queues:

@@ -155,11 +155,13 @@ async def test_harness_cancel_idempotent(
 ) -> None:
     ctx = _make_context(repo)
     handle = await harness_port.dispatch(ctx)
+    # Seed as in_progress so the first cancel can fire
+    harness_port.seed_run(handle, state="in_progress")
     await harness_port.cancel(handle)
-    await harness_port.cancel(handle)  # second call is no-op
+    await harness_port.cancel(handle)  # second call is no-op (already completed)
     status = await harness_port.get_run_status(handle)
     assert status.conclusion == "cancelled"
-    # Only 1 cancel_call recorded (second is no-op)
+    # Only 1 cancel_call recorded (second is no-op on an already-terminal run)
     assert len(harness_port.cancel_calls) == 1
 
 

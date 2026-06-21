@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -127,8 +127,34 @@ class SessionPort(Protocol):
 
     async def get_run(self, run_id: str) -> RunDetail: ...
 
-    def stream_events(self, run_id: str) -> AsyncGenerator[RunEvent, None]: ...
+    def stream_events(self, run_id: str) -> AsyncIterator[RunEvent]: ...
 
     async def cancel(self, run_id: str) -> None: ...
 
     async def intervene(self, run_id: str, message: str) -> None: ...
+
+
+@runtime_checkable
+class CounterStore(Protocol):
+    """Atomic per-entity, per-channel counters (SPEC §8.2a)."""
+
+    async def get_count(self, entity_ref: IssueRef | PRRef, channel: str) -> int: ...
+
+    async def increment(self, entity_ref: IssueRef | PRRef, channel: str) -> int: ...
+
+    async def reset(self, entity_ref: IssueRef | PRRef, channel: str) -> None: ...
+
+
+@runtime_checkable
+class ConvergeStateStore(Protocol):
+    """Per-PR converge loop state (SPEC §9.4)."""
+
+    async def get_converge_round(self, pr_ref: PRRef) -> int: ...
+
+    async def set_converge_round(self, pr_ref: PRRef, round: int) -> None: ...
+
+    async def get_round_started(self, pr_ref: PRRef) -> datetime | None: ...
+
+    async def set_round_started(self, pr_ref: PRRef, started: datetime) -> None: ...
+
+    async def clear_converge_state(self, pr_ref: PRRef) -> None: ...

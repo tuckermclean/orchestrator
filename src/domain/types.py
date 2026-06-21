@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 # ---------------------------------------------------------------------------
 # Entity references
@@ -126,6 +126,9 @@ class CheckRun(BaseModel):
 
 
 class DispatchContext(BaseModel):
+    # SEALED per SPEC §9.2: extra fields rejected to enforce I3 (no credential injection)
+    model_config = ConfigDict(extra="forbid")
+
     issue_ref: IssueRef | None = None
     pr_ref: PRRef | None = None
     contract: str

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
     LABEL_IMPLEMENTING,
@@ -10,7 +12,9 @@ from src.domain.types import (
     PRRef,
     RunHandle,
 )
-from src.ports.base import ForgePort, HarnessPort, SessionPort
+from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
+
+_CLOSING_RE = re.compile(r"(?:closes|fixes|resolves)\s+#(\d+)", re.IGNORECASE)
 
 
 class Engine:
@@ -19,10 +23,14 @@ class Engine:
         forge: ForgePort,
         harness: HarnessPort,
         session: SessionPort,
+        counter: CounterStore | None = None,
+        converge_state: ConvergeStateStore | None = None,
     ) -> None:
         self.forge = forge
         self.harness = harness
         self.session = session
+        self.counter = counter
+        self.converge_state = converge_state
 
     async def dispatch(
         self,
@@ -40,7 +48,8 @@ class Engine:
                 repo, state="open", labels=[LABEL_IMPLEMENTING]
             )
             for pr in open_prs:
-                if f"Closes #{issue_ref.number}" in pr.body:
+                matched_nums = {int(m) for m in _CLOSING_RE.findall(pr.body)}
+                if issue_ref.number in matched_nums:
                     return None  # already dispatching
 
             context = DispatchContext(
