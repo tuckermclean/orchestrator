@@ -224,6 +224,21 @@ Single-source home. All implementation code must import from this table; never h
 | `PARALLEL_SPECIALIST_CAP` | `4` | Max concurrent specialist agents per converge round |
 | `AT_RISK_THRESHOLD` | `5` | `in_flight >= 5` → AT_RISK verdict |
 | `AWAITING_PROMOTION_NUDGE_S` | `86400` | 24 h; RC-5 fires push notification if issue sits in PENDING longer than this; does not auto-promote |
+| `DEFAULT_SWARM_MODEL` | `"claude-sonnet-4-6"` | Default model for all routine swarm dispatches: implementer, converge reviewer (R1/R2), converge fixer, and specialist sub-agents (inherited from parent context). Overridable per-slot via `RepoConfig.model_config`. |
+| `ADJUDICATION_MODEL` | `"claude-opus-4-8"` | Model for the terminal-verdict dispatch: converge reviewer at R3 (`CONVERGE_ROUNDS`) — the final approval gate before a PR is handed to a human to merge, and the escalation-to-`needs-human` decision. Overridable via `RepoConfig.model_config.adjudication`. |
+
+### Model tier
+
+Two tiers govern which model each converge dispatch uses:
+
+| Tier | Constant | Dispatches |
+|---|---|---|
+| Swarm | `DEFAULT_SWARM_MODEL` | Implementer · converge reviewer R1 and R2 · converge fixer (all rounds) · specialist sub-agents (inherit from parent dispatch context) |
+| Adjudication | `ADJUDICATION_MODEL` | Converge reviewer at round R3 (`CONVERGE_ROUNDS`) — the terminal round that produces either the final approval gate (→ `agent:ready`) or the escalation-to-`needs-human` decision |
+
+`route_entry` (§8.1) is **unchanged**: it pins `claude-opus-4-8` for the `issues`/orchestrator entry (Opus plans and orchestrates) and `claude-sonnet-4-6` for comment iteration. These are event-level model assignments that exist independently of the swarm/adjudication tier.
+
+All model string values must originate from the constants above or from `RepoConfig.model_config` (§11.2). Never construct a model string from contributor-supplied text (I9).
 
 ### Labels
 
@@ -900,7 +915,12 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         `forge.put_file_on_branch(pr, ".converge-verdict.json", SENTINEL_BYTES, "chore: init converge sentinel")`
         where `SENTINEL_BYTES` is the JSON-encoded sentinel value (§7 `Verdict`). This is a crash fail-safe.
       - Compute `specialist_refs = decide_specialists(changed_paths, r)`.
-      - Build reviewer `DispatchContext` with `allowed_agent_refs = specialist_refs` (I9/D2).
+      - Build reviewer `DispatchContext` with `allowed_agent_refs = specialist_refs` (I9/D2)
+        and `model = ADJUDICATION_MODEL if r == CONVERGE_ROUNDS else repo_config.model_config.swarm`.
+        Round R3 uses `ADJUDICATION_MODEL` (Opus) — it is the terminal round whose verdict is
+        either the final approval gate or the escalation-to-`needs-human` decision. R1/R2 use
+        `DEFAULT_SWARM_MODEL` (Sonnet) — routine iterative rounds. Specialist sub-agents
+        spawned by the reviewer inherit the reviewer's model via the harness parent context.
       - **Dispatch reviewer**: `harness.dispatch(reviewer_context)` → `reviewer_handle`.
       - **Await reviewer**: poll `harness.get_run_status(reviewer_handle)` until `completed`
         or `CI_WAIT_S` elapses. On timeout: `await harness.cancel(reviewer_handle)` before
@@ -943,7 +963,8 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         if empty); `await counter.reset(pr_ref, "converge-retry")`;
         `converge_state.clear_converge_state(pr_ref)` → `APPROVED` (P8).
       - `fix` (R1/R2) → build fixer `DispatchContext` (`allowed_agent_refs = specialist_refs`,
-        `forge_token_scope = "repo-branch"`); `harness.dispatch(fixer_context)` → `fixer_handle`;
+        `forge_token_scope = "repo-branch"`, `model = repo_config.model_config.swarm`);
+        `harness.dispatch(fixer_context)` → `fixer_handle`;
         **Await fixer**: poll until `completed` or `CI_WAIT_S` elapses; on timeout:
         `await harness.cancel(fixer_handle)`; `terminal_escalate(E11)`.
         If fixer completes in time: advance to next round.
@@ -1041,7 +1062,13 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 SwarmLimits { max_concurrent_runs_global: int, max_concurrent_runs_per_repo: int, max_concurrent_reconciles: int }
 # sane defaults: global=10, per_repo=4, reconciles=4
 
-RepoConfig { repo: RepoRef, enabled: bool, intake_enabled: bool = true, allowlist: list<string> }
+ModelConfig { swarm: string = DEFAULT_SWARM_MODEL, adjudication: string = ADJUDICATION_MODEL }
+# swarm       — model used for implementer, converge reviewer R1/R2, fixer, and specialist sub-agents
+# adjudication — model used for converge reviewer R3 (terminal verdict: approve gate + escalation)
+# UI exposes a per-slot model selector; "Default" resolves to the value in ModelConfig.
+
+RepoConfig { repo: RepoRef, enabled: bool, intake_enabled: bool = true, allowlist: list<string>,
+             model_config: ModelConfig = ModelConfig() }
 
 Config { repos: list<RepoConfig>, limits: SwarmLimits, agent_pack: AgentPackConfig,
          reconcile_cron: string = "*/15 * * * *", dedup_window: int = 1000 }
