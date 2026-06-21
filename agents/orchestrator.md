@@ -19,7 +19,14 @@ Follow these steps in order. Do not skip or reorder them.
 Before any implementation work begins, open a draft pull request:
 
 - Branch name: `agent/{N}-{slug}` where `N` is the issue number and `slug` is a
-  short kebab-case summary of the issue title (e.g., `agent/42-fix-auth-token-expiry`)
+  sanitised, short kebab-case summary of the issue title
+  (e.g., `agent/42-fix-auth-token-expiry`). Sanitisation rules:
+  - Lowercase the title
+  - Replace all characters that are not `[a-z0-9]` with a hyphen
+  - Collapse consecutive hyphens into one
+  - Strip leading/trailing hyphens
+  - Truncate to 50 characters maximum
+  - Guaranteed non-empty: if sanitisation produces an empty slug, use `work`
 - PR title: `[Agent] {issue title}`
 - PR body: must contain `Closes #{N}`. This activates auto-close on merge.
 - `draft: true`
@@ -119,10 +126,16 @@ When the gate is fully green:
 1. Add the `LABEL_CONVERGE` (`"converge"`) label to the PR (`SPEC.md §7`).
 2. Call `gh pr ready` to convert the draft to ready-for-review.
 
-This is transition P2 (`SPEC.md §3`). It triggers `pull_request:ready_for_review` which
-routes to `Engine.converge`. Add the label before marking ready — both the
-`ready_for_review` event and `labeled:converge` fire; having the label present first
-ensures idempotency.
+This is transition P2 (`SPEC.md §3`). Both the `pull_request:ready_for_review` event and
+`labeled:converge` fire; having the label present first ensures idempotency.
+
+**Crash-window note.** If your run is interrupted between step 1 (label added) and step 2
+(`gh pr ready`), the PR will be a draft with both `agent:implementing` and `converge` labels.
+The reconciler RC-1 channel handles this: `decide_stale_action` row 3 (`has_converge → mark-ready`)
+promotes it automatically on the next tick. If interrupted after step 2 (PR is non-draft with
+`agent:implementing`, no `converge`), the widened RC-1 scope catches non-draft implementing
+PRs without converge/terminal labels and routes them to `mark-ready-and-converge` when CI is clean
+(`SPEC.md §4 RC-1`, `SPEC.md §8.5`).
 
 ### Step 9 — Terminate
 

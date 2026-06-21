@@ -212,7 +212,14 @@ CI status at decision time, `decide_round` token.
 **Escalation section:** escalation cause code (E1–E10) with plain-language description;
 "Open on forge", "Re-queue" (removes `LABEL_NEEDS_HUMAN`, adds `LABEL_AGENT_WORK` on
 linked issue, only when closing issue exists and cause supports re-queueing), "Acknowledge
-/ close".
+/ close", **"Resume"** (shown when the PR carries `converge` OR `agent:implementing` label
+— i.e. P16/P17 eligible by label state; calls
+`POST /api/prs/:owner/:repo/:number/deescalate` → `OrchestratorService.deescalate_pr`;
+removes `LABEL_NEEDS_HUMAN` from the PR, resets stale-pr and converge-retry counters, and
+writes an audit record; the reconciler recovers the PR on its next tick (P16 via RC-3) or
+within `STALE_DRAFT_THRESHOLD_S` (P17 via RC-1); requires operator confirmation.
+_Note:_ For E1 (protected-path) escalations, the Engine re-checks PROTECTED_PATHS on
+converge re-entry and immediately re-escalates if the change is still present.).
 
 Cancellation and intervention do not alter forge label state; the entity remains in its
 last-written state and the reconciler recovers it on the next tick.
@@ -300,6 +307,7 @@ All endpoints except `POST /api/auth` require a valid JWT or session cookie.
 | `GET` | `/api/triage` | Issues with `LABEL_AWAITING_PROMOTION` across all repos |
 | `POST` | `/api/triage/:owner/:repo/:issue/promote` | Promote issue (remove `AWAITING_PROMOTION`, add `AGENT_WORK`; write audit record) |
 | `POST` | `/api/triage/:owner/:repo/:issue/decline` | Close issue; optional comment; write audit record |
+| `POST` | `/api/prs/:owner/:repo/:number/deescalate` | Remove `LABEL_NEEDS_HUMAN` from PR; reset stale-pr and converge-retry counters; write audit record with escalation cause + label snapshot; reconciler recovers on next tick (P16/P17) |
 | `GET` | `/api/config` | Full `Config` (no secret values) |
 | `PATCH` | `/api/config` | Update `SwarmLimits`, `reconcile_cron`, `dedup_window` |
 | `GET` | `/api/operators` | List operator accounts (no password hashes) |

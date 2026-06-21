@@ -9,12 +9,19 @@ of repositories, screens publicly contributed issues through a contributor allow
 autonomous SWE-agent swarms to implement accepted work, and exposes a mobile-first PWA as the
 primary operator interface.
 
-**Crash-only durability** is the defining design principle. Entity state lives entirely in
-forge labels — no separate database for entity state. A process crash leaves every entity in
-its last-written label state; the reconciler (`Engine.reconcile`, cron `*/15 * * * *`)
+**Crash-only durability** is the defining design principle. Entity lifecycle state lives
+entirely in forge labels — no separate database for entity state. A process crash leaves every
+entity in its last-written label state; the reconciler (`Engine.reconcile`, cron `*/15 * * * *`)
 recovers stranded entities on the next tick. The harness is single-shot: `HarnessPort.dispatch`
 returns immediately. Durability comes from agents committing early and often, not from
 in-process waiting.
+
+**Reconciler recovery scope.** The reconciler covers all stranded implementing PRs — not just
+drafts (B8a: RC-1 scope includes any PR with `agent:implementing` that lacks `converge` or
+terminal labels). Finished empty-diff PRs (non-draft, 0 diff) escalate to `needs-human` rather
+than re-dispatching (D4). Crash-draft 0-diff PRs (agent died before committing) are eligible
+for RC-1 re-dispatch. Stuck converge (cap-reached after 3 rounds) always escalates to
+`needs-human` on the same PR — work is never discarded by opening a fresh PR (D3).
 
 The engine is forge-agnostic and harness-agnostic. The GitHub integration and
 `anthropics/claude-code-action` harness are today's implementations of abstract port
@@ -43,12 +50,16 @@ OrchestratorService  (control plane — SPEC.md §11)
   |-- SwarmLimits semaphores  (global + per-repo, SPEC.md §11.2)
   v
 Engine  (stateless per-call — SPEC.md §10)
-  |-- ForgePort    (label reads/writes, PR ops, CI checks — SPEC.md §9.1)
+  |-- ForgePort          (label reads/writes, PR ops, CI checks — SPEC.md §9.1)
   |     --> Forge: GitHub / GitLab / Gitea
-  |-- HarnessPort  (single-shot agent dispatch, CI triggers — SPEC.md §9.2)
+  |-- HarnessPort        (single-shot agent dispatch, CI triggers — SPEC.md §9.2)
   |     --> anthropics/claude-code-action (sandboxed)
-  |-- SessionPort  (run observation, cancel, intervene — SPEC.md §9.3)
-        --> Operator-facing run index
+  |-- SessionPort        (run observation, cancel, intervene — SPEC.md §9.3)
+  |     --> Operator-facing run index
+  |-- CounterStore       (atomic entity counters: stale-pr, orphan, converge-retry — SPEC.md §8.2a)
+  |     --> DB (SQLite / Postgres)
+  |-- ConvergeStateStore (per-PR converge round + round_started — SPEC.md §9.4)
+        --> DB (SQLite / Postgres)
 
 Control-plane API  (HTTPS /api/*)
   ^-- PWA  (mobile-first; triage queue, pipeline status, run detail)
@@ -73,7 +84,10 @@ every state-machine transition in `SPEC.md §3–§6`. Holds no durable in-proce
 A GitLab or Gitea adapter satisfies the same interface with no engine changes.
 
 **HarnessPort** — single-shot dispatch. Returns `RunHandle` immediately. The sandboxed agent
-environment contains no forge tokens or harness API keys.
+environment receives only an ephemeral, repo-scoped forge token (sufficient for the agent's
+own branch/PR). The orchestrator's `FORGE_TOKEN`, `HARNESS_API_KEY`, and operator-level
+credentials are held by `PortProvider` only and are never present in `DispatchContext` (I3,
+`SECURITY.md §3`, `SPEC.md §9.2 DispatchContext`).
 
 **SessionPort** — observability seam. Does not alter forge label state; cancellation leaves the
 entity in its last-written state for the reconciler to recover.
@@ -118,12 +132,16 @@ issues reach the core machine and ensure every admitted issue has a structured t
 
 1. `issues:opened`/`reopened` → `OrchestratorService` checks `repo.intake_enabled`; if true →
    `Engine.intake`.
-2. `Engine.intake` dispatches the **triager agent** (read-only: reads issue body, posts one
-   structured comment, never writes code or mutates labels).
-3. `decide_intake(author, allowlist)` → `{admit, queue}` (pure synchronous; `SPEC.md §8.11`).
-4. **admit** → `LABEL_TRIAGE` + `LABEL_AGENT_WORK` → fires `issues:labeled` → I2 (core machine).
-5. **queue** → `LABEL_TRIAGE` + `LABEL_AWAITING_PROMOTION` → issue appears in PWA triage queue.
-   Operator either promotes (one-tap: add `LABEL_AGENT_WORK`) or declines (close issue).
+2. `decide_intake(author, allowlist)` → `{admit, queue}` (pure synchronous; `SPEC.md §8.11`).
+   Decision runs before the triager so the result can be audit-logged synchronously (I6).
+3. Audit record written to DB: `{event:"intake", actor, decision, timestamp}` (`SPEC.md §10.4`).
+4. `Engine.intake` dispatches the **triager agent** (read-only: reads issue body, posts one
+   structured comment summarising the triage decision; never writes code or mutates labels).
+5. **admit** → `set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic; I7) → fires
+   `issues:labeled` → I2 (core machine).
+6. **queue** → `set_labels([LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic; I7) → issue
+   appears in PWA triage queue. Operator either promotes (one-tap: `set_labels` swap) or
+   declines (close issue).
 
 **`decide_intake` truth table:**
 
@@ -140,12 +158,13 @@ flowchart TD
     A([issues:opened / reopened]) --> B{repo.intake_enabled?}
     B -- false --> Z([no-op — normal label-triggered path])
     B -- true --> C[Engine.intake]
-    C --> D[Spawn triager agent\nread-only — posts structured summary]
-    D --> E[decide_intake\nauthor, allowlist]
-    E -- admit --> F[LABEL_TRIAGE + LABEL_AGENT_WORK] --> G([Engine.dispatch — I2/P1])
-    E -- queue --> H[LABEL_TRIAGE + LABEL_AWAITING_PROMOTION] --> I([PWA triage queue])
+    C --> E[decide_intake\nauthor, allowlist]
+    E --> AU[write audit record\nI6]
+    AU --> D[Spawn triager agent\nread-only — posts structured summary]
+    E -- admit --> F[set_labels TRIAGE + AGENT_WORK] --> G([Engine.dispatch — I2/P1])
+    E -- queue --> H[set_labels TRIAGE + AWAITING_PROMOTION] --> I([PWA triage queue])
     I --> J{Operator}
-    J -- promote --> K[Remove AWAITING_PROMOTION\nAdd LABEL_AGENT_WORK] --> G
+    J -- promote --> K[set_labels([LABEL_AGENT_WORK])\natomic swap — I7] --> G
     J -- decline --> L([Close issue — terminal])
 ```
 
@@ -159,9 +178,14 @@ engine methods (`SPEC.md §7`).
 ### What is NOT stored
 
 Issue and PR states are derived at runtime from forge labels via `derive_issue_state` and
-`derive_pr_state` (`SPEC.md §8.10`). Converge round counts and verdict history live in
-`.converge-verdict.json` files on the PR branch. Any process that can read the forge can
-reconstruct the full pipeline state — no separate state store needed for correctness.
+`derive_pr_state` (`SPEC.md §8.10`). Any process that can read the forge can reconstruct the
+full pipeline lifecycle state — no separate state store needed for entity-state correctness.
+
+**Verdict files on the PR branch:** The live verdict for the current round is `.converge-verdict.json`.
+After each completed round, the Engine copies it to `.converge-verdict-rN.json` (e.g.
+`.converge-verdict-r1.json`) for per-round history (B3, `SPEC.md §10.2`). The WEBUI reads
+`.converge-verdict-rN.json` files for historical round data. The next reviewer reads
+`.converge-verdict-r{N-1}.json` to compare with the current round's output.
 
 ### What is stored
 
@@ -172,6 +196,9 @@ Postgres.
 |---|---|
 | **Repo registry** | `repo`, `enabled`, `intake_enabled`, `allowlist` |
 | **Global config** | `limits: SwarmLimits`, `reconcile_cron`, `dedup_window` |
+| **Entity counters** (`CounterStore`) | `(entity_ref, channel) → count` for `redispatch_count`, `retry_count` per channel; atomic increment; authoritative over marker comments |
+| **Converge round state** (`ConvergeState`) | `(pr_ref) → {converge_round, round_started}` — persisted so RC-3 re-arm can resume at the correct round after a crash |
+| **Audit log** | `{event, actor/operator, entity_ref, decision/outcome, timestamp}` — immutable append for intake decisions and promotions (I6) |
 | **Run index** | `run_id`, repo, issue/PR ref, status, timestamps — for PWA dashboard; not the entity state source |
 | **Dedup LRU** | `delivery_id` ring buffer (size = `Config.dedup_window`); shared store for multi-replica |
 | **Push subscriptions** | Operator device push endpoints for escalation/promotion/approval alerts |
@@ -196,16 +223,27 @@ ARG AGENT_PACK_REPO_URL="https://github.com/msitarzewski/agency-agents"
 ARG AGENT_PACK_PINNED_REF="d6553e261e595c651064f899a6c33dd5aa71c9e3"
 ARG AGENT_PACK_DEST_DIR=".agents"
 
-RUN git clone --no-tags --depth 1 ${AGENT_PACK_REPO_URL} /tmp/agency-agents \
- && git -C /tmp/agency-agents fetch --depth 1 origin ${AGENT_PACK_PINNED_REF} \
+RUN git clone --no-tags --filter=blob:none ${AGENT_PACK_REPO_URL} /tmp/agency-agents \
  && git -C /tmp/agency-agents checkout ${AGENT_PACK_PINNED_REF} \
+ && [ "$(git -C /tmp/agency-agents rev-parse HEAD)" = "${AGENT_PACK_PINNED_REF}" ] \
  && mkdir -p /app/${AGENT_PACK_DEST_DIR} \
- && find /tmp/agency-agents -mindepth 2 -name "*.md" -exec cp {} /app/${AGENT_PACK_DEST_DIR}/ \; \
+ && find /tmp/agency-agents -mindepth 2 -name "*.md" | while IFS= read -r f; do \
+      target="/app/${AGENT_PACK_DEST_DIR}/$(basename "$f")"; \
+      [ -e "$target" ] && { echo "ERROR: basename collision: $f" >&2; exit 1; }; \
+      cp "$f" "$target"; \
+    done \
  && rm -rf /tmp/agency-agents
 ```
 
+> `--filter=blob:none` (blobless clone) reliably fetches any pinned SHA without shallow-clone
+> server-capability issues. The `rev-parse HEAD` assertion fails the build if checkout landed on
+> the wrong commit. The basename-collision guard fails loudly if the pack ever introduces two
+> `*.md` files with the same name at different paths — keeping `.agents/` a guaranteed-flat
+> namespace. This snippet is canonical and must match `AGENTS.md §8 Phase 7`.
+
 To update the pack SHA: review the diff at
 `https://github.com/msitarzewski/agency-agents/compare/<old>...<new>` before bumping.
+Never use a floating tag or branch — always a full 40-character SHA.
 
 PWA static assets are compiled at build time and served at `/` by the process itself —
 no separate nginx sidecar.
@@ -382,8 +420,10 @@ Full threat catalog, actor taxonomy, and invariants are in `SECURITY.md`.
   triager agent has no credentials to advance the state machine; it can only post one comment.
 - **Default-deny intake gate.** When `RepoConfig.allowlist` is non-empty, `decide_intake` returns
   `queue` for unlisted authors. No code-writing agent is spawned until a human promotes the issue.
-- **Sandboxed harness runs.** Forge tokens and harness API keys are held by `PortProvider` only,
-  in the orchestrator process. They are never present in the agent sandbox environment.
+- **Sandboxed harness runs.** The agent sandbox receives only an ephemeral, repo-scoped forge
+  token (sufficient for its own branch/PR). The orchestrator's `FORGE_TOKEN`, `HARNESS_API_KEY`,
+  and operator-level credentials are held by `PortProvider` only and never surfaced in
+  `DispatchContext` (I3, D1, `SPEC.md §9.2`).
 - **Protected-path short-circuit (E1).** Before any converge round begins, `Engine.converge`
   checks `forge.get_changed_files(pr)` against `PROTECTED_PATHS`. Any match → `LABEL_NEEDS_HUMAN`
   immediately. No specialist ever reviews a protected-path PR autonomously.
@@ -408,7 +448,9 @@ flowchart LR
         fp[ForgePort]
         hp[HarnessPort]
         sp[SessionPort]
-        db[(Backing store\nregistry / run index / dedup)]
+        cs[CounterStore\nstale-pr / orphan / converge-retry]
+        css[ConvergeStateStore\nround + round_started]
+        db[(Backing store\nregistry / run index / dedup / counters / converge state)]
     end
 
     contributor -->|opens issue / comment| forge
@@ -419,6 +461,10 @@ flowchart LR
     engine --> fp
     engine --> hp
     engine --> sp
+    engine --> cs
+    engine --> css
+    cs <--> db
+    css <--> db
     fp <-->|labels / PRs / CI| forge
     hp -->|dispatch single-shot run| harness
     harness -->|commits + label ops| forge

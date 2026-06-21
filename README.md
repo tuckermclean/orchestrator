@@ -51,7 +51,7 @@ Harness-fed prompt/contract documents injected into each agent at runtime.
 | [`agents/triager.md`](agents/triager.md) | Public-issue intake triager. Read-only; posts one structured triage summary per issue. Never writes code. Explicit prompt-injection resistance rules. |
 | [`agents/orchestrator.md`](agents/orchestrator.md) | Dispatch orchestrator. Opens draft PR immediately (`Closes #N`), stamps `agent:implementing`, delegates to implementer specialist, verifies gate is green, marks PR ready. |
 | [`agents/implementer.md`](agents/implementer.md) | Implementation specialist. Scope discipline, mandatory tests for every change, hard gate before handing back. |
-| [`agents/converge-reviewer.md`](agents/converge-reviewer.md) | Converge review aggregator. Spawns 2–4 parallel specialist sub-agents via `decide_specialists`. Aggregates into a `Verdict` with stable blocker signatures. Writes `.converge-verdict.json` last (crash-safe). |
+| [`agents/converge-reviewer.md`](agents/converge-reviewer.md) | Converge review aggregator. Receives the Engine-computed specialist allow-set (`allowed_agent_refs`) in its `DispatchContext`; spawns 2–4 parallel specialist sub-agents from that allow-set. Aggregates into a `Verdict` with stable blocker signatures. Writes `.converge-verdict.json` last (crash-safe). |
 | [`agents/converge-fixer.md`](agents/converge-fixer.md) | Converge fix specialist. R1: fix blockers + suggestions; R2: fix blockers only; R3: never called. Routes blockers to owning specialists. Gate green before committing. |
 
 ---

@@ -152,14 +152,21 @@ hardcoded `SPECIALIST_ROUTING` constant (`SPEC.md §7`). Contributor-supplied te
 
 ```
 given changed_paths: list[str], round: int → list[AgentRef]:
-  specialists = set(CONVERGE_REVIEW_BASE)  # always-on: security + code-quality
-  for entry in SPECIALIST_ROUTING:
+  base   = list(CONVERGE_REVIEW_BASE)          # always included; ordered
+  extras = []                                   # routing additions in SPECIALIST_ROUTING order
+  for entry in SPECIALIST_ROUTING:             # iterate in definition order — NOT a set
     if any path matches entry.pattern for path in changed_paths:
-      specialists |= set(entry.agent_refs)
-  # Cap: base set always retained; routing additions dropped in insertion order
-  extras = [r for r in specialists if r not in set(CONVERGE_REVIEW_BASE)]
-  return (list(CONVERGE_REVIEW_BASE) + extras)[:PARALLEL_SPECIALIST_CAP]
+      for ref in entry.agent_refs:
+        if ref not in base and ref not in extras:
+          extras.append(ref)
+  # Cap: base always retained; extras truncated to fill remaining slots
+  assert len(base) <= PARALLEL_SPECIALIST_CAP, "CONVERGE_REVIEW_BASE exceeds PARALLEL_SPECIALIST_CAP"
+  return base + extras[:PARALLEL_SPECIALIST_CAP - len(base)]
 ```
+
+The algorithm is **deterministic**: iterating `SPECIALIST_ROUTING` in definition order
+guarantees the same result for the same inputs. The previous set-based formulation was
+non-deterministic and could silently drop base-set members under adversarial cap values.
 
 Constants (single-sourced in `SPEC.md §7`):
 - `CONVERGE_REVIEW_BASE = ["engineering-security-engineer.md", "engineering-code-reviewer.md"]`
@@ -176,6 +183,14 @@ prompt: "Act as the agent defined in .agents/<AgentRef>. Read that file first."
 
 Depth-1 only. An orchestration agent may spawn specialists; a specialist must not spawn
 further sub-agents.
+
+**Allow-set enforcement (D2 / I9).** Before dispatching a reviewer or fixer, the Engine
+computes `allowed_agent_refs = decide_specialists(changed_paths, round)` and passes it in
+`DispatchContext.allowed_agent_refs`. The harness adapter **must reject** any sub-agent
+spawn whose `AgentRef` is not in `allowed_agent_refs`. Reviewer/fixer contracts must read
+`context.allowed_agent_refs` rather than recomputing the specialist set. This ensures the
+spawn set is always Engine-controlled, not LLM-controlled — the diff cannot steer the
+spawn even if the reviewer is deceived by injected content.
 
 ### §7.5 Pack supply-chain controls
 

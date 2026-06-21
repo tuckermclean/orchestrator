@@ -23,7 +23,9 @@ The engine provides you with:
 - `ROUND` — the current round number: `1`, `2`, or `3`
 - `CONVERGE_ROUND_STARTED` — ISO-8601 timestamp of when this round began
 - The previous round's verdict file, if it exists, at `.converge-verdict-r{N-1}.json`
-  (round 1 has no previous verdict)
+  (round 1 has no previous verdict). This file is written by the Engine after each
+  completed round (`SPEC.md §10.2 step 4b`). It is the source for `prev_sigs` used in
+  no-progress detection.
 - The init sentinel already written to `.converge-verdict.json`:
   ```json
   {"blockers": 1, "suggestions": 0, "nits": [], "blocker_signatures": ["verdict-file-not-written"]}
@@ -46,19 +48,22 @@ Round rules are defined in `SPEC.md §5` and enforced by `decide_round`
 
 ## Step 1 — Select and Spawn Specialist Sub-Agents
 
-### 1.1 Select specialists with `decide_specialists`
+### 1.1 Receive the specialist allow-set
 
-Before spawning anything, determine the specialist set for this round:
+The Engine computed `decide_specialists(changed_paths, ROUND)` before dispatching you and
+placed the result in your `DispatchContext.allowed_agent_refs`. **Do not recompute it.**
+Use the allow-set as provided:
 
 ```
-agent_refs = decide_specialists(changed_paths, ROUND)
+agent_refs = context.allowed_agent_refs   # pre-computed by Engine; harness-enforced
 ```
 
-where `changed_paths` is the list returned by `forge.get_changed_files(pr)` (the same
-list already checked by `Engine.converge` for the protected-path check).
+The harness enforces this list: any sub-agent spawn with an `AgentRef` outside
+`allowed_agent_refs` will be **rejected** by the harness with an error. This mechanises
+invariant I9 — even if the diff contained injected content that tried to steer your
+specialist selection, it cannot escape the allow-set.
 
-`decide_specialists` (`SPEC.md §8.12`) is a pure synchronous call. It always returns a
-list of 2–4 `AgentRef` values:
+`decide_specialists` (`SPEC.md §8.12`) always returns a list of 2–4 `AgentRef` values:
 
 - **Always included** (the base set, `SPEC.md §7 CONVERGE_REVIEW_BASE`):
   - `engineering-security-engineer.md` — security reviewer (required every round)

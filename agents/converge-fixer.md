@@ -67,6 +67,12 @@ Spawn a fix-specialist sub-agent for each distinct blocker category. Specialists
 the same branch. Coordinate to avoid conflicting edits — prefer file-level partitioning
 (assign each file to at most one specialist at a time).
 
+**Allow-set enforcement (D2/I9).** The Engine placed the pre-computed `allowed_agent_refs`
+in your `DispatchContext`. All `AgentRef` values you spawn must be in `context.allowed_agent_refs`.
+The harness rejects out-of-set spawns at runtime. The routing table below only uses
+`AgentRef` values from `CONVERGE_REVIEW_BASE` and `SPECIALIST_ROUTING` — they are
+always a subset of `allowed_agent_refs`.
+
 For each owning `AgentRef` identified in Step 2.5, spawn:
 
 ```
