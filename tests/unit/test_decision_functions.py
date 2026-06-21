@@ -10,6 +10,7 @@ from src.decisions.route_entry import route_entry
 from src.domain.types import (
     ADJUDICATION_MODEL,
     DEFAULT_SWARM_MODEL,
+    LABEL_AWAITING_PROMOTION,
     LABEL_CONVERGE,
     LABEL_IMPLEMENTING,
     LABEL_NEEDS_HUMAN,
@@ -242,6 +243,24 @@ def test_derive_issue_closed_beats_needs_human() -> None:
 
 def test_derive_issue_closed_beats_agent_work() -> None:
     assert derive_issue_state(["agent-work"], closed=True) == "CLOSED"
+
+
+def test_derive_issue_pending() -> None:
+    """awaiting-promotion label without closed/needs-human → PENDING (SPEC §8.10)."""
+    assert derive_issue_state([LABEL_AWAITING_PROMOTION], closed=False) == "PENDING"
+
+
+def test_derive_issue_closed_beats_awaiting_promotion() -> None:
+    """closed=True beats awaiting-promotion — priority ordering."""
+    assert derive_issue_state([LABEL_AWAITING_PROMOTION], closed=True) == "CLOSED"
+
+
+def test_derive_issue_needs_human_beats_awaiting_promotion() -> None:
+    """needs-human beats awaiting-promotion — priority ordering."""
+    assert (
+        derive_issue_state([LABEL_NEEDS_HUMAN, LABEL_AWAITING_PROMOTION], closed=False)
+        == "ESCALATED"
+    )
 
 
 # ---------------------------------------------------------------------------
