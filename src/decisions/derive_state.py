@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.domain.types import (
+    LABEL_AWAITING_PROMOTION,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
     LABEL_READY,
@@ -14,12 +15,14 @@ from src.domain.types import (
 def derive_issue_state(labels: list[str], closed: bool) -> IssueState:
     """Derive the canonical IssueState from labels and closed flag.
 
-    Priority: closed > needs-human > default QUEUED.
+    Priority: closed > needs-human > awaiting-promotion > default QUEUED.
     """
     if closed:
         return "CLOSED"
     if LABEL_NEEDS_HUMAN in labels:
         return "ESCALATED"
+    if LABEL_AWAITING_PROMOTION in labels:
+        return "PENDING"
     return "QUEUED"
 
 
