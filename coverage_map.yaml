@@ -1,0 +1,42 @@
+# coverage_map.yaml — truth-table row coverage for SPEC.md §8
+# Format: section.row_id → list of test names that cover it
+
+"§8.1":
+  "row-1-issues":
+    tests: ["test_route_entry_issues"]
+  "row-2-issue_comment":
+    tests: ["test_route_entry_issue_comment"]
+  "row-2-pr_review_comment":
+    tests: ["test_route_entry_pr_review_comment"]
+  "row-3-unknown":
+    tests: ["test_route_entry_unknown"]
+  "row-3-empty":
+    tests: ["test_route_entry_empty_string"]
+
+"§8.9":
+  "row-1-blocked":
+    tests: ["test_health_blocked", "test_health_blocked_beats_at_risk"]
+  "row-2-at_risk":
+    tests: ["test_health_at_risk_3_plus_2", "test_health_at_risk_4_plus_1"]
+  "row-3-on_track":
+    tests: ["test_health_on_track_empty", "test_health_on_track_mixed", "test_health_on_track_four"]
+
+"§8.10":
+  "derive_issue_state-closed":
+    tests: ["test_derive_issue_closed", "test_derive_issue_closed_beats_needs_human", "test_derive_issue_closed_beats_agent_work"]
+  "derive_issue_state-escalated":
+    tests: ["test_derive_issue_escalated"]
+  "derive_issue_state-queued":
+    tests: ["test_derive_issue_queued_agent_work", "test_derive_issue_queued_default"]
+  "derive_pr_state-merged":
+    tests: ["test_derive_pr_merged", "test_derive_pr_merged_beats_needs_human"]
+  "derive_pr_state-escalated":
+    tests: ["test_derive_pr_escalated"]
+  "derive_pr_state-approved":
+    tests: ["test_derive_pr_approved"]
+  "derive_pr_state-empty":
+    tests: ["test_derive_pr_empty", "test_derive_pr_non_draft_empty_is_empty", "test_derive_pr_empty_before_converging"]
+  "derive_pr_state-converging":
+    tests: ["test_derive_pr_converging"]
+  "derive_pr_state-building":
+    tests: ["test_derive_pr_building_implementing", "test_derive_pr_building_default", "test_derive_pr_draft_empty_is_building", "test_derive_pr_converging_requires_non_draft"]
