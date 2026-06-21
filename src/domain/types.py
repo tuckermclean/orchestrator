@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+# ---------------------------------------------------------------------------
+# GitHub auto-closing keyword regex — https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue
+# Nine keyword forms: close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved
+# ---------------------------------------------------------------------------
+
+_CLOSING_RE = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Entity references
