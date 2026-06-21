@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 
 from src.domain.types import (
+    _CLOSING_RE,
     PR,
     CheckRun,
     Comment,
@@ -314,12 +314,8 @@ class FakeForgePort:
         pr = self._prs.get(key)
         if pr is None:
             return None
-        # Parse "Closes #N" / "Fixes #N" / "Resolves #N" (case-insensitive)
-        match = re.search(
-            r"(?:closes|fixes|resolves)\s+#(\d+)",
-            pr.body,
-            re.IGNORECASE,
-        )
+        # Parse nine GitHub auto-closing keyword forms (case-insensitive)
+        match = _CLOSING_RE.search(pr.body)
         if match:
             return IssueRef(repo=pr_ref.repo, number=int(match.group(1)))
         return None

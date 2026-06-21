@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import re
-
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
+    _CLOSING_RE,
     LABEL_IMPLEMENTING,
     DispatchContext,
     IssueRef,
@@ -13,11 +12,6 @@ from src.domain.types import (
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
-
-_CLOSING_RE = re.compile(
-    r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
-    re.IGNORECASE,
-)
 
 
 class Engine:
