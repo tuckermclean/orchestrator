@@ -57,14 +57,7 @@ class IntakeEngine:
         # Step 2: pure synchronous decision (I4 — never await this)
         decision = decide_intake(issue, self.allowlist)
 
-        # Step 3: audit every intake decision (I6)
-        await self.audit.record(
-            repo=issue_ref.repo,
-            entity_ref=issue_ref,
-            action=f"intake:{decision}",
-        )
-
-        # Step 4: dispatch triager (read-only; I5 — must use "repo-comment" scope)
+        # Step 3: dispatch triager (read-only; I5 — must use "repo-comment" scope)
         triager_context = DispatchContext(
             issue_ref=issue_ref,
             contract=_TRIAGER_CONTRACT,
@@ -75,10 +68,17 @@ class IntakeEngine:
         )
         triager_handle = await self.harness.dispatch(triager_context)
 
-        # Step 5: atomic label swap (I7 — set_labels has PUT semantics; no TOCTOU window)
+        # Step 4: atomic label swap (I7 — set_labels has PUT semantics; no TOCTOU window)
         if decision == "admit":
             await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])
         else:
             await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])
+
+        # Step 5: audit every intake decision (I6) — written AFTER observable state is set
+        await self.audit.record(
+            repo=issue_ref.repo,
+            entity_ref=issue_ref,
+            action=f"intake:{decision}",
+        )
 
         return triager_handle

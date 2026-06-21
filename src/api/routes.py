@@ -68,6 +68,7 @@ def _make_router(service: OrchestratorService) -> APIRouter:
     @r.post("/api/triage/{issue_number}/promote")
     async def promote_issue(
         issue_number: int,
+        # TODO: operator must be derived from an authenticated session before production use.
         operator: str = "operator",
     ) -> dict[str, str]:
         issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
@@ -75,8 +76,10 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         return {"status": "promoted", "run_id": handle.run_id}
 
     @r.post("/api/triage/{issue_number}/decline")
+    # TODO: this endpoint must require an authenticated session before production use.
     async def decline_issue(
         issue_number: int,
+        # TODO: operator must be derived from an authenticated session before production use.
         operator: str = "operator",
     ) -> dict[str, str]:
         issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)

@@ -107,3 +107,8 @@ def test_intake_pure_idempotent() -> None:
     r1 = decide_intake(issue, allowlist)
     r2 = decide_intake(issue, allowlist)
     assert r1 == r2 == "admit"
+
+
+def test_intake_empty_string_author_with_allowlist() -> None:
+    """Empty-string author with non-empty allowlist → 'queue' (not in list)."""
+    assert decide_intake(_make_issue(""), allowlist=["alice"]) == "queue"

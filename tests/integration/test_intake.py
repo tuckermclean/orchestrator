@@ -169,6 +169,32 @@ async def test_decline_closes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# test_decline_audit_logged
+# ---------------------------------------------------------------------------
+
+
+async def test_decline_audit_logged() -> None:
+    """OrchestratorService.decline writes an audit record with action='decline' (I6)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=12)
+    forge.seed_issue(issue_ref, author="external", labels=[LABEL_AWAITING_PROMOTION])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+    await service.decline(issue_ref, operator="admin")
+
+    entries = await audit.list_entries(_REPO, issue_ref)
+    decline_entries = [e for e in entries if e["action"] == "decline"]
+    assert len(decline_entries) == 1
+    assert decline_entries[0]["operator"] == "admin"
+
+
+# ---------------------------------------------------------------------------
 # test_audit_log_records_intake
 # ---------------------------------------------------------------------------
 
@@ -222,3 +248,42 @@ async def test_audit_log_records_promote() -> None:
     promote_entries = [e for e in entries if e["action"] == "promote"]
     assert len(promote_entries) == 1
     assert promote_entries[0]["operator"] == "human-admin"
+
+
+# ---------------------------------------------------------------------------
+# test_handle_event_issues_routes_through_intake (Blocker 1)
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_routes_through_intake() -> None:
+    """handle_event('issues', ...) calls run_intake(), not engine.dispatch().
+
+    I1 — non-allowlisted issues must be queued (AWAITING_PROMOTION), not dispatched
+    directly. Previously handle_event bypassed intake and called engine.dispatch().
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=50)
+    forge.seed_issue(issue_ref, author="external-user", labels=[])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+
+    payload: dict[str, object] = {
+        "issue": {"number": 50},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    await service.handle_event("issues", payload)
+
+    # external-user is not allowlisted → intake must set AWAITING_PROMOTION
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AWAITING_PROMOTION in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels
+
+    # Audit record must be written (I6)
+    entries = await audit.list_entries(_REPO, issue_ref)
+    assert any(e["action"] == "intake:queue" for e in entries)
