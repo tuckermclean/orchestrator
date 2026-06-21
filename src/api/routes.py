@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter, Response
 from fastapi.responses import StreamingResponse
 
-from src.domain.types import HealthReport, RepoRef, RunDetail, RunSummary
+from src.domain.types import HealthReport, IssueRef, RepoRef, RunDetail, RunSummary, TriageItem
 from src.service.orchestrator import OrchestratorService
 
 router = APIRouter()
@@ -56,5 +56,31 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         response.headers["X-Dev-Mode"] = "true"
         handle = await service.dev_dispatch(_DEV_REPO)
         return {"run_id": handle.run_id}
+
+    # ------------------------------------------------------------------
+    # Triage endpoints
+    # ------------------------------------------------------------------
+
+    @r.get("/api/triage", response_model=list[TriageItem])
+    async def list_triage() -> list[TriageItem]:
+        return await service.list_triage(_DEV_REPO)
+
+    @r.post("/api/triage/{issue_number}/promote")
+    async def promote_issue(
+        issue_number: int,
+        operator: str = "operator",
+    ) -> dict[str, str]:
+        issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
+        handle = await service.promote(issue_ref, operator=operator)
+        return {"status": "promoted", "run_id": handle.run_id}
+
+    @r.post("/api/triage/{issue_number}/decline")
+    async def decline_issue(
+        issue_number: int,
+        operator: str = "operator",
+    ) -> dict[str, str]:
+        issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
+        await service.decline(issue_ref, operator=operator)
+        return {"status": "declined"}
 
     return r

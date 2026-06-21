@@ -12,7 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import _make_router
-from src.domain.types import RepoRef
+from src.db.audit import AuditLog
+from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
 
@@ -46,14 +47,21 @@ def _build_dev_service() -> OrchestratorService:
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
     forge = FakeForgePort()
+    audit = AuditLog()  # in-memory for dev
 
-    service = OrchestratorService(forge=forge, harness=harness, session=session)
+    service = OrchestratorService(
+        forge=forge,
+        harness=harness,
+        session=session,
+        audit=audit,
+        allowlist=[],  # gate disabled in dev mode — all authors admit
+    )
     return service
 
 
 async def _seed_demo_data(service: OrchestratorService) -> None:
-    """Pre-seed some fake runs for the dev UI."""
-    from src.domain.types import RunEvent
+    """Pre-seed some fake runs and triage issues for the dev UI."""
+    from src.domain.types import IssueRef, RunEvent
 
     repo = RepoRef(owner="demo", name="repo")
 
@@ -85,6 +93,23 @@ async def _seed_demo_data(service: OrchestratorService) -> None:
             RunEvent(event_type="in_progress", data={"message": "Running"}, timestamp=now),
         ],
     )
+
+    # --- Seed a demo AWAITING_PROMOTION issue for the triage queue screen ---
+    forge = service.forge
+    if not isinstance(forge, FakeForgePort):
+        return
+
+    triage_ref = IssueRef(repo=repo, number=42)
+    forge.seed_issue(
+        triage_ref,
+        title="Add dark mode to dashboard",
+        body="Users have requested a dark mode option for the main dashboard UI.",
+        author="external-contributor",
+        labels=[LABEL_AWAITING_PROMOTION],
+    )
+
+    # Initialize the audit log
+    await service._audit.init()
 
 
 # Singleton for ASGI app (used by uvicorn)

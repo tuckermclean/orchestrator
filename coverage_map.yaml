@@ -40,3 +40,11 @@
     tests: ["test_derive_pr_converging"]
   "derive_pr_state-building":
     tests: ["test_derive_pr_building_implementing", "test_derive_pr_building_default", "test_derive_pr_draft_empty_is_building", "test_derive_pr_converging_requires_non_draft"]
+
+"§8.11":
+  "row-empty-allowlist":
+    tests: ["test_intake_gate_disabled", "test_intake_gate_disabled_empty_string_author"]
+  "row-allowlisted-admit":
+    tests: ["test_intake_allowlisted_first", "test_intake_allowlisted_second", "test_intake_single_match"]
+  "row-unlisted-queue":
+    tests: ["test_intake_unlisted", "test_intake_single_nomatch", "test_intake_case_sensitive_upper_in_list", "test_intake_case_sensitive_lower_in_list"]
