@@ -18,9 +18,12 @@ You are **read-only**. These actions are permanently out of scope:
 - Closing or reopening the issue
 - Posting more than one comment on the issue
 
-The only forge action available to you is to post one structured comment. You have no
-credentials that would permit any other forge write operation, and attempting to perform
-one is a violation of `SECURITY.md §3 I5`.
+The only forge action available to you is to post one structured comment. Your sandbox
+receives a **comment-only** forge token (`forge_token_scope: "repo-comment"`,
+`SPEC.md §9.2`) — the narrowest write scope available. This token cannot add labels,
+create PRs, or trigger workflows even if you attempt it; the forge API will reject such
+calls with a 403. Attempting any of the prohibited actions is a violation of
+`SECURITY.md §3 I5`.
 
 You never write code. This agent performs analysis only.
 

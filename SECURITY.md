@@ -20,8 +20,8 @@ prompt.
 | **Human operator** | Fully trusted | Configures the system, promotes triage queue issues, merges APPROVED PRs. Final authority on all irreversible actions. |
 | **Allowlisted author** | Conditionally trusted for dispatch | Authors whose username is in `RepoConfig.allowlist` are admitted directly to the core machine by `Engine.intake`. Still subject to all converge and protected-path controls. |
 | **Non-allowlisted contributor** | Untrusted for dispatch | Held in triage queue (`LABEL_AWAITING_PROMOTION`). No code-writing agent is spawned without explicit human promotion. |
-| **Triage agent** | Narrowly trusted; read-only | May read issue content and post one structured comment. Cannot add labels, create PRs, or advance the state machine. |
-| **Implementer / specialist agents** | Narrowly trusted; scoped | Operate in the harness sandbox with an ephemeral, repo-scoped forge token (sufficient for their own branch/PR). The orchestrator's service `FORGE_TOKEN`, `HARNESS_API_KEY`, and operator-level credentials are never present in the sandbox. Cannot modify PROTECTED_PATHS without triggering E1. |
+| **Triage agent** | Narrowly trusted; read-only | May read issue content and post one structured comment. Cannot add labels, create PRs, or advance the state machine. The harness sandbox injects only a **comment-only** forge token (`forge_token_scope: "repo-comment"`, `SPEC.md §9.2`) — the narrowest write scope the forge platform supports. Even if the triage agent LLM were deceived by injected content, it could not add labels or trigger workflows because the credential physically cannot do so. |
+| **Implementer / specialist agents** | Narrowly trusted; scoped | Operate in the harness sandbox with an ephemeral, branch/PR-scoped forge token (`forge_token_scope: "repo-branch"`, `SPEC.md §9.2`). The orchestrator's service `FORGE_TOKEN`, `HARNESS_API_KEY`, and operator-level credentials are never present in the sandbox. Cannot modify PROTECTED_PATHS without triggering E1. |
 
 **Default-deny.** When `RepoConfig.allowlist` is non-empty, unlisted authors are queued,
 never dispatched. An empty allowlist disables the gate entirely (appropriate for private
@@ -49,6 +49,22 @@ entity in `LABEL_NEEDS_HUMAN` state.
 cloud/physical infrastructure security, operator account compromise, LLM model behavioral
 guarantees.
 
+**Additional threat vectors — accepted risks (no current mitigation):**
+- **Verdict file tampering.** `.converge-verdict.json` lives on the contributor-controlled
+  PR branch. An allowlisted contributor with push access can overwrite it between the
+  reviewer writing it and the Engine reading it. Mitigation: the security specialist
+  (always in `CONVERGE_REVIEW_BASE`) reviews the PR diff including any verdict file
+  manipulation in the next round; human merge is the final gate.
+- **Branch name injection.** `orchestrator.md` sanitizes branch names, but no server-side
+  validation occurs before dispatch. Malformed branch names are an operator responsibility.
+- **PR body `Closes #N` manipulation.** A contributor with PR push access can modify the
+  `Closes #N` reference after agent creation, disconnecting the issue-PR link used by
+  reconciler decisions. This affects `has_issue` in RC-1/RC-4 decisions; escalation
+  behavior may differ from intended, but no code is auto-merged without human review.
+- **Audit log mutability.** Audit records are standard DB rows; no write-once or
+  tamper-evident backend is mandated. Operator-level DB access can modify the trail.
+  Out of scope per operator account compromise exclusion above.
+
 ---
 
 ## §3 Security Invariants
@@ -66,18 +82,23 @@ explicitly adds `LABEL_AGENT_WORK`. No code path bypasses this gate.
 round 1. On any match: add `LABEL_NEEDS_HUMAN`, return `ESCALATED`, no review round runs.
 No protected-path PR is ever auto-merged.
 
-**I3 — The agent sandbox contains only an ephemeral, repo-scoped forge token; no operator credentials.**
-The harness injects a short-lived, repo-scoped forge token into the sandbox — sufficient
-for the agent to read/write its own branch and PR (e.g. `gh pr ready`, `add_label`,
-`create_pr`). The following must NEVER be present in `DispatchContext` or the sandbox
-environment:
+**I3 — The agent sandbox contains only an ephemeral, scoped forge token; no operator credentials.**
+The harness injects a short-lived forge token into the sandbox — scope depends on agent type:
+- **Triager:** `"repo-comment"` scope only — may read and post comments; cannot write labels,
+  create/close PRs, or trigger workflow dispatches.
+- **All other agents:** `"repo-branch"` scope — may read/write the agent's own branch and PR.
+
+The following must NEVER be present in `DispatchContext` or the sandbox environment:
 - The orchestrator's service `FORGE_TOKEN` (multi-repo read/write scope)
 - `HARNESS_API_KEY` or any harness service credential
 - Operator-level API keys or secrets
 
 `PortProvider` holds all multi-scope credentials in the orchestrator process and never
-exposes them via `DispatchContext`. The `DispatchContext` schema (`SPEC.md §9.2`) defines
-the field allow-list; any field not in that schema must not be passed to `dispatch`.
+exposes them via `DispatchContext`. The `DispatchContext` schema (`SPEC.md §9.2`) is a
+**sealed schema**: every field is enumerated; no additional fields may be present. The
+harness adapter must reject any `DispatchContext` that contains an unrecognized field.
+Schema sealing (not just field-name testing) is required because a credential leak under
+a different field name would pass a name-only check.
 
 **Named test:** `test_security_no_credentials_in_dispatch_context` (`TESTING.md §5`).
 
@@ -89,8 +110,14 @@ by `Engine.intake`, not this function.
 **I5 — The triage agent is read-only.**
 The triage specialist may read issue content and post one structured comment. It must
 not add or remove labels, create PRs, trigger workflow dispatches, or invoke any forge
-action that advances the state machine. Enforced by the triage contract and by absence
-of credentials in its sandbox.
+action that advances the state machine. Enforced at two levels:
+1. **Sandbox credential scope:** The harness injects `forge_token_scope: "repo-comment"`
+   for the triager dispatch (`SPEC.md §9.2`). A comment-only forge token physically cannot
+   perform label writes, PR creation, or workflow dispatch — the API calls would be rejected
+   by the forge platform with a 403, not just by the agent contract.
+2. **Triage agent contract:** `agents/triager.md §Absolute Constraints` lists the
+   prohibited actions. Contract discipline is the second layer; the scoped credential is
+   the primary enforcement.
 
 **I6 — Every admit/queue decision and every human promotion is audit-logged.**
 `Engine.intake` writes an audit record for every `decide_intake` call (author, decision,

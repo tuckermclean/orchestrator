@@ -229,6 +229,7 @@ risks introducing a new blocker. Minimal, targeted fixes converge faster.
 - `SPEC.md §8.3` — `decide_round`; `escalate:no-progress` via stable signatures
 - `SPEC.md §8.12` — `decide_specialists`; base-set + routing table
 - `SPEC.md §9.2` — `HarnessPort`; specialist spawn model; "act as" pattern; depth-1 rule
+  (depth-1 from the orchestration agent, i.e. this fixer; fix-specialists are leaves)
 - `SPEC.md §10.2` — `Engine.converge`; fix dispatch in R1/R2; no fix in R3
 - `AGENTS.md §7` — two-tier agent model; AgentRef values; spawn model
 - `TESTING.md §1.1` — gate requirements; missing tests are blockers

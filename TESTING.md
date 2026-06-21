@@ -96,10 +96,14 @@ Async; uses fake `ForgePort` (for `get_file_contents` and `list_comments`).
 | `test_resolve_blockers_sentinel_unscoped_fallback` | sentinel + stale footer + `round_started=None` | `1` |
 | `test_resolve_blockers_json_missing_blockers_field` | non-sentinel, `suggestions` but no `blockers` | `unknown` |
 | `test_resolve_blockers_nonexistent_file_no_footer` | verdict file absent + no footer | `unknown` |
+| `test_resolve_blockers_json_blockers_null` | non-sentinel, `"blockers": null` | `unknown` (non-numeric → unknown) |
+| `test_resolve_blockers_json_blockers_string` | non-sentinel, `"blockers": "bad"` | `unknown` (non-numeric → unknown) |
 
 Key boundary: `round_started` timestamp scopes the footer search; stale footers from
-prior rounds must not bleed through. `round_started=None` disables scoping.
-**Minimum: 11.**
+prior rounds must not bleed through. `round_started=None` disables scoping. Any present
+but non-numeric `blockers` value (null, false, string, float if platform rejects) returns
+`"unknown"` — the "missing/non-numeric" clause in §8.2 row 1 covers all such cases.
+**Minimum: 13.**
 
 ### §2.4 `decide_round` — `SPEC.md §8.3`
 
@@ -122,6 +126,7 @@ prior rounds must not bleed through. `round_started=None` disables scoping.
 | `test_decide_round_cap_reached_r3` | 3 | 3 | false | `["blocker-a"]` | `["blocker-b"]` | `escalate:cap-reached` |
 | `test_decide_round_sentinel_both_r3_no_verdict` | 3 | unknown | false | `["verdict-file-not-written"]` | `["verdict-file-not-written"]` | `escalate:no-verdict` |
 | `test_decide_round_sentinel_both_r3_cap_reached` | 3 | 1 | false | `["verdict-file-not-written"]` | `["verdict-file-not-written"]` | `escalate:cap-reached` |
+| `test_decide_round_r2_unknown_fix_happy_path` | 2 | unknown | false | `["old-sig"]` | `["new-sig"]` | `fix` (unknown + non-matching sigs → fix; not no-progress because sigs differ) |
 
 Validation error tests (`test_decide_round_invalid_round_zero`, `test_decide_round_invalid_round_four`,
 `test_decide_round_invalid_ci_green`, `test_decide_round_invalid_blockers`,
@@ -131,8 +136,9 @@ signatures enforce correctness at the call site.
 
 Key boundary: `unknown` blockers never produce `approve`. Empty `prev_sigs == curr_sigs
 == []` is NOT no-progress (row 3 requires `curr_sigs != []`). Row 3 (no-progress)
-fires before rows 5–7 even in round 3. `round` typed as `Literal[1,2,3]`; values outside
-this set raise `TypeError`. **Minimum: 22.**
+fires before rows 5–7 even in round 3. `unknown` blockers with non-matching sigs produce
+`fix`, not `escalate:no-progress` — only matching sigs can trigger no-progress. `round`
+typed as `Literal[1,2,3]`; values outside this set raise `TypeError`. **Minimum: 23.**
 
 ### §2.5 `decide_cap_action` — `SPEC.md §8.4`
 
@@ -412,8 +418,9 @@ in `tests/contracts/` parameterized over the implementation under test. Any new 
 | `test_forge_put_file_on_branch_overwrites` | `put_file_on_branch` | Overwrite existing file at `path`; `get_file_contents(path)` returns new bytes only |
 | `test_forge_copy_file_on_branch_creates_dest` | `copy_file_on_branch` | Seed file at `src_path`; after call, `get_file_contents(dest_path)` returns same bytes |
 | `test_forge_copy_file_on_branch_src_absent` | `copy_file_on_branch` | `src_path` absent → raises (adapter-specific error; fake raises `FileNotFoundError`) |
+| `test_forge_changed_files_in_list_prs` | `list_prs` | Seed PR with `changed_files=3`; `list_prs` returns object with `changed_files == 3`; verifies `PR.changed_files` and `len(get_changed_files())` share the same seeded value — `derive_pr_state` may use either; they must agree (`SPEC.md §8.10`) |
 
-**Minimum: 41.**
+**Minimum: 42.**
 
 ### §3.2a `ContractFixture` Arrange Protocol
 
@@ -449,8 +456,12 @@ and real.
 | `test_harness_get_run_status_completed` | `get_run_status` | Returns `RunStatus(state="completed", conclusion="success")` after fake completes run |
 | `test_harness_get_run_status_failed` | `get_run_status` | Returns `RunStatus(state="completed", conclusion="failure")` when fake injects failure — `state` is **`"completed"`**, not `"failed"`; `RunState` has no `"failed"` member (`SPEC.md §7`) |
 | `test_harness_dispatch_allowed_agent_refs_passed` | `dispatch` | `DispatchContext` with `allowed_agent_refs` non-null is recorded in harness call log |
+| `test_harness_cancel_idempotent` | `cancel` | `cancel(handle)` called twice on same handle → no error raised; second call is a no-op; `FakeHarnessPort` records exactly one cancel call |
+| `test_harness_cancel_on_timeout_reviewer` | `cancel` | Dispatch reviewer; call `cancel(reviewer_handle)` before faking completion; subsequent `get_run_status` returns `RunStatus(state="completed", conclusion="cancelled")`; no late write from that handle can overwrite a subsequently seeded file (`SPEC.md §9.2 cancel semantics`) |
+| `test_harness_cancel_on_timeout_fixer` | `cancel` | Same as above but for a fixer handle; asserts the pattern applies symmetrically to both reviewer and fixer timeout paths (`SPEC.md §10.2`) |
+| `test_harness_run_handle_round_trip` | `RunHandle` | `RunHandle` value returned by `dispatch` can be serialized to JSON-compatible string and deserialized back; `deserialize(serialize(h)) == h` — required for DB persistence in `ConvergeStateStore` between reconciler ticks (`SPEC.md §9.1`) |
 
-**Minimum: 9.**
+**Minimum: 13.**
 
 ### §3.4 `SessionPort` Contract Suite — `SPEC.md §9.3`
 
@@ -532,6 +543,8 @@ engine internals.
 | `test_dispatch_comment_uses_sonnet` | `issue_comment` with `@claude` | `route_entry` returns Sonnet/30 params; harness called with those |
 | `test_dispatch_redispatch_via_comment` | PR in BUILDING; `@claude` on issue | Second `harness.dispatch` with comment body in context |
 | `test_dispatch_full_lifecycle` | QUEUED → dispatch → PR CONVERGING → APPROVED → merged | Label progression and one `harness.dispatch` call |
+| `test_dispatch_pr_review_comment_triggers_dispatch` | `pull_request_review_comment` event with body containing `@claude`; PR carries `converge` label | `Engine.dispatch` called; `harness.dispatch` called with `model=claude-sonnet-4-6`, `max_turns=30` (Sonnet/30 params per `route_entry` — `SPEC.md §8.1`) |
+| `test_dispatch_no_dispatch_without_agent_work_label` | `issue_comment` event; body contains `@claude`; issue has only `LABEL_TRIAGE` (no `LABEL_AGENT_WORK`) | No `harness.dispatch` call; call log is empty — H5 guard: `issue_comment` route requires `LABEL_AGENT_WORK` on issue (`SPEC.md §10, §8.1 guard`) |
 
 ### §4.3 Converge Sub-Machine — `SPEC.md §5`
 
@@ -564,6 +577,12 @@ engine internals.
 | `test_converge_nits_deduplicated_across_rounds` | R1 nit "nit-a"; R2 nit "nit-a" (same); R3 approve | Follow-up issue body contains "nit-a" exactly once |
 | `test_converge_round_started_recorded` | Fresh converge call | After round 1 completes, DB has non-null `round_started` for this PR |
 | `test_converge_awaits_fixer_before_next_round` | R1: 1 blocker → fixer dispatched | R2 reviewer is NOT dispatched until fixer `RunStatus.state == "completed"`; harness call log shows fixer completed before reviewer R2 starts |
+| `test_converge_fixer_timeout_escalates_e11` | R1: 1 blocker; fixer dispatched but fake delays completion past `CI_WAIT_S` | `harness.cancel(fixer_handle)` called; `LABEL_NEEDS_HUMAN` added (E11 fixer-timeout); `FakeConvergeStateStore` shows `clear_converge_state(pr_ref)` called; returns `ESCALATED` (`SPEC.md §6 E11`, `§10.2`) |
+| `test_converge_sentinel_seeded_before_reviewer_dispatch` | Fresh PR entering converge loop; R1 start | `FakeHarnessPort` / `FakeForgePort` call log ordering: `put_file_on_branch(.converge-verdict.json, sentinel)` appears BEFORE `harness.dispatch(reviewer)` — sentinel is written before any reviewer runs to prevent stale verdict reads (`SPEC.md §10.2`) |
+| `test_converge_clear_state_on_e1_protected_path` | PR touches `PROTECTED_PATHS` entry; `Engine.converge` runs | Returns `ESCALATED`; `FakeConvergeStateStore.clear_calls` contains `pr_ref` — converge state cleared on E1 so recovery always restarts at R1 (`SPEC.md §10.2` H3 normative note) |
+| `test_converge_clear_state_on_e6_empty_pr` | `changed_files=0`, non-draft PR; `Engine.converge` runs | Returns `ESCALATED` (E6); `FakeConvergeStateStore.clear_calls` contains `pr_ref` — same normative ordering as E1 (`SPEC.md §10.2`) |
+| `test_converge_idempotency_gate_draft_pr` | PR carries `converge` label AND `draft=true` | `Engine.converge` returns immediately (state `BUILDING`); `FakeHarnessPort.dispatch_calls` is empty — draft gate short-circuits before any reviewer dispatch (H1 fix, `SPEC.md §10.2`) |
+| `test_converge_audit_marker_posted_on_retry` | R3: `blockers="unknown"`, `retry_count < NO_VERDICT_RETRY_CAP` → P11 re-arm | `forge.post_comment` call log contains a comment with audit marker text `ch=converge-retry count=N` (counter value at time of post); AND `harness.trigger_workflow` called — both effects must appear (`SPEC.md §10.2 RC-3/P11`) |
 
 ### §4.4 Reconciler Channels RC-1..RC-4 — `SPEC.md §4`
 
@@ -596,6 +615,11 @@ engine internals.
 | `test_reconciler_rc1_nondraft_needs_human_excluded` | Non-draft PR with `agent:implementing` AND `needs-human` | Not in RC-1 scope (terminal); no action |
 | `test_reconciler_runs_all_channels` | Mixed: 1 stale draft + 1 conflict + 1 converge + 1 orphan | `ReconcileReport` shows `stale_acted=1, conflicts_flagged=1, rearmed=1, redispatched=1` |
 | `test_reconciler_channels_concurrent` | Two stale drafts in RC-1; two orphan issues in RC-4 | Both acted on; order within channel is serial |
+| `test_reconciler_rc5_nudge_stale_awaiting_promotion` | Issue carries `LABEL_AWAITING_PROMOTION`; `created_at` is older than `AWAITING_PROMOTION_NUDGE_S` | RC-5 fires; `forge.post_comment` called on issue with nudge body (operator notification); no `LABEL_AGENT_WORK` added — RC-5 notifies, does not auto-promote (`SPEC.md §4 RC-5`) |
+| `test_reconciler_rc5_skip_recent_awaiting_promotion` | Issue carries `LABEL_AWAITING_PROMOTION`; `created_at` within `AWAITING_PROMOTION_NUDGE_S` | No action; RC-5 does not nudge before threshold |
+| `test_reconciler_rc1_counter_incremented_on_redispatch` | RC-1 stale → `redispatch` action taken | After `Engine.reconcile`: `FakeCounterStore.get_count("stale-pr", pr_ref) == 1`; counter incremented atomically (`SPEC.md §4`) |
+| `test_reconciler_rc1_audit_marker_posted_on_redispatch` | RC-1 stale → `redispatch` action taken | `forge.post_comment` call log on PR contains comment with audit marker `ch=stale-pr count=N` where N matches counter value; marker distinguishes automated action from agent comments (`SPEC.md §4 audit note`) |
+| `test_reconciler_rc4_audit_marker_posted` | RC-4 orphan issue → `redispatch` action taken | `forge.post_comment` call log on issue contains comment with audit marker `ch=orphan count=N`; counter value matches `FakeCounterStore` state after increment |
 
 ### §4.5 `OrchestratorService.deescalate_pr` — P16/P17 recovery
 
@@ -604,8 +628,10 @@ engine internals.
 | `test_deescalate_pr_removes_needs_human` | PR with `LABEL_NEEDS_HUMAN` + `converge`; operator calls `deescalate_pr` | `LABEL_NEEDS_HUMAN` removed from PR; `converge` label intact; subsequent `Engine.reconcile` (RC-3) re-arms the PR |
 | `test_deescalate_pr_resets_counters` | PR with `stale-pr` count=2, `converge-retry` count=2; `deescalate_pr` called | `FakeCounterStore` shows both `"stale-pr"` and `"converge-retry"` counters reset to 0 after call |
 | `test_deescalate_pr_writes_audit_record` | Any escalated PR; `deescalate_pr` called | Audit log entry contains `event="deescalate_pr"`, operator username, timestamp, `pr_labels_at_deescalation` non-empty |
+| `test_deescalate_pr_clears_converge_state` | PR with `FakeConvergeStateStore` seeded at round=2, `round_started=T`; `deescalate_pr` called | After call: `FakeConvergeStateStore.get_converge_round(pr_ref) == 0` and `get_round_started(pr_ref) == None` — state cleared so next `Engine.converge` starts at R1 (H3 fix, `SPEC.md §11.3`) |
+| `test_deescalate_pr_full_recovery_cycle` | PR escalated (E2, no-progress); `deescalate_pr` called; then `Engine.converge` called again with reviewer returning 0 blockers + CI green | Full P16 path: de-escalation clears state; `Engine.converge` completes in R1 → returns `APPROVED`; `LABEL_READY` added; no vestige of prior converge state (H3 regression guard) |
 
-**Minimum: 3.**
+**Minimum: 5.**
 
 ---
 
@@ -637,6 +663,7 @@ These tests assert the invariants from `SECURITY.md §3`. A failing security tes
 | `test_security_spawn_rejected_when_allowed_refs_none` | I9 | Implementer/orchestrator dispatch sets `allowed_agent_refs=None`; harness `FakeHarnessPort` records spawns without raising — confirm `None` means unrestricted, not reject-all; **contrast test:** confirm a `list`-valued allow-set DOES reject out-of-set spawns |
 | `test_security_promote_holds_advisory_lock` | I7 | Simulate concurrent `promote` + `issues:labeled agent-work` event on same issue; assert `FakeForgePort` never observes both `AWAITING_PROMOTION` and `AGENT_WORK` labels on the same entity at the same time |
 | `test_security_protected_path_match_matrix` | I2/B1 | For each pattern in PROTECTED_PATHS and a set of matching/non-matching path strings (exercise `**`, `*`, bare filename semantics), assert `Engine.converge` escalates on match and proceeds on non-match; use `pathspec`-compatible matching |
+| `test_security_audit_log_decline` | I6 | Operator calls `OrchestratorService.decline(issue_ref, reason="out-of-scope")` → audit log entry contains `event="decline"`, operator username, issue ref, timestamp, and `reason` field; `LABEL_AWAITING_PROMOTION` removed; issue closed (`SPEC.md §3 I0c`) |
 
 `test_security_protected_path_all_patterns` must iterate over every entry in `SPEC.md §7
 PROTECTED_PATHS` by **programmatically reading the constant at test runtime** — never
@@ -663,6 +690,8 @@ row in the match matrix, the coverage check fails.
 | `test_redispatch_count_survives_crash` | `FakeCounterStore` pre-seeded with `count("orphan")=2` (simulating 2 prior re-dispatches before a crash); fresh `Engine.reconcile` call reads counter from DB → `decide_redispatch_action` returns `redispatch` (below `ISSUE_REDISPATCH_CAP=3`); third cycle increments to 3 → `escalate` (E10, I4). No in-process state carries over between calls. |
 | `test_retry_count_survives_crash` | `FakeCounterStore` pre-seeded with `count("converge-retry")=1`; fresh `Engine.converge` on same PR reads counter → retry count 1 < `NO_VERDICT_RETRY_CAP=2` → re-arm triggered (P11); second crash with counter=2 → retry at cap → `ESCALATED` (E3). |
 | `test_counter_db_wins_over_comment_count` | `FakeCounterStore` has `count("orphan")=1`; fake forge has 3 `ch=orphan` marker comments on same issue; `Engine.reconcile` reads counter (1), not comment count (3) → `redispatch` (below cap); asserts counter store value is authoritative source. |
+| `test_dedup_window_expiry_allows_reprocessing` | Seed LRU dedup window with `delivery_id=X` at time T; advance fake clock past `DEDUP_WINDOW_S`; re-deliver same event | `handle_event` returns `handled=true`; event is processed normally — expired entry does not permanently block redelivery (`SPEC.md §7 dedup_window`) |
+| `test_swarm_limits_semaphore_exhaustion` | Configure `SwarmLimits.max_concurrent_agents = N`; dispatch N+1 agents concurrently via `FakeHarnessPort` | First N dispatches complete; (N+1)th is queued/rejected until one slot frees; total agents in flight never exceeds N; `FakeHarnessPort` enforces the semaphore (`SPEC.md §7 SwarmLimits`) |
 
 ---
 
@@ -757,8 +786,8 @@ markers and cross-references against a machine-readable coverage manifest
 |---|---|---|
 | §2.1 | `decide_intake` | 9 |
 | §2.2 | `route_entry` | 6 |
-| §2.3 | `resolve_blockers` | 11 |
-| §2.4 | `decide_round` | 22 |
+| §2.3 | `resolve_blockers` | 13 |
+| §2.4 | `decide_round` | 23 |
 | §2.5 | `decide_cap_action` | 6 |
 | §2.6 | `decide_stale_action` | 20 |
 | §2.7 | `decide_rearm_action` | 15 |
@@ -768,19 +797,19 @@ markers and cross-references against a machine-readable coverage manifest
 | §2.11 | State derivation helpers | 18 |
 | §2.12 | `decide_specialists` | 26 |
 | §2.12a | Pack acquisition | 4 |
-| §3.2 | `ForgePort` contract | 41 |
-| §3.3 | `HarnessPort` contract | 9 |
+| §3.2 | `ForgePort` contract | 42 |
+| §3.3 | `HarnessPort` contract | 13 |
 | §3.4 | `SessionPort` contract | 8 |
 | §3.5 | `CounterStore` contract | 7 |
 | §3.6 | `ConvergeStateStore` contract | 7 |
 | §4.1 | Intake paths | 6 |
-| §4.2 | Dispatch lifecycle | 5 |
-| §4.3 | Converge sub-machine | 27 |
-| §4.4 | Reconciler channels | 27 |
-| §4.5 | `deescalate_pr` recovery | 3 |
-| §5 | Security / trust | 21 |
-| §6 | Idempotency / crash-only | 14 |
-| **Total** | | **~343** |
+| §4.2 | Dispatch lifecycle | 7 |
+| §4.3 | Converge sub-machine | 33 |
+| §4.4 | Reconciler channels | 32 |
+| §4.5 | `deescalate_pr` recovery | 5 |
+| §5 | Security / trust | 22 |
+| §6 | Idempotency / crash-only | 16 |
+| **Total** | | **~369** |
 
 Floors, not ceilings. The `coverage_map.yaml` + `@covers` marker system (§7.3) enforces
 the floor automatically; the CI gate fails on any uncovered truth-table row.

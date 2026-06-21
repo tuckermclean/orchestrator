@@ -39,7 +39,7 @@ implement a compromise — escalate to human by opening an issue and stopping.
 | 2 | `SECURITY.md` | Security invariants — protected path |
 | 3 | `SPEC.md §7–§13` | Constants, decision functions, ports, service contract |
 | 4 | `ARCHITECTURE.md` | System architecture — implementation must match |
-| 5 | `TESTING.md` | Test contract — binding, ~275+ cases |
+| 5 | `TESTING.md` | Test contract — binding, ~369+ cases |
 | 6 | `WEBUI.md` | PWA spec |
 | 7 | `agents/*.md` | Runtime swarm contracts — implement as harness-fed prompt templates |
 | 8 | `README.md` | Index only — lowest authority |
@@ -107,6 +107,7 @@ The full test contract is `TESTING.md`. Non-negotiables:
 - Full test suite + typecheck + lint must all pass before `gh pr ready`.
 - Every truth-table row in `SPEC.md §8` maps to at least one named test case.
 - A missing or failing test is a **blocker**, not a nit.
+- The minimum test count is **~369** (not ~343 — TESTING.md appendix is authoritative).
 
 Build tests in this order: (1) decision functions, (2) port fakes + contract suites,
 (3) engine integration, (4) security tests, (5) idempotency tests, then real adapters,
@@ -181,8 +182,10 @@ subagent_type: "general-purpose"
 prompt: "Act as the agent defined in .agents/<AgentRef>. Read that file first."
 ```
 
-Depth-1 only. An orchestration agent may spawn specialists; a specialist must not spawn
-further sub-agents.
+Depth-1 only (from the orchestration agent). An orchestration agent (reviewer, fixer)
+may spawn fix-specialists; a fix-specialist must not spawn further sub-agents. "Depth-1"
+is measured from the orchestration agent, not from the Engine — this allows the fixer to
+spawn fix-specialists (depth-1 from the fixer, depth-2 from the Engine). See `SPEC.md §9.2`.
 
 **Allow-set enforcement (D2 / I9).** Before dispatching a reviewer or fixer, the Engine
 computes `allowed_agent_refs = decide_specialists(changed_paths, round)` and passes it in
@@ -215,11 +218,16 @@ Work through these in order. Don't start a phase until the previous phase's test
 **Phase 1 — Decision Functions and Types.** Domain types from `SPEC.md §7` + all 13
 decision functions (`SPEC.md §8.1–§8.12`; note §8.10 defines two functions:
 `derive_issue_state` and `derive_pr_state`). Write every truth-table test from
-`TESTING.md §2` alongside each function.
+`TESTING.md §2` alongside each function. **Also in Phase 1:** author
+`coverage_map.yaml` at the repo root (see `TESTING.md §7.3`). This file must enumerate
+every truth-table row from every `SPEC.md §8` function before the Phase 1 CI gate
+can pass. Derive it by reading `SPEC.md §8` and listing each `(section, row-id)` key
+with the test names that cover it. The CI gate will reject missing rows.
 
 **Phase 2 — Port Fakes and Contract Suites.** `FakeForgePort`, `FakeHarnessPort`,
-`FakeSessionPort` with call log, configurable returns, fault injection, reset. Pass shared
-contract suites (`TESTING.md §3`) before writing any real adapter.
+`FakeSessionPort`, `FakeCounterStore`, `FakeConvergeStateStore` — all five fakes — with
+call log, configurable returns, fault injection, reset. Pass shared contract suites
+(`TESTING.md §3`) before writing any real adapter.
 
 **Phase 3 — Engine.** `Engine.dispatch`, `Engine.converge`, `Engine.reconcile`,
 `Engine.intake` against the fakes. Write integration (`TESTING.md §4`), security

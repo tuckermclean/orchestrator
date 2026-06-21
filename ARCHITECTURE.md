@@ -199,7 +199,7 @@ Postgres.
 | **Entity counters** (`CounterStore`) | `(entity_ref, channel) → count` for `redispatch_count`, `retry_count` per channel; atomic increment; authoritative over marker comments |
 | **Converge round state** (`ConvergeState`) | `(pr_ref) → {converge_round, round_started}` — persisted so RC-3 re-arm can resume at the correct round after a crash |
 | **Audit log** | `{event, actor/operator, entity_ref, decision/outcome, timestamp}` — immutable append for intake decisions and promotions (I6) |
-| **Run index** | `run_id`, repo, issue/PR ref, status, timestamps — for PWA dashboard; not the entity state source |
+| **Run index** | `run_id`, repo, issue/PR ref, status, timestamps, `escalation_cause: string \| None` — for PWA dashboard and `deescalate_pr` audit records; not the entity state source. `escalation_cause` is written when the engine records an escalation (E1–E11 code); `deescalate_pr` reads it to populate the de-escalation audit record |
 | **Dedup LRU** | `delivery_id` ring buffer (size = `Config.dedup_window`); shared store for multi-replica |
 | **Push subscriptions** | Operator device push endpoints for escalation/promotion/approval alerts |
 | **Operator accounts** | Login credentials or API tokens |
