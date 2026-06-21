@@ -571,6 +571,7 @@ Pure label→state projection functions. Synchronous. No I/O.
 `derive_issue_state(labels, closed)` → `IssueState`:
 - `closed == true` → `CLOSED` (beats all labels)
 - `needs-human ∈ labels` → `ESCALATED`
+- `awaiting-promotion ∈ labels` → `PENDING` (see §2 state table)
 - else → `QUEUED`
 
 `derive_pr_state(labels, draft, merged, changed_files)` → `PRState ∈ {MERGED, ESCALATED, APPROVED, EMPTY, CONVERGING, BUILDING}`:
