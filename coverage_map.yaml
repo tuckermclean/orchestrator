@@ -26,6 +26,8 @@
     tests: ["test_derive_issue_closed", "test_derive_issue_closed_beats_needs_human", "test_derive_issue_closed_beats_agent_work"]
   "derive_issue_state-escalated":
     tests: ["test_derive_issue_escalated"]
+  "derive_issue_state-pending":  # @covers §8.10 PENDING row (awaiting-promotion label)
+    tests: ["test_derive_issue_pending", "test_derive_issue_closed_beats_awaiting_promotion", "test_derive_issue_needs_human_beats_awaiting_promotion"]
   "derive_issue_state-queued":
     tests: ["test_derive_issue_queued_agent_work", "test_derive_issue_queued_default"]
   "derive_pr_state-merged":
