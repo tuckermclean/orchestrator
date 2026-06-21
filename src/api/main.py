@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,9 +19,12 @@ from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
 
 
-def create_app(service: OrchestratorService) -> FastAPI:
+def create_app(
+    service: OrchestratorService,
+    lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+) -> FastAPI:
     """Create the FastAPI application, mounting static UI if built."""
-    app = FastAPI(title="Orchestrator", version="0.1.0")
+    app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
 
     # CORS for dev (Vite dev server at :5173)
     app.add_middleware(
@@ -89,12 +94,15 @@ async def _seed_demo_data(service: OrchestratorService) -> None:
 
 # Singleton for ASGI app (used by uvicorn)
 _service = _build_dev_service()
-app = create_app(_service)
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _seed_demo_data(_service)
+    yield
+
+
+app = create_app(_service, lifespan=_lifespan)
 
 
 if __name__ == "__main__":

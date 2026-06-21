@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from src.decisions.pipeline_health import pipeline_health
 from src.domain.types import (
     HealthReport,
@@ -9,11 +11,24 @@ from src.domain.types import (
     PRRef,
     RepoRef,
     RunDetail,
+    RunEvent,
     RunHandle,
     RunSummary,
 )
 from src.engine.dispatch import Engine
 from src.ports.base import ForgePort, HarnessPort, SessionPort
+
+
+def _extract_repo(payload: dict[str, object]) -> RepoRef | None:
+    repo_data = payload.get("repository", {})
+    if not isinstance(repo_data, dict):
+        return None
+    owner_data = repo_data.get("owner")
+    owner = (
+        str(owner_data.get("login", "")) if isinstance(owner_data, dict)
+        else str(owner_data or "")
+    )
+    return RepoRef(owner=owner, name=str(repo_data.get("name", "")))
 
 
 class OrchestratorService:
@@ -38,14 +53,8 @@ class OrchestratorService:
         if "issue" in payload:
             issue_data = payload["issue"]
             if isinstance(issue_data, dict):
-                repo_data = payload.get("repository", {})
-                if isinstance(repo_data, dict):
-                    repo = RepoRef(
-                        owner=str(repo_data.get("owner", {}).get("login", ""))
-                        if isinstance(repo_data.get("owner"), dict)
-                        else str(repo_data.get("owner", "")),
-                        name=str(repo_data.get("name", "")),
-                    )
+                repo = _extract_repo(payload)
+                if repo is not None:
                     issue_ref = IssueRef(
                         repo=repo,
                         number=int(issue_data.get("number", 0)),
@@ -54,14 +63,8 @@ class OrchestratorService:
         if "pull_request" in payload:
             pr_data = payload["pull_request"]
             if isinstance(pr_data, dict):
-                repo_data = payload.get("repository", {})
-                if isinstance(repo_data, dict):
-                    repo = RepoRef(
-                        owner=str(repo_data.get("owner", {}).get("login", ""))
-                        if isinstance(repo_data.get("owner"), dict)
-                        else str(repo_data.get("owner", "")),
-                        name=str(repo_data.get("name", "")),
-                    )
+                repo = _extract_repo(payload)
+                if repo is not None:
                     pr_ref = PRRef(
                         repo=repo,
                         number=int(pr_data.get("number", 0)),
@@ -85,6 +88,9 @@ class OrchestratorService:
     async def get_run(self, run_id: str) -> RunDetail:
         return await self.session.get_run(run_id)
 
+    def stream_run(self, run_id: str) -> AsyncIterator[RunEvent]:
+        return self.session.stream_events(run_id)
+
     async def status(self, repo: RepoRef) -> HealthReport:
         return await pipeline_health(repo, self.forge)
 
@@ -93,7 +99,7 @@ class OrchestratorService:
         issue_ref = IssueRef(repo=repo, number=1)
         handle = await self.engine.dispatch("issues", issue_ref=issue_ref)
         if handle is None:
-            # If dedup guard fired, create a fresh dispatch directly
+            # Dedup guard fired; bypass it for the dev dispatch button (demo-only path).
             from src.decisions.route_entry import route_entry as _route_entry
             from src.domain.types import DispatchContext
 
