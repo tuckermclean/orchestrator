@@ -967,6 +967,14 @@ def test_harness_materialize_contract_copies_to_workspace(tmp_path: Any) -> None
     # The file must be non-empty (not a zero-byte placeholder)
     assert dest.stat().st_size > 0, "Materialised contract must be non-empty"
 
+    # The contract must be git-ignored so `git add -A` cannot sweep it into the
+    # PR (agents/** is a PROTECTED_PATH → converge E1 escalation otherwise).
+    exclude = pathlib.Path(repo_dir) / ".git" / "info" / "exclude"
+    assert exclude.exists(), "_materialize_contract must write .git/info/exclude (#111)"
+    assert "/agents/orchestrator.md" in exclude.read_text(), (
+        "Materialised contract must be added to .git/info/exclude (#111)"
+    )
+
 
 def test_harness_materialize_contract_raises_if_absent(tmp_path: Any) -> None:
     """#111: _materialize_contract raises FileNotFoundError for a missing contract.

@@ -1312,6 +1312,26 @@ def test_k8s_entry_script_materialises_contract() -> None:
 
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_gitignores_contract() -> None:
+    """#111: entry script git-ignores the materialised contract.
+
+    agents/** is a PROTECTED_PATH; if the agent's `git add -A` swept the copied
+    contract into the PR, the converge protected-path check (E1) would escalate
+    and stall a greenfield run. The script must append the repo-relative contract
+    path to .git/info/exclude so untracked copies are never staged.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/orchestrator.md",
+    )
+    assert ".git/info/exclude" in script, (
+        "Entry script must add the contract to .git/info/exclude (#111)"
+    )
+    assert "/agents/orchestrator.md" in script
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
 def test_k8s_entry_script_no_contract_step_when_empty() -> None:
     """#111: when no contract provided, entry script has no contract materialisation."""
     backend = _make_k8s_backend()

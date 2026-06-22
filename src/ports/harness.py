@@ -503,6 +503,25 @@ class ClaudeCodeHarnessPort:
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(src_path), str(dest_dir / basename))
 
+        # Git-ignore the materialised contract so an agent's `git add -A` cannot
+        # sweep it into the PR.  agents/** is a PROTECTED_PATH, so a committed
+        # contract would trip the converge protected-path check (E1) and stall a
+        # greenfield run on a spurious escalation.  .git/info/exclude is repo-local
+        # and only affects *untracked* files — a repo that legitimately tracks the
+        # contract (e.g. the orchestrator's own repo) is unaffected (#111).
+        exclude_path = pathlib.Path(repo_dir) / ".git" / "info" / "exclude"
+        exclude_line = f"/{contract}\n"
+        try:
+            exclude_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = exclude_path.read_text() if exclude_path.exists() else ""
+            if exclude_line not in existing:
+                with exclude_path.open("a") as fh:
+                    fh.write(exclude_line)
+        except OSError:
+            # Best-effort: a missing .git/info is non-fatal; the converge E1 check
+            # remains the backstop.
+            pass
+
     async def _configure_git_identity(self, repo_dir: str, gh_token: str) -> None:
         """Configure repo-local git identity and push credentials for the agent (#112).
 

@@ -637,6 +637,13 @@ class K8sJobBackend:
                 f'{{ echo "FATAL: contract not found: {baked_contract}" >&2; exit 1; }}\n'
                 "mkdir -p /workspace/repo/agents\n"
                 f"cp {baked_contract} /workspace/repo/agents/{shlex.quote(contract_basename)}\n"
+                # Git-ignore the materialised contract so `git add -A` cannot sweep
+                # it into the PR.  agents/** is a PROTECTED_PATH; a committed contract
+                # would trip the converge protected-path check (E1) and stall a
+                # greenfield run.  .git/info/exclude is repo-local and only affects
+                # untracked files (#111).
+                "mkdir -p /workspace/repo/.git/info\n"
+                f"echo {shlex.quote('/' + contract)} >> /workspace/repo/.git/info/exclude\n"
             )
         else:
             contract_step = ""
