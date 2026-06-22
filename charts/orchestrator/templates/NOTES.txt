@@ -15,12 +15,23 @@ Orchestrator has been deployed to namespace {{ .Release.Namespace }}.
    - Secret:  The value of OPERATOR_SECRET_KEY in your {{ .Values.secretName }} secret
    - Events:  Issues, Pull Requests, Issue Comments, PR Review Comments
 
-4. Register the first repository:
-   curl -X POST https://{{ (first .Values.ingress.hosts).host }}/api/repos \
+4. Log in (required before the authenticated API below and the web UI):
+   Open https://{{ (first .Values.ingress.hosts).host }}/ and sign in as:
+     username: admin
+     password: <the OPERATOR_BOOTSTRAP_PASSWORD you set in {{ .Values.secretName }}>
+   (The 'admin' operator is seeded at boot ONLY if OPERATOR_BOOTSTRAP_PASSWORD is set.
+   Add operators via POST /api/operators once logged in. Note: operator accounts are
+   in-memory until DB-backed stores land — admin re-seeds from the env on restart.)
+
+5. Register the first repository (needs a bearer token from step 4):
+   TOKEN=$(curl -s -X POST https://{{ (first .Values.ingress.hosts).host }}/api/auth \
      -H "Content-Type: application/json" \
+     -d '{"username":"admin","password":"<OPERATOR_BOOTSTRAP_PASSWORD>"}' | jq -r .access_token)
+   curl -X POST https://{{ (first .Values.ingress.hosts).host }}/api/repos \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
      -d '{"owner":"<owner>","name":"<repo>","enabled":true,"intake_enabled":false}'
 
-5. View pipeline status:
+6. View pipeline status:
    https://{{ (first .Values.ingress.hosts).host }}/
 
 Secret keys the operator must supply in {{ .Values.secretName }}:
@@ -29,6 +40,8 @@ Secret keys the operator must supply in {{ .Values.secretName }}:
   GITHUB_APP_PRIVATE_KEY       — PEM-encoded RS256 private key (App mode)
   GITHUB_APP_INSTALLATION_ID   — Installation ID (App mode)
   OPERATOR_SECRET_KEY          — Webhook HMAC secret + operator JWT signing key
+  OPERATOR_BOOTSTRAP_PASSWORD  — seeds the initial 'admin' operator at boot (REQUIRED to
+                                 log in; without it no operator exists and login is impossible)
   CLAUDE_CODE_OAUTH_TOKEN      — Claude API OAuth token for agent harness
   PUSH_VAPID_PRIVATE_KEY       — VAPID private key for web push notifications
 

@@ -37,10 +37,13 @@ replicaCount: 1
 #     --from-literal=GITHUB_APP_PRIVATE_KEY=<pem_value> \
 #     --from-literal=GITHUB_APP_INSTALLATION_ID=<value> \
 #     --from-literal=OPERATOR_SECRET_KEY=<webhook_hmac_secret> \
+#     --from-literal=OPERATOR_BOOTSTRAP_PASSWORD=<admin_login_password> \
 #     --from-literal=CLAUDE_CODE_OAUTH_TOKEN=<value> \
 #     --from-literal=PUSH_VAPID_PRIVATE_KEY=<value>
 #
-# See ARCHITECTURE §6 for full field descriptions.
+# OPERATOR_BOOTSTRAP_PASSWORD seeds the initial 'admin' operator at boot — REQUIRED to
+# log into the web UI / authenticated API (without it no operator exists, login is
+# impossible). See ARCHITECTURE §6 for full field descriptions.
 secretName: orchestrator-secrets
 
 # -- ConfigMap / environment --

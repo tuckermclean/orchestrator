@@ -30,6 +30,7 @@ replicaCount: 1
 #     --from-literal=GITHUB_APP_PRIVATE_KEY=... \
 #     --from-literal=GITHUB_APP_INSTALLATION_ID=... \
 #     --from-literal=OPERATOR_SECRET_KEY=... \
+#     --from-literal=OPERATOR_BOOTSTRAP_PASSWORD=...   # seeds 'admin'; REQUIRED to log in
 #     --from-literal=CLAUDE_CODE_OAUTH_TOKEN=... \
 #     --from-literal=PUSH_VAPID_PRIVATE_KEY=...
 secretName: orchestrator-secrets
