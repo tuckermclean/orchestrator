@@ -114,9 +114,10 @@ def test_build_prod_service_sqlite_stores_for_file_db_url() -> None:
 
         from src.api.main import _build_prod_service
 
-        service, _secret, op_store, push_store, _reg, db_audit, db_counter, db_converge = (
-            _build_prod_service()
-        )
+        (
+            service, _secret, op_store, push_store,
+            _reg, db_audit, db_counter, db_converge, db_run_store,
+        ) = _build_prod_service()
 
     # Engine stores should be SQLite-backed
     assert db_counter is not None
@@ -124,6 +125,12 @@ def test_build_prod_service_sqlite_stores_for_file_db_url() -> None:
     assert db_converge is not None
     assert isinstance(db_converge, SQLiteConvergeStateStore)
     assert db_audit is not None
+
+    # Run store should also be SQLite-backed
+    from src.db.run_store import SQLiteRunStore
+
+    assert db_run_store is not None
+    assert isinstance(db_run_store, SQLiteRunStore)
 
     # OrchestratorService should have the SQLite counter and converge stores wired
     assert service._counter is db_counter
@@ -162,13 +169,15 @@ def test_build_prod_service_memory_stores_for_memory_db_url() -> None:
 
         from src.api.main import _build_prod_service
 
-        _service, _secret, op_store, push_store, _reg, _db_audit, db_counter, db_converge = (
-            _build_prod_service()
-        )
+        (
+            _service, _secret, op_store, push_store,
+            _reg, _db_audit, db_counter, db_converge, db_run_store,
+        ) = _build_prod_service()
 
     # SQLite stores should NOT be selected for in-memory path
     assert db_counter is None
     assert db_converge is None
+    assert db_run_store is None
     assert not isinstance(op_store, SQLiteOperatorStore)
     assert not isinstance(push_store, SQLitePushStore)
 
@@ -197,7 +206,7 @@ def test_build_prod_service_memory_stores_when_db_url_unset() -> None:
 
         from src.api.main import _build_prod_service
 
-        _service, _secret, _op, _push, _reg, _db_audit, db_counter, db_converge = (
+        _service, _secret, _op, _push, _reg, _db_audit, db_counter, db_converge, db_run_store = (
             _build_prod_service()
         )
 
@@ -206,6 +215,7 @@ def test_build_prod_service_memory_stores_when_db_url_unset() -> None:
 
     assert db_counter is None
     assert db_converge is None
+    assert db_run_store is None
 
 
 def test_build_prod_service_dev_mode_no_sqlite_stores() -> None:
@@ -221,7 +231,7 @@ def test_build_prod_service_dev_mode_no_sqlite_stores() -> None:
 
         from src.api.main import _build_prod_service
 
-        _service, _secret, _op, _push, _reg, db_audit, db_counter, db_converge = (
+        _service, _secret, _op, _push, _reg, db_audit, db_counter, db_converge, db_run_store = (
             _build_prod_service()
         )
 
@@ -229,6 +239,7 @@ def test_build_prod_service_dev_mode_no_sqlite_stores() -> None:
     assert db_audit is None
     assert db_counter is None
     assert db_converge is None
+    assert db_run_store is None
 
 
 # ---------------------------------------------------------------------------

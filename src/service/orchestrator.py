@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 from src.db.audit import AuditLog
+from src.db.run_store import FakeRunStore, SQLiteRunStore
 from src.decisions.pipeline_health import pipeline_health
 from src.domain.types import (
     LABEL_AGENT_WORK,
@@ -15,6 +16,7 @@ from src.domain.types import (
     LABEL_NEEDS_HUMAN,
     LABEL_TRIAGE,
     RECONCILER_CRON,
+    DispatchContext,
     HealthReport,
     IssueRef,
     PRRef,
@@ -22,6 +24,7 @@ from src.domain.types import (
     RunDetail,
     RunEvent,
     RunHandle,
+    RunStatus,
     RunSummary,
     TriageItem,
 )
@@ -41,6 +44,66 @@ from src.service.registry import RepoRegistryPort
 
 # Default LRU dedup window (number of delivery IDs to remember)
 _DEFAULT_DEDUP_WINDOW = 1000
+
+
+# ---------------------------------------------------------------------------
+# RunRecordingHarness — HarnessPort wrapper that records dispatched runs
+# ---------------------------------------------------------------------------
+
+
+class RunRecordingHarness:
+    """Wraps any HarnessPort and records each dispatched run into a RunStore.
+
+    The run_store (FakeRunStore or SQLiteRunStore) becomes the single source of
+    truth for run metadata that ``list_runs`` / ``get_run`` read.  The underlying
+    harness's RunEventStore remains the authority for live events / status.
+
+    Repo is extracted from DispatchContext.issue_ref or DispatchContext.pr_ref.
+    When neither is set the dispatch is recorded under a placeholder repo so the
+    run still appears in a full listing (it will not match repo-scoped queries).
+    Type is derived from the contract path basename (e.g. "triager.md" → "triager").
+    """
+
+    def __init__(
+        self,
+        harness: HarnessPort,
+        run_store: FakeRunStore | SQLiteRunStore,
+    ) -> None:
+        self._harness = harness
+        self._run_store = run_store
+
+    async def dispatch(self, context: DispatchContext) -> RunHandle:
+        handle = await self._harness.dispatch(context)
+        # Determine repo from context references (issue_ref takes priority).
+        if context.issue_ref is not None:
+            repo = context.issue_ref.repo
+        elif context.pr_ref is not None:
+            repo = context.pr_ref.repo
+        else:
+            repo = RepoRef(owner="unknown", name="unknown")
+        # Derive a human-readable type label from the contract path basename.
+        contract_base = context.contract.rsplit("/", 1)[-1].removesuffix(".md")
+        self._run_store.record(
+            run_id=handle.run_id,
+            repo=repo,
+            type=contract_base,
+            model=context.model,
+            started_at=datetime.now(tz=UTC),
+        )
+        return handle
+
+    # Delegate all other HarnessPort methods to the wrapped harness.
+    async def trigger_workflow(self, name: str, ref: str, inputs: dict[str, object]) -> None:
+        await self._harness.trigger_workflow(name, ref, inputs)
+
+    async def trigger_ci(self, pr_ref: PRRef) -> None:
+        await self._harness.trigger_ci(pr_ref)
+
+    async def get_run_status(self, handle: RunHandle) -> RunStatus:
+        return await self._harness.get_run_status(handle)
+
+    async def cancel(self, handle: RunHandle) -> None:
+        await self._harness.cancel(handle)
 
 
 def _extract_repo(payload: dict[str, object]) -> RepoRef | None:
@@ -68,16 +131,29 @@ class OrchestratorService:
         lock_provider: LockProvider | None = None,
         dedup_window: int = _DEFAULT_DEDUP_WINDOW,
         registry: RepoRegistryPort | None = None,
+        run_store: FakeRunStore | SQLiteRunStore | None = None,
     ) -> None:
+        # Run store — single source of truth for dispatched run metadata.
+        # FakeRunStore is the default (in-memory, no persistence); callers may
+        # inject SQLiteRunStore for pod-lifetime durability.
+        self._run_store: FakeRunStore | SQLiteRunStore = (
+            run_store if run_store is not None else FakeRunStore()
+        )
+
+        # Wrap the harness with the recording shim so every dispatch — whether
+        # triggered via Engine, IntakeEngine, promote(), or dev_dispatch() — is
+        # recorded in the run store with the correct repo context.
+        recording_harness: HarnessPort = RunRecordingHarness(harness, self._run_store)
+
         self.engine = Engine(
             forge=forge,
-            harness=harness,
+            harness=recording_harness,
             session=session,
             counter=counter,
             converge_state=converge_state,
         )
         self.forge = forge
-        self.harness = harness
+        self.harness = recording_harness
         self.session = session
         self._counter = counter
         self._converge_state = converge_state
@@ -100,7 +176,7 @@ class OrchestratorService:
 
         self._intake_engine = IntakeEngine(
             forge=forge,
-            harness=harness,
+            harness=recording_harness,
             session=session,
             audit=self._audit,
             allowlist=self._allowlist,
@@ -286,12 +362,32 @@ class OrchestratorService:
     # -----------------------------------------------------------------------
 
     async def list_runs(self, repo: RepoRef) -> list[RunSummary]:
+        """Return dispatched runs for the given repo, newest first.
+
+        Reads from the run_store — the single source of truth populated at
+        dispatch time.  Falls back to the session port for any runs that were
+        seeded directly (dev-mode demo data, backward-compat).
+        """
+        store_runs = await self._run_store.list_runs(repo)
+        if store_runs:
+            return store_runs
+        # Backward-compat fallback: session port (used by dev-mode demo seeds).
         return await self.session.list_runs(repo)
 
     async def get_run(self, run_id: str) -> RunDetail:
+        """Return detail for a single run.
+
+        Checks the run_store first (populated at dispatch); falls back to the
+        session port for dev-mode seeded runs.
+        """
+        detail = await self._run_store.get_run(run_id)
+        if detail is not None:
+            return detail
+        # Backward-compat fallback: session port (dev-mode demo seeds).
         return await self.session.get_run(run_id)
 
     def stream_run(self, run_id: str) -> AsyncIterator[RunEvent]:
+        """Stream live events for a run via the session port's event queue."""
         return self.session.stream_events(run_id)
 
     async def status(self, repo: RepoRef) -> HealthReport:
