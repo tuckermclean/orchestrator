@@ -25,13 +25,14 @@ function EscalationPanel({
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [message, setMessage] = useState<string | null>(null);
 
-  const handleDeescalate = (action: "resume" | "requeue" | "acknowledge") => {
+  const handleDeescalate = (intent: "resume" | "requeue" | "acknowledge") => {
     setStatus("loading");
+    // operator is a placeholder until Phase 9 auth — do NOT pass the intent label as operator.
     api
-      .deescalatePr(owner, repo, prNumber, action)
+      .deescalatePr(owner, repo, prNumber, intent)
       .then(() => {
         setStatus("done");
-        setMessage(`${action} acknowledged — NEEDS_HUMAN removed. PR re-enters the pipeline.`);
+        setMessage(`${intent} acknowledged — NEEDS_HUMAN removed. PR re-enters the pipeline.`);
       })
       .catch((e: Error) => {
         setStatus("error");

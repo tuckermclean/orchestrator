@@ -160,36 +160,36 @@
     tests: ["test_stale_escalate_at_cap", "test_stale_escalate_above_cap", "test_stale_escalate_far_above_cap", "test_stale_escalate_row1_beats_ci_runs_zero"]
   "row-2-trigger-ci-no-run":
     tests: ["test_stale_trigger_ci_no_runs", "test_stale_trigger_ci_no_runs_not_draft", "test_stale_trigger_ci_beats_nodiff"]
-  "row-2.5a-mark-ready":
+  "row-2.5a-redispatch":
     tests: ["test_stale_nodiff_draft_with_issue_redispatch"]
-  "row-2.5b-mark-ready-and-converge":
-    tests: ["test_stale_nodiff_draft_no_issue_needs_human", "test_stale_mark_ready_and_converge_ci_clean", "test_stale_mark_ready_and_converge_no_issue"]
-  "row-2.5c-redispatch":
+  "row-2.5b-needs-human":
+    tests: ["test_stale_nodiff_draft_no_issue_needs_human"]
+  "row-2.5c-needs-human":
     tests: ["test_stale_nodiff_nondraft_needs_human", "test_stale_nodiff_nondraft_no_issue_needs_human"]
-  "row-3-redispatch":
+  "row-3-mark-ready":
     tests: ["test_stale_mark_ready_has_converge", "test_stale_mark_ready_has_converge_nondraft"]
-  "row-4-needs-human-no-issue":
-    tests: ["test_stale_needs_human_failing_no_issue", "test_stale_needs_human_failing_no_issue_nondraft"]
-  "row-5-mark-ready":
+  "row-4-mark-ready-and-converge":
+    tests: ["test_stale_mark_ready_and_converge_ci_clean", "test_stale_mark_ready_and_converge_no_issue"]
+  "row-5-redispatch":
     tests: ["test_stale_redispatch_has_issue_failing", "test_stale_redispatch_has_issue_below_cap"]
+  "row-6-needs-human":
+    tests: ["test_stale_needs_human_failing_no_issue", "test_stale_needs_human_failing_no_issue_nondraft"]
   "enum-exhaustiveness":
     tests: ["test_reconciler_stale_redispatch_cap_is_named_constant", "test_stale_below_cap_does_not_escalate", "test_stale_action_arity"]
 
 "§8.6":  # decide_rearm_action
-  "row-0-escalated":
+  "row-0-skip-escalated":
     tests: ["test_rearm_skip_escalated_needs_human", "test_rearm_skip_escalated_needs_human_even_with_old_run"]
-  "row-1-in-progress":
-    tests: ["test_rearm_skip_in_progress_queued", "test_rearm_skip_in_progress_active"]
-  "row-2-done-recent":
-    tests: ["test_rearm_skip_done_success_terminal", "test_rearm_not_skip_done_success_no_terminal_label", "test_rearm_not_skip_done_completed_failure"]
-  "row-3-done-stale":
-    tests: ["test_rearm_skip_recent_below_guard", "test_rearm_skip_recent_zero_seconds", "test_rearm_not_skip_recent_exactly_guard", "test_rearm_skip_recent_none_skips_guard"]
-  "row-4-no-run":
+  "row-1-trigger-ci":
     tests: ["test_rearm_trigger_ci_no_runs", "test_rearm_trigger_ci_no_runs_with_terminal_label"]
-  "row-5-rearm-non-draft":
-    tests: ["test_rearm_else_rearm_old_run"]
-  "row-6-rearm-draft":
-    tests: ["test_rearm_else_rearm_no_run_ci_ran"]
+  "row-2-skip-in-progress":
+    tests: ["test_rearm_skip_in_progress_queued", "test_rearm_skip_in_progress_active"]
+  "row-3-skip-done":
+    tests: ["test_rearm_skip_done_success_terminal", "test_rearm_not_skip_done_success_no_terminal_label", "test_rearm_not_skip_done_completed_failure"]
+  "row-4-skip-recent":
+    tests: ["test_rearm_skip_recent_below_guard", "test_rearm_skip_recent_zero_seconds", "test_rearm_not_skip_recent_exactly_guard", "test_rearm_skip_recent_none_skips_guard"]
+  "row-5-rearm":
+    tests: ["test_rearm_else_rearm_old_run", "test_rearm_else_rearm_no_run_ci_ran"]
   "runtime-guard":
     tests: ["test_rearm_recent_guard_is_named_constant", "test_rearm_arity"]
 

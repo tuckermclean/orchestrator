@@ -13,9 +13,11 @@ from src.db.audit import AuditLog
 from src.domain.types import (
     ISSUE_COOLDOWN_S,
     LABEL_AGENT_WORK,
+    LABEL_AWAITING_PROMOTION,
     LABEL_CONVERGE,
     LABEL_IMPLEMENTING,
     LABEL_NEEDS_HUMAN,
+    LABEL_TRIAGE,
     IssueRef,
     PRRef,
     RepoRef,
@@ -479,3 +481,177 @@ async def test_deescalate_pr_full_recovery_cycle() -> None:
     from src.engine.converge import converge as _converge
     state = await _converge(svc.engine, pr_ref)
     assert state == "APPROVED"
+
+
+# ---------------------------------------------------------------------------
+# TESTING.md §6 named idempotency tests — ALREADY-BUILT behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_idempotent_two_calls() -> None:
+    """Two Engine.dispatch calls for the same issue do not create two PRs (TESTING.md §6).
+
+    The dedup guard in Engine.dispatch checks for an existing open implementing PR
+    (carrying LABEL_IMPLEMENTING) whose body closes the issue; the second dispatch
+    is a no-op when such a PR already exists.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(60)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+    )
+
+    # First dispatch — creates a draft PR
+    await engine.dispatch("issues", issue_ref=issue_ref)
+    prs_after_first = list(forge._prs.values())
+    assert len(prs_after_first) == 1, "First dispatch should create exactly one PR"
+
+    # The dedup guard looks for open PRs with LABEL_IMPLEMENTING.  Add that label to
+    # the newly-created PR (simulating the forge labeling that happens in production
+    # after the harness applies the implementing label to the PR).
+    first_pr_ref = prs_after_first[0].ref
+    await forge.add_label(first_pr_ref, LABEL_IMPLEMENTING)
+
+    # Second dispatch — dedup guard sees the existing implementing PR, no-ops
+    await engine.dispatch("issues", issue_ref=issue_ref)
+    prs_after_second = list(forge._prs.values())
+    assert len(prs_after_second) == 1, "Second dispatch must not create a duplicate PR"
+    # Harness was called once (for the first dispatch only)
+    assert len(harness.dispatch_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_intake_idempotent_triage_already_set() -> None:
+    """issues:reopened on already-LABEL_TRIAGE issue does not re-run full intake (TESTING.md §6).
+
+    When an issue already carries LABEL_TRIAGE, re-running intake still works but
+    the atomic label swap is idempotent — the label set ends up the same.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(61)
+    # Issue already has triage + awaiting-promotion (was previously processed)
+    forge.seed_issue(issue_ref, labels=[LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])
+
+    audit = AuditLog()
+    await audit.init()
+    svc = _make_service(forge=forge, harness=harness, audit=audit)
+
+    # Run intake (simulating issues:reopened)
+    await svc.run_intake(issue_ref)
+
+    # Label state reflects the intake decision (set_labels is idempotent via PUT semantics)
+    issue_after = await forge.get_issue(issue_ref)
+    # Triage label is always present after intake
+    assert LABEL_TRIAGE in issue_after.labels
+    # No duplicate triage label (labels are a set in spirit)
+    assert issue_after.labels.count(LABEL_TRIAGE) == 1
+
+
+@pytest.mark.asyncio
+async def test_converge_idempotent_not_converging() -> None:
+    """Engine.converge on a draft PR returns BUILDING; no reviewer dispatched (TESTING.md §6).
+
+    The idempotency gate in Engine.converge returns immediately for draft PRs
+    without dispatching any reviewer agent.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(62)
+    # Draft PR — converge gate should short-circuit
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, changed_files=2)
+
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+    )
+
+    from src.engine.converge import converge as _converge
+    state = await _converge(engine, pr_ref)
+
+    assert state == "BUILDING"
+    assert len(harness.dispatch_calls) == 0, "No reviewer should be dispatched for a draft PR"
+
+
+@pytest.mark.asyncio
+async def test_engine_no_in_process_state() -> None:
+    """Two sequential Engine.converge calls on the same PR share no state (TESTING.md §6).
+
+    Each call reads fresh forge labels at the idempotency gate; no mutable
+    in-process state leaks between calls. The second call sees APPROVED (added
+    by the first) and returns immediately.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    pr_ref = _pr(63)
+    forge.seed_pr(pr_ref, labels=[LABEL_CONVERGE], draft=False, changed_files=2)
+    for ci_name in [
+        "Type Check", "Lint", "Integration Tests",
+        "Docker Build & Scan", "Helm Lint", "Helm Kubeconform",
+    ]:
+        forge.seed_check_run(pr_ref, ci_name, "completed", "success")
+
+    from src.domain.types import Verdict
+    # Script a 0-blocker verdict so the first converge approves
+    harness.script_reviewer_verdicts(
+        Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
+    )
+
+    converge_state = FakeConvergeStateStore()
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=converge_state,
+    )
+
+    from src.engine.converge import converge as _converge
+
+    # First call: approves the PR
+    state1 = await _converge(engine, pr_ref)
+    assert state1 == "APPROVED"
+    dispatch_count_after_first = len(harness.dispatch_calls)
+
+    # Second call: idempotency gate reads LABEL_READY → returns APPROVED immediately
+    state2 = await _converge(engine, pr_ref)
+    assert state2 == "APPROVED"
+    # No additional reviewer dispatches on the second call
+    assert len(harness.dispatch_calls) == dispatch_count_after_first
+
+
+@pytest.mark.asyncio
+async def test_partial_state_recovery_converge_pr_no_workflow() -> None:
+    """Non-draft converge PR, no recent run → RC-3 re-arms once (TESTING.md §6)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(64)
+    forge.seed_pr(pr_ref, labels=[LABEL_CONVERGE], draft=False, changed_files=2)
+    # At least one CI check run so ci_runs > 0 (avoids row-1 trigger-ci)
+    forge.seed_check_run(pr_ref, "Type Check", "completed", "failure")
+    # No workflow run seeded → last_workflow_run_at returns None → recency guard skipped → rearm
+    # (Also no run handle in converge_state → run=None → rows 2/3 don't fire)
+
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+    )
+    report = await engine.reconcile(REPO)
+
+    # RC-3 should call trigger_workflow exactly once (rearm action)
+    assert len(harness.trigger_workflow_calls) == 1
+    assert report.rearmed == 1

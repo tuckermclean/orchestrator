@@ -17,6 +17,7 @@ from src.decisions.decide_conflict_action import decide_conflict_action
 from src.decisions.decide_rearm_action import decide_rearm_action
 from src.decisions.decide_redispatch_action import decide_redispatch_action
 from src.decisions.decide_stale_action import decide_stale_action
+from src.decisions.derive_state import derive_pr_state
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
     AWAITING_PROMOTION_NUDGE_S,
@@ -102,6 +103,9 @@ async def _rc1_stale(engine: Engine, repo: RepoRef) -> tuple[int, int]:
         has_diff = pr.changed_files > 0
         is_draft = pr.draft
 
+        # SPEC §10.3: derive_pr_state BEFORE decide_stale_action (guards/projection).
+        _pr_state = derive_pr_state(pr.labels, pr.draft, pr.merged, pr.changed_files)
+
         closing_issue = await engine.forge.get_closing_issue(pr_ref)
         has_issue = closing_issue is not None
 
@@ -119,15 +123,16 @@ async def _rc1_stale(engine: Engine, repo: RepoRef) -> tuple[int, int]:
             stale_acted += 1
 
         elif action == "redispatch":
-            # Post audit marker before incrementing so count is readable after
-            if engine.counter is not None:
-                new_count = await engine.counter.increment(pr_ref, "stale-pr")
-            else:
-                new_count = redispatch_count + 1
+            # SPEC §10.3: post audit marker comment FIRST (with the upcoming count),
+            # THEN increment the counter so the comment is the observable record of
+            # the decision before the counter reflects it.
+            displayed_count = redispatch_count + 1
             await engine.forge.post_comment(
                 pr_ref,
-                f"{_MARKER_STALE_PR} count={new_count}",
+                f"{_MARKER_STALE_PR} count={displayed_count}",
             )
+            if engine.counter is not None:
+                await engine.counter.increment(pr_ref, "stale-pr")
             # Re-dispatch the implementing agent for the closing issue
             if closing_issue is not None:
                 result = route_entry("issues")
@@ -217,7 +222,10 @@ async def _rc3_rearm(engine: Engine, repo: RepoRef) -> int:
         ci_runs = len(check_runs)
         has_terminal_label = LABEL_READY in pr.labels or LABEL_NEEDS_HUMAN in pr.labels
 
-        # Determine the last converge run and seconds since it started (SPEC §8.6)
+        # Determine the last converge run and seconds since it started (SPEC §8.6).
+        # Fetch the persisted RunHandle from ConvergeStateStore so we can poll the
+        # actual harness run state; rows 2 (skip-in-progress) and 3 (skip-done)
+        # require a real RunStatus — passing None makes them dead code.
         run: RunStatus | None = None
         seconds_since_last_run: int | None = None
 
@@ -225,13 +233,20 @@ async def _rc3_rearm(engine: Engine, repo: RepoRef) -> int:
             # No runs at all — pass None (row 1 will fire)
             seconds_since_last_run = None
         else:
-            # Try to get the most recent converge harness run
+            # Fetch persisted handle (set by Engine.converge after each reviewer dispatch).
+            if engine.converge_state is not None:
+                handle = await engine.converge_state.get_last_run_handle(pr_ref)
+                if handle is not None:
+                    run = await engine.harness.get_run_status(handle)
+
+            # Compute seconds_since_last_run from the workflow timestamp (SPEC §8.6
+            # derivation note: use forge.last_workflow_run_at when available).
             workflow_run_at = await engine.forge.last_workflow_run_at(
                 pr_ref, _CONVERGE_WORKFLOW_NAME
             )
             if workflow_run_at is not None:
                 seconds_since_last_run = int((now_dt - workflow_run_at).total_seconds())
-            # run is None when we don't have a RunHandle to poll — pass None
+            # If no workflow timestamp, pass None so the recency guard is skipped.
 
         action = decide_rearm_action(
             ci_runs, run, has_terminal_label, seconds_since_last_run, has_needs_human=False
@@ -296,15 +311,16 @@ async def _rc4_orphan(engine: Engine, repo: RepoRef) -> tuple[int, int]:
         )
 
         if action == "redispatch":
-            # Increment counter first, then post audit marker
-            if engine.counter is not None:
-                new_count = await engine.counter.increment(issue_ref, "orphan")
-            else:
-                new_count = redispatch_count + 1
+            # SPEC §10.3: post audit marker comment FIRST (with the upcoming count),
+            # THEN increment the counter so the comment is the observable record of
+            # the decision before the counter reflects it.
+            displayed_count = redispatch_count + 1
             await engine.forge.post_comment(
                 issue_ref,
-                f"@claude {_MARKER_ORPHAN} count={new_count}",
+                f"@claude {_MARKER_ORPHAN} count={displayed_count}",
             )
+            if engine.counter is not None:
+                await engine.counter.increment(issue_ref, "orphan")
             # Re-dispatch the implementer for this issue
             result = route_entry("issues")
             context = DispatchContext(
@@ -330,33 +346,51 @@ async def _rc4_orphan(engine: Engine, repo: RepoRef) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
+_NUDGE_MARKER = "<!-- orchestrator:awaiting-promotion-nudge -->"
+
+
 async def _rc5_nudge(engine: Engine, repo: RepoRef) -> None:
-    """Process RC-5 channel — nudge stale awaiting-promotion issues."""
+    """Process RC-5 channel — nudge stale awaiting-promotion issues.
+
+    Dedup guard: skip the nudge if a nudge comment was already posted within the
+    last AWAITING_PROMOTION_NUDGE_S seconds to prevent re-posting on every 15-min tick.
+    """
     pending_issues = await engine.forge.list_issues(repo, [LABEL_AWAITING_PROMOTION])
     now_dt = datetime.now(tz=UTC)
 
     for issue in pending_issues:
         # Determine when the issue was last active (use comments or issue creation)
         comments = await engine.forge.list_comments(issue.ref)
-        if comments:
-            last_at = max(c.created_at for c in comments)
+
+        # Dedup guard: if a nudge comment was already posted recently, skip.
+        for comment in reversed(comments):
+            if _NUDGE_MARKER in comment.body:
+                nudge_at = comment.created_at
+                if nudge_at.tzinfo is None:
+                    nudge_at = nudge_at.replace(tzinfo=UTC)
+                if int((now_dt - nudge_at).total_seconds()) < AWAITING_PROMOTION_NUDGE_S:
+                    break  # Recent nudge exists — skip this issue
         else:
-            # Fallback: use a far-past sentinel so nudge always fires when no comments
-            last_at = datetime(2000, 1, 1, tzinfo=UTC)
+            # No recent nudge found; check general staleness and post if needed.
+            if comments:
+                last_at = max(c.created_at for c in comments)
+            else:
+                # Fallback: use a far-past sentinel so nudge always fires when no comments
+                last_at = datetime(2000, 1, 1, tzinfo=UTC)
 
-        if last_at.tzinfo is None:
-            last_at = last_at.replace(tzinfo=UTC)
+            if last_at.tzinfo is None:
+                last_at = last_at.replace(tzinfo=UTC)
 
-        seconds_idle = int((now_dt - last_at).total_seconds())
-        if seconds_idle >= AWAITING_PROMOTION_NUDGE_S:
-            await engine.forge.post_comment(
-                issue.ref,
-                (
-                    "<!-- orchestrator:awaiting-promotion-nudge --> "
-                    "This issue has been waiting for human promotion for over 24 hours. "
-                    "Please review and promote or decline."
-                ),
-            )
+            seconds_idle = int((now_dt - last_at).total_seconds())
+            if seconds_idle >= AWAITING_PROMOTION_NUDGE_S:
+                await engine.forge.post_comment(
+                    issue.ref,
+                    (
+                        f"{_NUDGE_MARKER} "
+                        "This issue has been waiting for human promotion for over 24 hours. "
+                        "Please review and promote or decline."
+                    ),
+                )
 
 
 # ---------------------------------------------------------------------------

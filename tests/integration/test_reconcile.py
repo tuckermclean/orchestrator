@@ -465,27 +465,82 @@ async def test_reconciler_rc3_skip_in_progress() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc3_skip_done() -> None:
-    """RC-3: converge PR with agent:ready (terminal label), completed success → skip-done."""
+    """RC-3: converge PR, terminal label + completed-success run handle → skip-done (§8.6 row 3).
+
+    Verifies that RC-3 fetches the persisted RunHandle from ConvergeStateStore,
+    calls harness.get_run_status, and skips re-arm when run.state=completed,
+    run.conclusion=success, AND has_terminal_label=True.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     pr_ref = _pr(32)
     forge.seed_pr(pr_ref, labels=[LABEL_CONVERGE, LABEL_READY], draft=False)
     forge.seed_check_run(pr_ref, "Type Check", "completed", "success")
+    # Seed an old workflow run so the recency guard (row 4) does NOT block before row 3
     old_run_at = datetime.now(tz=UTC) - timedelta(seconds=REARM_RECENT_GUARD_S + 10)
     forge.seed_workflow_run_at(pr_ref, "orchestrator-converge.yml", old_run_at)
 
-    engine = _make_engine(forge, harness)
+    # Seed a completed-success RunHandle in ConvergeStateStore so RC-3 can poll it
+    from src.domain.types import RunHandle
+    handle = RunHandle(run_id="converge-run-completed-success")
+    harness.seed_run(handle, state="completed", conclusion="success")
+
+    converge_state = FakeConvergeStateStore()
+    await converge_state.set_last_run_handle(pr_ref, handle)
+
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=converge_state,
+    )
     report = await engine.reconcile(REPO)
 
-    # RC-3: skip-done fires (has_terminal_label=True) — BUT the fake doesn't have a RunStatus
-    # so row 3 won't fire — falls through to rearm unless skip-done fires via check_runs.
-    # Actually: the reconcile code passes run=None (no RunHandle) so row 3 (skip-done) only
-    # fires if run is not None. The test therefore observes rearmed == 1 (rearm fires because
-    # old enough and no active run). The terminal label test is best observed via the PR state.
-    # Rewrite: what matters is that a LABEL_READY PR isn't broken by RC-3.
-    # The report here may be rearmed=1 — which is fine (trigger re-arm on LABEL_READY PRs
-    # is harmless; converge idempotency gate handles it). Record what actually happens.
-    assert report.rearmed >= 0  # not an error state
+    # §8.6 row 3 fires: run is completed+success AND has_terminal_label → skip-done
+    assert report.rearmed == 0
+    # No trigger_ci or trigger_workflow calls
+    assert len(harness.trigger_ci_calls) == 0
+    assert len(harness.trigger_workflow_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciler_rc3_skip_in_progress_via_run_handle() -> None:
+    """RC-3: converge PR, in-progress run handle → skip-in-progress (§8.6 row 2).
+
+    Verifies that RC-3 fetches the persisted RunHandle, calls get_run_status,
+    and skips re-arm when run.state=in_progress (preventing duplicate dispatch).
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(35)
+    forge.seed_pr(pr_ref, labels=[LABEL_CONVERGE], draft=False)
+    forge.seed_check_run(pr_ref, "Type Check", "completed", "failure")
+    # Seed an old workflow run so seconds_since_last_run > REARM_RECENT_GUARD_S
+    old_run_at = datetime.now(tz=UTC) - timedelta(seconds=REARM_RECENT_GUARD_S + 10)
+    forge.seed_workflow_run_at(pr_ref, "orchestrator-converge.yml", old_run_at)
+
+    # Seed an in-progress RunHandle so row 2 fires (skip-in-progress)
+    from src.domain.types import RunHandle
+    handle = RunHandle(run_id="converge-run-in-progress")
+    harness.seed_run(handle, state="in_progress")
+
+    converge_state = FakeConvergeStateStore()
+    await converge_state.set_last_run_handle(pr_ref, handle)
+
+    engine = Engine(
+        forge=forge,
+        harness=harness,
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=converge_state,
+    )
+    report = await engine.reconcile(REPO)
+
+    # §8.6 row 2 fires: run.state=in_progress → skip-in-progress, no dispatch
+    assert report.rearmed == 0
+    assert len(harness.trigger_ci_calls) == 0
+    assert len(harness.trigger_workflow_calls) == 0
 
 
 @pytest.mark.asyncio

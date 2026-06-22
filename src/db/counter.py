@@ -91,7 +91,8 @@ class SQLiteCounterStore:
         ) as cursor:
             row = await cursor.fetchone()
         await self._conn.commit()
-        return int(row["v"]) if row is not None else 1
+        assert row is not None, "RETURNING returned no row"
+        return int(row["v"])
 
     async def reset(self, entity_ref: IssueRef | PRRef, channel: str) -> None:
         """Reset the counter to 0."""

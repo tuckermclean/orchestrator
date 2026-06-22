@@ -112,9 +112,15 @@ export const api = {
     json<{ run_id: string }>("/api/dev/dispatch", { method: "POST" }),
   listEscalations: (owner: string, repo: string) =>
     json<EscalationSummary[]>(`/api/repos/${owner}/${repo}/escalations`),
-  deescalatePr: (owner: string, repo: string, prNumber: number, operator = "operator") =>
+  deescalatePr: (
+    owner: string,
+    repo: string,
+    prNumber: number,
+    intent: "resume" | "requeue" | "acknowledge",
+    operator = "operator",
+  ) =>
     json<{ status: string }>(
-      `/api/repos/${owner}/${repo}/prs/${prNumber}/deescalate?operator=${encodeURIComponent(operator)}`,
+      `/api/repos/${owner}/${repo}/prs/${prNumber}/deescalate?operator=${encodeURIComponent(operator)}&intent=${encodeURIComponent(intent)}`,
       { method: "POST" },
     ),
   devReconcile: () =>

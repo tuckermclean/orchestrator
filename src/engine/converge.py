@@ -174,6 +174,8 @@ async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
             allowed_agent_refs=specialist_refs,
         )
         reviewer_handle = await engine.harness.dispatch(reviewer_context)
+        # Persist the handle so RC-3 can poll run status on the next reconcile tick.
+        await converge_state.set_last_run_handle(pr_ref, reviewer_handle)
         await engine._await_run(reviewer_handle)
 
         checks = await forge.get_check_runs(pr_ref)

@@ -286,29 +286,37 @@ class OrchestratorService:
         # Step 2 — remove the escalation label
         await self.forge.remove_label(pr_ref, LABEL_NEEDS_HUMAN)
 
-        # Step 3 — reset stale-pr counter so RC-1 starts fresh
-        if self._counter is not None:
-            await self._counter.reset(pr_ref, "stale-pr")
-            await self._counter.reset(pr_ref, "converge-retry")
+        # Step 3 — reset stale-pr counter so RC-1 starts fresh.
+        # A None counter store would let RC-1 immediately re-escalate (redispatch_count
+        # stays at cap); raise so the operator knows the store is mis-wired.
+        if self._counter is None:
+            raise RuntimeError(
+                "deescalate_pr: counter store is None — "
+                "cannot reset stale-pr/converge-retry counters; RC-1 would re-escalate immediately"
+            )
+        await self._counter.reset(pr_ref, "stale-pr")
+        await self._counter.reset(pr_ref, "converge-retry")
 
-        # Step 4 — clear converge loop state so next Engine.converge starts at R1
-        if self._converge_state is not None:
-            await self._converge_state.clear_converge_state(pr_ref)
+        # Step 4 — clear converge loop state so next Engine.converge starts at R1.
+        # A None converge_state store would leave stale round data; raise so the
+        # operator knows the store is mis-wired.
+        if self._converge_state is None:
+            raise RuntimeError(
+                "deescalate_pr: converge_state store is None — "
+                "cannot clear converge round; stale ConvergeState may cause incorrect re-entry"
+            )
+        await self._converge_state.clear_converge_state(pr_ref)
 
-        # Step 5 — audit record (I6, observer pattern: written after state change)
+        # Step 5 — single complete §11.3 audit record (I6, observer pattern: written
+        # after all state changes so the trail records only committed state).
+        escalation_cause = _infer_escalation_cause(pr_labels_at_deescalation)
         await self._audit.record(
             repo=pr_ref.repo,
             entity_ref=pr_ref,
             action="deescalate_pr",
             operator=operator,
-        )
-        # Record the pre-mutation labels as context (stored as a second audit entry)
-        label_str = ",".join(pr_labels_at_deescalation)
-        await self._audit.record(
-            repo=pr_ref.repo,
-            entity_ref=pr_ref,
-            action=f"deescalate_pr:labels={label_str}",
-            operator=operator,
+            escalation_cause=escalation_cause if escalation_cause else None,
+            pr_labels=pr_labels_at_deescalation,
         )
 
     # -----------------------------------------------------------------------
@@ -357,7 +365,7 @@ class OrchestratorService:
           2. Dispatch agent — bypasses dedup guard (explicit human promotion always dispatches).
           3. Write audit record (I6 + I7) — after observable state is changed.
 
-        # TODO: operator must be derived from an authenticated session before production use.
+        # operator is a placeholder; Phase 9 auth will derive it from an authenticated session.
         """
         from src.decisions.route_entry import route_entry as _route_entry
         from src.domain.types import DispatchContext
