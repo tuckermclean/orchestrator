@@ -13,9 +13,15 @@ from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from src.api.auth import hash_password
+from src.api.auth_routes import _make_auth_router
+from src.api.operator_routes import _make_operator_router
+from src.api.push_routes import _make_push_router
 from src.api.routes import _make_router
 from src.api.webhook import _make_webhook_router
 from src.db.audit import AuditLog
+from src.db.operator_store import FakeOperatorStore, SQLiteOperatorStore
+from src.db.push_store import FakePushStore, SQLitePushStore
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
@@ -46,6 +52,8 @@ def create_app(
     service: OrchestratorService,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
     webhook_secret: str | None = None,
+    operator_store: FakeOperatorStore | SQLiteOperatorStore | None = None,
+    push_store: FakePushStore | SQLitePushStore | None = None,
 ) -> FastAPI:
     """Create the FastAPI application, mounting static UI if built.
 
@@ -55,7 +63,19 @@ def create_app(
         webhook_secret: HMAC-SHA256 secret for validating GitHub webhook payloads.
             When provided, mounts POST /api/webhook.  When absent (dev mode),
             the webhook endpoint is not registered.
+        operator_store: Operator account store; defaults to FakeOperatorStore if None.
+        push_store: VAPID push subscription store; defaults to FakePushStore if None.
     """
+    from src.db.operator_store import FakeOperatorStore as _FakeOp
+    from src.db.push_store import FakePushStore as _FakePush
+
+    _operator_store: FakeOperatorStore | SQLiteOperatorStore = (
+        operator_store if operator_store is not None else _FakeOp()
+    )
+    _push_store: FakePushStore | SQLitePushStore = (
+        push_store if push_store is not None else _FakePush()
+    )
+
     app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
 
     # CORS for dev (Vite dev server at :5173)
@@ -69,6 +89,7 @@ def create_app(
 
     # --- Health probes (ARCHITECTURE §6) ---
     # /healthz — liveness: 200 when the HTTP listener is alive (cheap; no I/O)
+    # These routes are EXCLUDED from JWT auth (no Depends(require_auth)).
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
         return Response(content='{"status":"ok"}', media_type="application/json")
@@ -108,10 +129,22 @@ def create_app(
         body = _json.dumps({"status": overall, "checks": checks})
         return Response(content=body, media_type="application/json", status_code=status_code)
 
-    # Register API routes
+    # Auth routes — /api/auth (login) and /api/auth/refresh are EXCLUDED from JWT auth
+    # by the bypass list in src/api/auth.py.
+    app.include_router(_make_auth_router(_operator_store))
+
+    # Operator management routes — JWT-protected
+    app.include_router(_make_operator_router(_operator_store))
+
+    # Push subscription routes — JWT-protected
+    app.include_router(_make_push_router(_push_store))
+
+    # Core API routes — JWT-protected via Depends(require_auth) on each route
     app.include_router(_make_router(service))
 
-    # Register webhook ingress when a secret is configured
+    # Register webhook ingress when a secret is configured.
+    # POST /api/webhook is authenticated by HMAC-SHA256, NOT by JWT.
+    # The auth bypass list in auth.py ensures require_auth is never applied to it.
     if webhook_secret:
         app.include_router(_make_webhook_router(service, webhook_secret))
 
@@ -123,7 +156,7 @@ def create_app(
     return app
 
 
-def _build_dev_service() -> OrchestratorService:
+def _build_dev_service() -> tuple[OrchestratorService, FakeOperatorStore, FakePushStore]:
     """Wire fake ports for dev/demo mode."""
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
@@ -138,7 +171,13 @@ def _build_dev_service() -> OrchestratorService:
         allowlist=[],
         owner="demo",  # dev mode: owner is "demo" (matches seed data RepoRef)
     )
-    return service
+
+    # Seed a default dev operator account (username: admin, password: admin)
+    operator_store = FakeOperatorStore()
+    operator_store.seed("admin", hash_password("admin"))
+
+    push_store = FakePushStore()
+    return service, operator_store, push_store
 
 
 async def _seed_demo_data(service: OrchestratorService) -> None:
@@ -192,7 +231,15 @@ async def _seed_demo_data(service: OrchestratorService) -> None:
 
 
 
-def _build_prod_service() -> tuple[OrchestratorService, str | None]:
+_ProdStores = tuple[
+    OrchestratorService,
+    str | None,
+    FakeOperatorStore | SQLiteOperatorStore,
+    FakePushStore | SQLitePushStore,
+]
+
+
+def _build_prod_service() -> _ProdStores:
     """Wire real ports when production credentials are present; fall back to dev mode.
 
     Prod mode is entered when EITHER FORGE_TOKEN (PAT mode) OR the full set of
@@ -204,7 +251,8 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
     from src.ports.provider import PortProvider
 
     if not _has_prod_creds():
-        return _build_dev_service(), None
+        svc, op_store, push_store = _build_dev_service()
+        return svc, None, op_store, push_store
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
@@ -251,11 +299,20 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
         owner=default_repo.owner,
         registry=registry,
     )
-    return service, webhook_secret
+
+    # Use in-memory stores for prod too until a DB path is configured.
+    # A persistent SQLite path can be wired in a future enhancement.
+    op_store = FakeOperatorStore()
+    bootstrap_password = os.environ.get("OPERATOR_BOOTSTRAP_PASSWORD", "")
+    if bootstrap_password:
+        op_store.seed("admin", hash_password(bootstrap_password))
+
+    push_store_inst = FakePushStore()
+    return service, webhook_secret, op_store, push_store_inst
 
 
 # Singleton for ASGI app (used by uvicorn)
-_service, _webhook_secret = _build_prod_service()
+_service, _webhook_secret, _operator_store, _push_store = _build_prod_service()
 
 
 @asynccontextmanager
@@ -267,7 +324,13 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
 
-app = create_app(_service, lifespan=_lifespan, webhook_secret=_webhook_secret)
+app = create_app(
+    _service,
+    lifespan=_lifespan,
+    webhook_secret=_webhook_secret,
+    operator_store=_operator_store,
+    push_store=_push_store,
+)
 
 
 if __name__ == "__main__":

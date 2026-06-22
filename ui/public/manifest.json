@@ -1,0 +1,42 @@
+{
+  "name": "Orchestrator",
+  "short_name": "Orchestr8r",
+  "description": "Autonomous SWE-agent orchestration pipeline operator interface",
+  "display": "standalone",
+  "start_url": "/",
+  "scope": "/",
+  "theme_color": "#161b22",
+  "background_color": "#0d1117",
+  "orientation": "any",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Dashboard",
+      "short_name": "Dashboard",
+      "description": "Pipeline health overview",
+      "url": "/",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Triage Queue",
+      "short_name": "Triage",
+      "description": "Review pending issues",
+      "url": "/triage",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
