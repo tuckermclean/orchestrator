@@ -46,14 +46,27 @@ class IntakeEngine:
 
         Steps (SPEC §10.4):
           1. Fetch the issue.
+          1a. Idempotency guard (SPEC §10 intent): if the issue already carries
+              LABEL_TRIAGE, intake has already run — skip to avoid re-dispatching
+              a second triager.  This protects against re-delivery of opened events
+              and the labeled-feedback loop fixed in issue #108.
           2. decide_intake(issue, allowlist) → 'admit' | 'queue'  [pure, sync — I4]
           3. Dispatch triager (forge_token_scope='repo-comment' — I5).
           4. set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK | LABEL_AWAITING_PROMOTION])  (atomic — I7)
           5. Write audit record to DB (I6) — after observable state is committed.
 
-        Returns the triager RunHandle, or None if dispatch fails.
+        Returns the triager RunHandle, or None if intake was skipped (idempotent) or
+        dispatch fails.
         """
         issue = await self.forge.get_issue(issue_ref)
+
+        # Step 1a: idempotency guard — LABEL_TRIAGE is set atomically in step 4 of
+        # the first intake run.  Its presence means intake already completed for this
+        # issue; re-running would dispatch a redundant triager and override labels.
+        # This is the defence-in-depth guard required by SPEC §10's idempotency intent
+        # and the fix for the labeled-feedback loop in issue #108.
+        if LABEL_TRIAGE in issue.labels:
+            return None
 
         # Step 2: pure synchronous decision (I4 — never await this)
         decision = decide_intake(issue, self.allowlist, self.owner)

@@ -17,6 +17,7 @@ from src.domain.types import (
 from src.engine.intake import IntakeEngine
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
+from src.service.registry import FakeRepoRegistry, RepoConfig
 
 _REPO = RepoRef(owner="acme", name="repo")
 
@@ -305,6 +306,7 @@ async def test_handle_event_issues_routes_through_intake() -> None:
     )
 
     payload: dict[str, object] = {
+        "action": "opened",  # SPEC §11.1: intake only on opened/reopened
         "issue": {"number": 50},
         "repository": {"owner": {"login": "acme"}, "name": "repo"},
     }
@@ -318,3 +320,247 @@ async def test_handle_event_issues_routes_through_intake() -> None:
     # Audit record must be written (I6)
     entries = await audit.list_entries(_REPO, issue_ref)
     assert any(e["action"] == "intake:queue" for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 routing: opened → intake (when intake_enabled == True)
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_opened_runs_intake() -> None:
+    """issues:opened → intake runs when intake_enabled (default True, no registry)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=60)
+    forge.seed_issue(issue_ref, author="alice", labels=[])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+    payload: dict[str, object] = {
+        "action": "opened",
+        "issue": {"number": 60},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    result = await service.handle_event("issues", payload)
+
+    assert result["handled"] is True
+    issue = await forge.get_issue(issue_ref)
+    # alice is allowlisted → admitted
+    assert LABEL_AGENT_WORK in issue.labels
+    assert LABEL_TRIAGE in issue.labels
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 routing: opened → NO intake when intake_enabled == False
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_opened_no_intake_when_disabled() -> None:
+    """issues:opened with intake_enabled=False → no intake run, no labels set."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=61)
+    forge.seed_issue(issue_ref, author="alice", labels=[])
+
+    registry = FakeRepoRegistry([
+        RepoConfig(repo=_REPO, intake_enabled=False, allowlist=["alice"]),
+    ])
+    service = OrchestratorService(
+        forge=forge,
+        harness=harness,
+        session=session,
+        audit=audit,
+        allowlist=["alice"],
+        registry=registry,
+    )
+    payload: dict[str, object] = {
+        "action": "opened",
+        "issue": {"number": 61},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    result = await service.handle_event("issues", payload)
+
+    assert result["handled"] is True
+    issue = await forge.get_issue(issue_ref)
+    # intake was skipped — no labels written, no dispatch
+    assert LABEL_TRIAGE not in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
+    assert len(harness.dispatch_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 routing: labeled:agent-work → Engine.dispatch (not intake)
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_labeled_agent_work_dispatches() -> None:
+    """issues:labeled with label==LABEL_AGENT_WORK → Engine.dispatch, not intake."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=62)
+    # Issue already has LABEL_TRIAGE + LABEL_AGENT_WORK (set by prior intake run)
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+    payload: dict[str, object] = {
+        "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},
+        "issue": {"number": 62},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    result = await service.handle_event("issues", payload)
+
+    assert result["handled"] is True
+    # Engine.dispatch was called (implementer agent dispatched), not intake
+    assert len(harness.dispatch_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 routing: labeled:other → no-op
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_labeled_other_noop() -> None:
+    """issues:labeled with label != LABEL_AGENT_WORK → no-op, no dispatch."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=63)
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+    payload: dict[str, object] = {
+        "action": "labeled",
+        "label": {"name": LABEL_TRIAGE},  # not LABEL_AGENT_WORK
+        "issue": {"number": 63},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    result = await service.handle_event("issues", payload)
+
+    assert result["handled"] is True
+    # No dispatch — triage label does not trigger intake or dispatch
+    assert len(harness.dispatch_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 routing: other actions (edited, assigned, closed) → no-op
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_issues_other_actions_noop() -> None:
+    """issues:edited, issues:assigned, issues:closed → no-op, no dispatch."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=64)
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+
+    for action in ("edited", "assigned", "closed"):
+        payload: dict[str, object] = {
+            "action": action,
+            "issue": {"number": 64},
+            "repository": {"owner": {"login": "acme"}, "name": "repo"},
+        }
+        await service.handle_event("issues", payload)
+
+    # None of edited/assigned/closed trigger intake or dispatch
+    assert len(harness.dispatch_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# SPEC §11.1 feedback-loop guard: labeled:agent-work does NOT re-run intake
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_event_labeled_agent_work_does_not_re_run_intake() -> None:
+    """Simulate the #108 feedback loop: labeled:agent-work → dispatch, not intake.
+
+    Previously the issues branch ran intake for every action, so a newly
+    labeled LABEL_AGENT_WORK event would re-run intake (dispatching a second
+    triager + setting labels again).  This test confirms that labeled:agent-work
+    triggers Engine.dispatch and that the intake idempotency guard prevents
+    double-triager even if intake were somehow reached.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=65)
+    # Issue already has LABEL_TRIAGE from the first (real) intake run
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+    service = OrchestratorService(
+        forge=forge, harness=harness, session=session, audit=audit, allowlist=["alice"]
+    )
+
+    # Simulate GitHub re-delivering the labeled:agent-work webhook
+    payload: dict[str, object] = {
+        "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},
+        "issue": {"number": 65},
+        "repository": {"owner": {"login": "acme"}, "name": "repo"},
+    }
+    await service.handle_event("issues", payload)
+
+    # Should call dispatch exactly once (the implementer), NOT re-run intake
+    assert len(harness.dispatch_calls) == 1
+    # No audit intake:admit or intake:queue from this re-delivery
+    entries = await audit.list_entries(_REPO, issue_ref)
+    intake_entries = [e for e in entries if e["action"].startswith("intake:")]
+    assert len(intake_entries) == 0
+
+
+# ---------------------------------------------------------------------------
+# SPEC §10 idempotency guard: intake skips when LABEL_TRIAGE already present
+# ---------------------------------------------------------------------------
+
+
+async def test_intake_idempotency_guard_skips_if_triage_label_present() -> None:
+    """If the issue already carries LABEL_TRIAGE, intake returns None (no dispatch).
+
+    Defence-in-depth guard: set_labels in step 4 is atomic, so LABEL_TRIAGE
+    presence means intake already completed.  A second intake call (re-delivery,
+    reconciler re-trigger, or labeled-feedback loop) must be a no-op.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=70)
+    # Seed issue with LABEL_TRIAGE already present (simulates post-intake state)
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+    handle = await engine.intake(issue_ref)
+
+    # Guard fired: no dispatch, no label changes, returns None
+    assert handle is None
+    assert len(harness.dispatch_calls) == 0
+    # No audit record written (guard returns before audit step)
+    entries = await audit.list_entries(_REPO, issue_ref)
+    assert len(entries) == 0

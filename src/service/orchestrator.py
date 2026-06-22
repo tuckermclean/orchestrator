@@ -394,7 +394,38 @@ class OrchestratorService:
             intake_engine = self._intake_engine
 
         if event_name == "issues" and issue_ref is not None:
-            await intake_engine.intake(issue_ref)
+            # SPEC §11.1 routing table — issues actions:
+            #   opened / reopened  → Engine.intake  (only if intake_enabled)
+            #   labeled (LABEL_AGENT_WORK only) → Engine.dispatch
+            #   anything else      → no-op (fall through)
+            action = str(payload.get("action", ""))
+            if action in ("opened", "reopened"):
+                # Resolve intake_enabled from the registry when wired; default True
+                # so single-repo / no-registry behaviour is preserved unchanged.
+                intake_enabled: bool = True
+                if self._registry is not None:
+                    event_repo = _extract_repo(payload)
+                    if event_repo is not None:
+                        _cfg = await self._registry.get_repo(event_repo)
+                        if _cfg is not None:
+                            intake_enabled = _cfg.intake_enabled
+                if intake_enabled:
+                    await intake_engine.intake(issue_ref)
+            elif action == "labeled":
+                label_data = payload.get("label", {})
+                label_name = (
+                    str(label_data.get("name", ""))
+                    if isinstance(label_data, dict)
+                    else ""
+                )
+                if label_name == LABEL_AGENT_WORK:
+                    await self.engine.dispatch(
+                        "issues",
+                        issue_ref=issue_ref,
+                        pr_ref=pr_ref,
+                        comment_body=comment_body,
+                    )
+            # All other issues actions (labeled:other, closed, edited, assigned, …) → no-op
         elif event_name == "pull_request" and pr_ref is not None:
             # SPEC §11.1 event routing table — pull_request actions:
             #   ready_for_review  → Engine.converge (P2)

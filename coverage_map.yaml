@@ -447,6 +447,24 @@
   "harness-run-handle-round-trip":
     tests: ["test_harness_run_handle_round_trip"]
 
+"§11.1-issues-routing":  # SPEC §11.1 — issues action gate (fix #108)
+  "opened-intake-enabled":
+    tests: ["test_handle_event_issues_opened_runs_intake", "test_handle_event_issues_routes_through_intake"]
+  "reopened-intake-enabled":
+    tests: ["test_handle_event_issues_opened_runs_intake"]
+  "opened-intake-disabled":
+    tests: ["test_handle_event_issues_opened_no_intake_when_disabled"]
+  "labeled-agent-work-dispatch":
+    tests: ["test_handle_event_issues_labeled_agent_work_dispatches", "test_handle_event_labeled_agent_work_does_not_re_run_intake"]
+  "labeled-other-noop":
+    tests: ["test_handle_event_issues_labeled_other_noop"]
+  "other-actions-noop":
+    tests: ["test_handle_event_issues_other_actions_noop"]
+  "feedback-loop-gone":
+    tests: ["test_handle_event_labeled_agent_work_does_not_re_run_intake"]
+  "intake-idempotency-guard":
+    tests: ["test_intake_idempotency_guard_skips_if_triage_label_present"]
+
 "§11.1-converge-trigger":
   "ready_for_review-eligible":
     tests: ["test_handle_event_ready_for_review_drives_converge_pr"]

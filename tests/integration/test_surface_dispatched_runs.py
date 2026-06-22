@@ -63,6 +63,7 @@ async def test_dispatched_run_appears_in_list_runs() -> None:
 
     await service.handle_event("issues", {
         "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},  # SPEC §11.1: labeled:agent-work → dispatch
         "issue": {"number": 1},
         "repository": {"name": "service", "owner": {"login": "acme"}},
     })
@@ -88,6 +89,7 @@ async def test_dispatched_run_not_visible_for_other_repo() -> None:
 
     await service.handle_event("issues", {
         "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},  # SPEC §11.1: labeled:agent-work → dispatch
         "issue": {"number": 1},
         "repository": {"name": "alpha", "owner": {"login": "acme"}},
     })
@@ -120,6 +122,7 @@ async def test_get_run_returns_dispatched_run() -> None:
 
     await service.handle_event("issues", {
         "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},  # SPEC §11.1: labeled:agent-work → dispatch
         "issue": {"number": 2},
         "repository": {"name": "service", "owner": {"login": "acme"}},
     })

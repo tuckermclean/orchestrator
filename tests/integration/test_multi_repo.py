@@ -45,9 +45,15 @@ async def _fresh_audit() -> AuditLog:
     return audit
 
 
-def _issue_payload(repo: RepoRef, issue_number: int = 1) -> dict[str, object]:
-    """Build a minimal GitHub issues event payload for the given repo."""
+def _issue_payload(
+    repo: RepoRef, issue_number: int = 1, action: str = "opened"
+) -> dict[str, object]:
+    """Build a minimal GitHub issues event payload for the given repo.
+
+    Defaults to action='opened' so routing hits the intake gate per SPEC §11.1.
+    """
     return {
+        "action": action,
         "repository": {
             "name": repo.name,
             "owner": {"login": repo.owner},
