@@ -1018,16 +1018,22 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 
 1. `decision = decide_intake(event.actor, repo.allowlist)` → `{admit, queue}`.
    Pure, synchronous, no side effects (I4).
-2. **Audit log** (I6): write an audit record to the DB:
-   `{event: "intake", issue_ref, actor: event.actor, decision, timestamp: now()}`.
-   This record is the authoritative trace of every intake decision; the triager comment (step 3)
-   is human-visible but the DB record is the audit trail.
-3. Dispatch triager agent via `harness.dispatch` (read-only; posts one structured comment
+2. Dispatch triager agent via `harness.dispatch` (read-only; posts one structured comment
    summarising the triage result).
-4. `admit` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic set; I7) →
+3. `admit` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic set; I7) →
    fires `issues:labeled` → I2.
-5. `queue` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic set; I7)
+4. `queue` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic set; I7)
    → issue appears in PWA triage queue.
+5. **Audit log** (I6): after the observable state transition (step 3/4) is committed, write an
+   audit record to the DB:
+   `{event: "intake", issue_ref, actor: event.actor, decision, timestamp: now()}`.
+   This record is the authoritative trace of every intake decision; the triager comment (step 2)
+   is human-visible but the DB record is the audit trail. Audit is an **observer, not a gate** —
+   it is recorded *after* the label swap, never before it, so the trail records a decision only
+   once its authorizing label transition is committed (a failed `set_labels` writes no audit
+   record, avoiding a phantom `admit`). If `set_labels` succeeds but the audit write fails, the
+   label state is still correct and the missing record is a trail gap, not a state inconsistency
+   (symmetric with the `promote` handling in §11.3). This matches `IntakeEngine.intake`.
 
 > **I6 human-promotion audit.** `OrchestratorService.promote` (§11.3) must also write a
 > `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot: list<string>}`
@@ -1138,7 +1144,7 @@ per-entity advisory lock before mutating labels. Steps:
 (3) `await forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic swap —
     replaces label set with `[LABEL_TRIAGE, LABEL_AGENT_WORK]` in a single PUT-semantics call;
     `LABEL_TRIAGE` is retained to record that the issue passed through human triage before
-    dispatch, consistent with the `admit` path in `Engine.intake` step 4);
+    dispatch, consistent with the `admit` path in `Engine.intake` step 3);
 (4) write audit record `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot}` to DB;
 (5) release lock.
 If step (3) fails, do not write the audit record. If step (4) fails after a successful
