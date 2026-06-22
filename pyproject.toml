@@ -46,4 +46,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "covers: mark a test as covering a SPEC §8 truth-table row; args: (section, row_id)",
+    "integration_real: marks tests that require live credentials and network access",
 ]

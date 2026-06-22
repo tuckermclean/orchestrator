@@ -240,3 +240,119 @@
     tests: ["test_fake_lock_provider_records_acquire_release", "test_fake_lock_provider_releases_on_exception"]
   "lock-asyncio-serializes":
     tests: ["test_asyncio_lock_provider_serializes_same_entity", "test_asyncio_lock_provider_different_entities_parallel"]
+
+"§3.2":  # ForgePort contract suite (TESTING.md §3.2) — parametrized over [fake, real]
+  "forge-get-issue":
+    tests: ["test_forge_get_issue_returns_correct_fields"]
+  "forge-list-issues-by-label":
+    tests: ["test_forge_list_issues_filters_by_label"]
+  "forge-add-label-applies":
+    tests: ["test_forge_add_label_applies"]
+  "forge-add-label-idempotent":
+    tests: ["test_forge_add_label_idempotent"]
+  "forge-remove-label-removes":
+    tests: ["test_forge_remove_label_removes"]
+  "forge-remove-label-idempotent":
+    tests: ["test_forge_remove_label_idempotent"]
+  "forge-create-pr-returns-ref":
+    tests: ["test_forge_create_pr_returns_ref"]
+  "forge-create-pr-closes-issue":
+    tests: ["test_forge_create_pr_closes_issue"]
+  "forge-get-pr-all-fields":
+    tests: ["test_forge_get_pr_all_fields"]
+  "forge-list-prs-by-label":
+    tests: ["test_forge_list_prs_by_label"]
+  "forge-list-prs-no-label":
+    tests: ["test_forge_list_prs_no_label"]
+  "forge-set-pr-ready-converts-draft":
+    tests: ["test_forge_set_pr_ready_converts_draft"]
+  "forge-get-changed-files-returns-paths":
+    tests: ["test_forge_get_changed_files_returns_paths"]
+  "forge-get-changed-files-empty-pr":
+    tests: ["test_forge_get_changed_files_empty_pr"]
+  "forge-get-check-runs-returns-runs":
+    tests: ["test_forge_get_check_runs_returns_runs"]
+  "forge-get-mergeable-conflicting":
+    tests: ["test_forge_get_mergeable_conflicting"]
+  "forge-get-mergeable-mergeable":
+    tests: ["test_forge_get_mergeable_mergeable"]
+  "forge-list-comments-returns-comments":
+    tests: ["test_forge_list_comments_returns_comments"]
+  "forge-list-comments-since-filters":
+    tests: ["test_forge_list_comments_since_filters"]
+  "forge-list-comments-since-none-returns-all":
+    tests: ["test_forge_list_comments_since_none_returns_all"]
+  "forge-post-comment-appears-in-list":
+    tests: ["test_forge_post_comment_appears_in_list"]
+  "forge-create-review-approve":
+    tests: ["test_forge_create_review_approve"]
+  "forge-create-issue-returns-ref":
+    tests: ["test_forge_create_issue_returns_ref"]
+  "forge-get-file-contents-present":
+    tests: ["test_forge_get_file_contents_present"]
+  "forge-get-file-contents-absent":
+    tests: ["test_forge_get_file_contents_absent"]
+  "forge-last-workflow-run-at-known":
+    tests: ["test_forge_last_workflow_run_at_known"]
+  "forge-last-workflow-run-at-never-ran":
+    tests: ["test_forge_last_workflow_run_at_never_ran"]
+  "forge-last-dispatch-run-at-known":
+    tests: ["test_forge_last_dispatch_run_at_known"]
+  "forge-last-dispatch-run-at-never":
+    tests: ["test_forge_last_dispatch_run_at_never"]
+  "forge-get-closing-issue-present":
+    tests: ["test_forge_get_closing_issue_present"]
+  "forge-get-closing-issue-fixes-keyword":
+    tests: ["test_forge_get_closing_issue_fixes_keyword"]
+  "forge-get-closing-issue-resolves-keyword":
+    tests: ["test_forge_get_closing_issue_resolves_keyword"]
+  "forge-get-closing-issue-case-insensitive":
+    tests: ["test_forge_get_closing_issue_case_insensitive"]
+  "forge-get-closing-issue-absent":
+    tests: ["test_forge_get_closing_issue_absent"]
+  "forge-set-labels-replaces-all":
+    tests: ["test_forge_set_labels_replaces_all"]
+  "forge-set-labels-empty-clears":
+    tests: ["test_forge_set_labels_empty_clears"]
+  "forge-set-labels-atomic-no-gap":
+    tests: ["test_forge_set_labels_atomic_no_gap"]
+  "forge-put-file-on-branch-creates":
+    tests: ["test_forge_put_file_on_branch_creates"]
+  "forge-put-file-on-branch-overwrites":
+    tests: ["test_forge_put_file_on_branch_overwrites"]
+  "forge-copy-file-on-branch-creates-dest":
+    tests: ["test_forge_copy_file_on_branch_creates_dest"]
+  "forge-copy-file-on-branch-src-absent":
+    tests: ["test_forge_copy_file_on_branch_src_absent"]
+  "forge-changed-files-in-list-prs":
+    tests: ["test_forge_changed_files_in_list_prs"]
+  "forge-changed-files-counter-correct":
+    tests: ["test_forge_changed_files_counter_correct"]
+
+"§3.3":  # HarnessPort contract suite (TESTING.md §3.3) — parametrized over [fake, real]
+  "harness-dispatch-returns-handle":
+    tests: ["test_harness_dispatch_returns_handle"]
+  "harness-dispatch-records-params":
+    tests: ["test_harness_dispatch_records_params"]
+  "harness-dispatch-does-not-block":
+    tests: ["test_harness_contract_dispatch_does_not_block"]
+  "harness-trigger-ci-records-call":
+    tests: ["test_harness_trigger_ci_records_call"]
+  "harness-trigger-workflow-records-name":
+    tests: ["test_harness_trigger_workflow_records_name"]
+  "harness-get-run-status-queued":
+    tests: ["test_harness_get_run_status_queued"]
+  "harness-get-run-status-completed":
+    tests: ["test_harness_get_run_status_completed"]
+  "harness-get-run-status-failed":
+    tests: ["test_harness_get_run_status_failed"]
+  "harness-dispatch-allowed-agent-refs-passed":
+    tests: ["test_harness_dispatch_allowed_agent_refs_passed"]
+  "harness-cancel-idempotent":
+    tests: ["test_harness_cancel_idempotent"]
+  "harness-cancel-on-timeout-reviewer":
+    tests: ["test_harness_cancel_on_timeout_reviewer"]
+  "harness-cancel-on-timeout-fixer":
+    tests: ["test_harness_cancel_on_timeout_fixer"]
+  "harness-run-handle-round-trip":
+    tests: ["test_harness_run_handle_round_trip"]
