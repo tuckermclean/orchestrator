@@ -93,15 +93,14 @@ export interface ReconcileReport {
   escalated: number;
 }
 
+// Mirrors the backend TriageItem (src/domain/types.py) exactly.
 export interface TriageItem {
-  issue_number: number;
+  issue_ref: { repo: { owner: string; name: string }; number: number };
   title: string;
+  body: string;
   author: string;
-  body?: string;
   labels: string[];
-  repo?: { owner: string; name: string };
-  created_at?: string;
-  triager_comment?: string;
+  queued_at: string;
 }
 
 export interface RepoSummary {
@@ -276,26 +275,56 @@ export const api = {
   testPush: () => json<{ status: string; sent: number }>("/api/push/test", { method: "POST" }),
 };
 
-/** Subscribe to SSE stream for a run. Returns an unsubscribe function. */
+/**
+ * Subscribe to a run's SSE stream. Uses fetch (not EventSource) so it goes through
+ * `authFetch` — the SAME Bearer-token + refresh path as every other API call — instead
+ * of a second auth mechanism. (EventSource can't set an Authorization header, which would
+ * force a token in the URL.) Returns an unsubscribe function.
+ */
 export function streamRunEvents(
   runId: string,
   onEvent: (event: RunEvent) => void,
-  onError?: (err: Event) => void,
+  onError?: (err: unknown) => void,
 ): () => void {
-  const token = getToken();
-  // EventSource doesn't support custom headers; pass token as query param
-  const url = token
-    ? `/api/runs/${runId}/stream?token=${encodeURIComponent(token)}`
-    : `/api/runs/${runId}/stream`;
-  const es = new EventSource(url);
-  es.onmessage = (e) => {
+  const controller = new AbortController();
+  void (async () => {
     try {
-      const parsed = JSON.parse(e.data as string) as RunEvent;
-      onEvent(parsed);
-    } catch {
-      // ignore parse errors
+      const res = await authFetch(`/api/runs/${runId}/stream`, {
+        signal: controller.signal,
+        headers: { Accept: "text/event-stream" },
+      });
+      if (!res.ok || !res.body) {
+        onError?.(new Error(`SSE ${res.status} ${res.statusText}`));
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line; collect the `data:` payload.
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const data = frame
+            .split("\n")
+            .filter((l) => l.startsWith("data:"))
+            .map((l) => l.slice(5).replace(/^ /, ""))
+            .join("\n");
+          if (!data) continue;
+          try {
+            onEvent(JSON.parse(data) as RunEvent);
+          } catch {
+            // ignore malformed frames
+          }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) onError?.(err);
     }
-  };
-  if (onError) es.onerror = onError;
-  return () => es.close();
+  })();
+  return () => controller.abort();
 }

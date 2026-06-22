@@ -1,14 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
-interface TriageItem {
-  issue_ref: { repo: { owner: string; name: string }; number: number };
-  title: string;
-  body: string;
-  author: string;
-  labels: string[];
-  queued_at: string;
-}
+import { api, type TriageItem } from "../api";
 
 const styles = {
   container: {
@@ -120,9 +112,7 @@ export default function Triage() {
 
   async function fetchTriage() {
     try {
-      const res = await fetch("/api/triage");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: TriageItem[] = await res.json();
+      const data = await api.listTriage();
       setItems(data);
       setError(null);
     } catch (e) {
@@ -138,11 +128,7 @@ export default function Triage() {
 
   async function handlePromote(item: TriageItem) {
     try {
-      const res = await fetch(
-        `/api/triage/${item.issue_ref.number}/promote?operator=operator`,
-        { method: "POST" }
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await api.promoteIssue(item.issue_ref.number);
       await fetchTriage();
       navigate("/runs");
     } catch (e) {
@@ -152,11 +138,7 @@ export default function Triage() {
 
   async function handleDecline(item: TriageItem) {
     try {
-      const res = await fetch(
-        `/api/triage/${item.issue_ref.number}/decline?operator=operator`,
-        { method: "POST" }
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await api.declineIssue(item.issue_ref.number);
       await fetchTriage();
     } catch (e) {
       setError(`Decline failed: ${e}`);
