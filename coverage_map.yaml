@@ -242,7 +242,7 @@
     tests: ["test_security_spawn_rejected_when_allowed_refs_none"]
   # ExecutionBackend seam — K8s Job backend + subprocess parity (closes #51)
   "subprocess-backend-dispatch":
-    tests: ["test_subprocess_backend_dispatch_calls_runner"]
+    tests: ["test_subprocess_backend_dispatch_calls_runner", "test_subprocess_backend_clones_repo_before_running", "test_subprocess_backend_writes_hook_when_refs_set", "test_subprocess_backend_no_hook_when_refs_none", "test_subprocess_backend_clone_failure_marks_failed"]
   "subprocess-backend-status-in-progress":
     tests: ["test_subprocess_backend_sets_in_progress"]
   "subprocess-backend-success":
@@ -258,9 +258,9 @@
   "k8s-backend-job-spec-image":
     tests: ["test_k8s_build_job_spec_has_correct_image"]
   "k8s-backend-job-spec-command":
-    tests: ["test_k8s_build_job_spec_has_correct_command"]
+    tests: ["test_k8s_entry_script_contains_clone", "test_k8s_entry_script_uses_env_token_not_literal", "test_k8s_entry_script_contains_branch_when_set", "test_k8s_entry_script_no_branch_flag_when_none", "test_k8s_entry_script_contains_hook_setup_conditional", "test_k8s_entry_script_contains_claude_invocation", "test_k8s_build_job_spec_command_is_sh_c_script"]
   "k8s-i3-master-creds-absent":
-    tests: ["test_k8s_i3_master_creds_absent_from_job_env"]
+    tests: ["test_k8s_i3_master_creds_absent_from_job_env", "test_k8s_i3_token_not_literal_in_manifest"]
   "k8s-i9-allowed-refs-env-var":
     tests: ["test_k8s_i9_allowed_refs_in_job_env"]
   "k8s-i9-no-refs-env-var-absent":
@@ -268,7 +268,7 @@
   "k8s-backend-job-spec-structure":
     tests: ["test_k8s_build_job_spec_structure"]
   "k8s-backend-dispatch-creates-job":
-    tests: ["test_k8s_backend_dispatch_creates_job"]
+    tests: ["test_k8s_backend_dispatch_creates_job", "test_k8s_dispatch_does_not_clone_in_control_plane", "test_harness_dispatch_does_not_clone_for_k8s_backend"]
   "k8s-backend-success":
     tests: ["test_k8s_backend_watch_success"]
   "k8s-backend-failure":
@@ -284,7 +284,7 @@
   "k8s-backend-cleanup-job-on-success":
     tests: ["test_k8s_backend_cleanup_job_on_success"]
   "harness-delegates-to-backend":
-    tests: ["test_harness_dispatch_delegates_to_backend"]
+    tests: ["test_harness_dispatch_delegates_to_backend", "test_harness_dispatch_does_not_clone_for_k8s_backend"]
   "harness-cancel-delegates-to-backend":
     tests: ["test_harness_cancel_delegates_to_backend"]
   "backend-factory-subprocess-default":

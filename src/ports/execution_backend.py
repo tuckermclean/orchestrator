@@ -1,28 +1,42 @@
 """ExecutionBackend — seam between HarnessPort and the underlying execution substrate.
 
-An ExecutionBackend abstracts "spawn a claude agent dispatch and surface its run
-state."  The harness delegates to the configured backend so the substrate
-(local subprocess vs Kubernetes Job) can be swapped without touching the
-HarnessPort contract.
+An ExecutionBackend abstracts "prepare a working tree and spawn a claude agent
+dispatch, then surface its run state."  Each backend owns its own working-tree
+preparation so the substrate (local subprocess vs Kubernetes Job) can be swapped
+without touching the HarnessPort contract.
 
 Two concrete implementations:
   SubprocessBackend — spawns the claude CLI as a local child process.  Dev/default.
+                      Owns the local clone (git is on the dev/CI host).
   K8sJobBackend     — schedules a Kubernetes Job per dispatch.  Prod isolation.
+                      The Job entry script does clone + I9 hook + claude INSIDE
+                      the agent-runner pod (git + claude + python3 are in that image).
 
 Backend selection:
   subprocess  — always, unless HARNESS_EXECUTION_BACKEND=k8s is set.
   k8s         — when HARNESS_EXECUTION_BACKEND=k8s (or detect in-cluster config).
 
+Why each backend owns the clone (production architecture fix):
+  The control-plane image ships WITHOUT git by design (Dockerfile comment).  The
+  K8s agent-runner image HAS git + claude + python3.  Cloning in the control-plane
+  would fail at runtime for k8s mode, and even if it succeeded the cloned tree
+  would be on a DIFFERENT pod's filesystem — the Job pod never sees it.  The fix
+  moves all working-tree preparation into the backend.
+
 I3 invariant:
   Only CLAUDE_CODE_OAUTH_TOKEN and a scoped GH_TOKEN enter the execution
   environment.  Master credentials (App private key, FORGE_TOKEN) are NEVER
   forwarded to a child process or a K8s Job pod.
+  For K8s: GH_TOKEN is in the pod env at runtime; the token NEVER appears as
+  a literal string in the Job manifest or in argv.
 
-I9 invariant (spawn hook carry-over to K8s):
-  When K8sJobBackend is used and allowed_agent_refs is not None, the hook script
-  and settings.json are written into the working tree before the Job starts, and
-  ORCHESTRATOR_ALLOWED_AGENT_REFS is injected as a Job-level env var.  The pod's
-  claude process enforces the allow-set exactly as the subprocess backend does.
+I9 invariant (spawn hook — each backend installs it):
+  SubprocessBackend: calls harness._write_spawn_hook() on the locally-cloned tree;
+    ORCHESTRATOR_ALLOWED_AGENT_REFS is in child_env.
+  K8sJobBackend: the agent-runner image bakes i9_spawn_hook.py at
+    /opt/orchestrator/i9_spawn_hook.py (deploy/agent-runner.Dockerfile COPY).
+    The Job entry script copies the hook and writes .claude/settings.json
+    INSIDE the pod when ORCHESTRATOR_ALLOWED_AGENT_REFS is set in the pod env.
   The hook denies via EXIT CODE 2 (Claude Code's PreToolUse blocking contract —
   exit 1 does NOT block).
 
@@ -37,6 +51,7 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 import time
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -55,26 +70,46 @@ from src.ports.harness import (
 
 
 class ExecutionBackend(Protocol):
-    """Abstraction over "run a claude agent dispatch and surface run state."
+    """Abstraction over "prepare a working tree, spawn a claude dispatch, surface run state."
 
     Implementors must be safe to call concurrently from multiple asyncio tasks.
     dispatch() must return immediately without blocking the event loop.
+
+    Each backend is responsible for:
+      a) Cloning the target repo (subprocess: locally; k8s: inside the pod).
+      b) Materialising the I9 spawn-allow-set hook when allowed_agent_refs is set.
+      c) Running the claude invocation in the cloned working tree.
     """
 
     async def dispatch(
         self,
         *,
         run_id: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str | None,
         claude_args: list[str],
-        repo_dir: str,
-        work_dir: str,
         child_env: dict[str, str],
+        allowed_agent_refs: list[str] | None,
         event_store: RunEventStore,
+        harness: Any,
     ) -> None:
         """Start execution and record run state into event_store.
 
         Fires and forgets — returns immediately after the job/process is
         scheduled.  Progress is tracked via the RunEventStore.
+
+        Parameters:
+          run_id:             unique identifier for this run.
+          repo_owner:         GitHub owner of the target repo.
+          repo_name:          GitHub repo name.
+          branch:             branch to check out, or None for the default.
+          claude_args:        the full claude CLI invocation to run.
+          child_env:          environment for the child (I3: only scoped creds).
+          allowed_agent_refs: allow-set for I9 spawn gate, or None to skip.
+          event_store:        receives run events and status updates.
+          harness:            ClaudeCodeHarnessPort instance (provides _clone_repo
+                              and _write_spawn_hook helpers for SubprocessBackend).
         """
         ...
 
@@ -112,19 +147,24 @@ class FakeExecutionBackend:
         self,
         *,
         run_id: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str | None,
         claude_args: list[str],
-        repo_dir: str,
-        work_dir: str,
         child_env: dict[str, str],
+        allowed_agent_refs: list[str] | None,
         event_store: RunEventStore,
+        harness: Any,
     ) -> None:
         self.dispatched.append(
             {
                 "run_id": run_id,
+                "repo_owner": repo_owner,
+                "repo_name": repo_name,
+                "branch": branch,
                 "claude_args": claude_args,
-                "repo_dir": repo_dir,
-                "work_dir": work_dir,
                 "child_env": child_env,
+                "allowed_agent_refs": allowed_agent_refs,
             }
         )
         if self._fail_dispatch:
@@ -150,9 +190,14 @@ class FakeExecutionBackend:
 class SubprocessBackend:
     """Execute a claude dispatch as a supervised async child process.
 
-    This is the dev/default backend — identical behaviour to the original
-    process-runner logic that was inlined in ClaudeCodeHarnessPort before the
-    ExecutionBackend seam was introduced.
+    This is the dev/default backend.  It OWNS the working-tree preparation:
+      1. Clones the target repo into a fresh temp dir (via harness._clone_repo).
+      2. Materialises the I9 hook (via harness._write_spawn_hook) when
+         allowed_agent_refs is not None.
+      3. Spawns claude in the cloned tree and watches stdout → RunEventStore.
+
+    On clone failure the run is immediately marked completed/failure without
+    spawning any subprocess.
 
     Injectable process_runner seam allows unit tests to drive a fake subprocess
     without spawning a real one.
@@ -172,13 +217,46 @@ class SubprocessBackend:
         self,
         *,
         run_id: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str | None,
         claude_args: list[str],
-        repo_dir: str,
-        work_dir: str,
         child_env: dict[str, str],
+        allowed_agent_refs: list[str] | None,
         event_store: RunEventStore,
+        harness: Any,
     ) -> None:
-        """Spawn the claude CLI subprocess and watch it in a background task."""
+        """Clone repo, write I9 hook, spawn the claude CLI subprocess and watch it."""
+        # 1. Clone the repo into a fresh temp dir.
+        work_dir = tempfile.mkdtemp(prefix=f"orch-run-{run_id[:8]}-")
+        repo_dir = os.path.join(work_dir, "repo")
+        os.makedirs(repo_dir, exist_ok=True)
+
+        gh_token = child_env.get("GH_TOKEN", "")
+        try:
+            await harness._clone_repo(gh_token, repo_dir, branch)
+        except Exception as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            event_store.set_status(
+                run_id,
+                RunStatus(state="completed", conclusion="failure"),
+            )
+            event_store.append(
+                run_id,
+                RunEvent(
+                    event_type="error",
+                    data={"message": f"Clone failed: {exc}"},
+                    timestamp=datetime.now(tz=UTC),
+                ),
+            )
+            return
+
+        # 2. Materialise the I9 PreToolUse hook when an allow-set is specified.
+        #    The hook denies via EXIT CODE 2 — not 1 — per the Claude Code contract.
+        if allowed_agent_refs is not None:
+            harness._write_spawn_hook(repo_dir)
+
+        # 3. Spawn claude in the cloned working tree.
         process = await self._process_runner(claude_args, repo_dir, child_env)
         self._processes[run_id] = (process, work_dir)
 
@@ -357,6 +435,10 @@ class FakeKubeClient:
 # K8sJobBackend — prod isolation
 # ---------------------------------------------------------------------------
 
+# Baked path for the I9 hook script in the agent-runner image.
+# This MUST match the COPY destination in deploy/agent-runner.Dockerfile.
+_BAKED_HOOK_PATH = "/opt/orchestrator/i9_spawn_hook.py"
+
 # Default poll interval and timeout (seconds) — module-level so tests can override.
 _K8S_POLL_INTERVAL_S: float = 5.0
 _K8S_JOB_TIMEOUT_S: float = 1800.0  # 30 minutes
@@ -365,21 +447,43 @@ _K8S_JOB_TIMEOUT_S: float = 1800.0  # 30 minutes
 class K8sJobBackend:
     """Execute a claude dispatch as a Kubernetes Job (prod isolation backend).
 
-    Per-dispatch behaviour:
-      1. Build a Job spec with ONE container running the agent-runner image.
-      2. Inject ONLY CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN (scoped) into the pod
-         env — I3: master credentials are NEVER present.
-      3. Create the Job via the kube client.
-      4. Poll the Job status in a background asyncio task; record events into
-         RunEventStore.
-      5. Delete the Job on completion or cancel.
+    This backend OWNS working-tree preparation — it builds a shell script that
+    runs INSIDE the agent-runner pod to:
+      a) Clone the repo using the GH_TOKEN env var (I3: token in env, not in
+         the manifest/argv).
+      b) Materialise the I9 spawn-allow-set hook when ORCHESTRATOR_ALLOWED_AGENT_REFS
+         is set in the pod env (copies the baked hook from _BAKED_HOOK_PATH and
+         writes .claude/settings.json).
+      c) cd into the cloned tree and exec the claude invocation.
 
-    I9 hook carry-over:
-      When child_env contains ORCHESTRATOR_ALLOWED_AGENT_REFS, it is forwarded
-      as a Job env var.  The hook script (written into repo_dir/.claude/ by the
-      harness before dispatch() is called) is part of the working tree, so the
-      PreToolUse gate is active inside the pod exactly as in the subprocess
-      backend.  The hook exits 2 (DENY) — not 1 — per the Claude Code contract.
+    The control-plane never clones the repo for K8s dispatches — this is the
+    correct behaviour because the control-plane image ships without git.
+
+    I3 token handling:
+      GH_TOKEN is in the pod env (child_env passed from harness).  The clone
+      command authenticates via the runtime env variable:
+        git -c "url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf=..."
+              clone ...
+      The token appears ONLY in the pod env at runtime — NEVER as a literal in
+      the Job manifest.  This is validated by test_k8s_i3_token_not_literal_in_manifest.
+
+    I9 hook in-pod setup:
+      The agent-runner image bakes i9_spawn_hook.py at _BAKED_HOOK_PATH
+      (deploy/agent-runner.Dockerfile: COPY src/ports/i9_spawn_hook.py /opt/orchestrator/).
+      The entry script:
+        1. Creates /workspace/repo/.claude/
+        2. Copies _BAKED_HOOK_PATH → /workspace/repo/.claude/i9_spawn_hook.py
+        3. Writes /workspace/repo/.claude/settings.json with the PreToolUse hook wired.
+      This runs only when ORCHESTRATOR_ALLOWED_AGENT_REFS is set in the pod env.
+
+    Per-dispatch behaviour:
+      1. Build the entry shell script (clone + hook setup + claude run).
+      2. Build a Job spec with ONE container using ["sh", "-c", "<script>"].
+      3. Inject ONLY child_env into the pod (I3: master creds absent).
+      4. Create the Job via the kube client.
+      5. Poll the Job status in a background asyncio task; record events into
+         RunEventStore.
+      6. Delete the Job on completion or cancel.
 
     Kubernetes dependency is imported lazily:
       `from kubernetes import client as k8s_client, config as k8s_config`
@@ -419,19 +523,95 @@ class K8sJobBackend:
         # run_id → job_name mapping for cancel()
         self._job_names: dict[str, str] = {}
 
+    def _build_entry_script(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        branch: str | None,
+        claude_args: list[str],
+    ) -> str:
+        """Build the shell script that runs inside the agent-runner pod.
+
+        The script:
+          1. Clones the repo using the GH_TOKEN env var (I3: token in env,
+             not in argv or manifest).
+          2. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
+             hook (baked at _BAKED_HOOK_PATH) into /workspace/repo/.claude/.
+          3. cd into /workspace/repo and exec the claude invocation.
+
+        I3 security: GH_TOKEN is referenced as ${GH_TOKEN} in the shell
+        command — it is NEVER interpolated as a literal string here.  The
+        token value reaches the script only via the pod env at runtime.
+
+        Shell quoting: claude_args elements are individually shell-quoted via
+        shlex.quote so argument injection from model or prompt is impossible.
+        """
+        import shlex
+
+        clone_url = f"https://github.com/{repo_owner}/{repo_name}.git"
+
+        # Build git clone command — GH_TOKEN via -c url.insteadOf (env, not argv).
+        # The ${GH_TOKEN} shell variable is expanded at pod runtime, not here.
+        branch_flag = ""
+        if branch:
+            # branch is context.head_branch — validated as a safe ref by DispatchContext
+            branch_flag = f" --branch {shlex.quote(branch)}"
+
+        # Shell-quote each claude argument to prevent word-splitting/injection.
+        quoted_claude = " ".join(shlex.quote(a) for a in claude_args)
+
+        hook_src = _BAKED_HOOK_PATH
+
+        # GH_TOKEN injected via git's url.insteadOf mechanism so it never appears
+        # in argv — the shell expands ${GH_TOKEN} at pod runtime, not here.
+        gh_insteadof = (
+            'git -c "url.https://x-access-token:${GH_TOKEN}'
+            '@github.com/.insteadOf=https://github.com/"'
+        )
+        script = (
+            "set -e\n"
+            # Step 1: clone the repo (GH_TOKEN via env — not in argv).
+            f"{gh_insteadof} "
+            f"clone --depth 1{branch_flag} {shlex.quote(clone_url)} /workspace/repo\n"
+            # Step 2: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
+            "if [ -n \"${ORCHESTRATOR_ALLOWED_AGENT_REFS}\" ]; then\n"
+            "  mkdir -p /workspace/repo/.claude\n"
+            f"  cp {shlex.quote(hook_src)} /workspace/repo/.claude/i9_spawn_hook.py\n"
+            "  python3 -c \"\n"
+            "import json, pathlib\n"
+            "s = {'hooks': {'PreToolUse': [{'matcher': 'Task', 'hooks': [{"
+            "'type': 'command', 'command': 'python3 /workspace/repo/.claude/i9_spawn_hook.py'"
+            "}]}]}}\n"
+            "p = pathlib.Path('/workspace/repo/.claude/settings.json')\n"
+            "p.write_text(json.dumps(s, indent=2))\n"
+            "\"\n"
+            "fi\n"
+            # Step 3: run claude in the cloned working tree.
+            f"cd /workspace/repo\n"
+            f"exec {quoted_claude}\n"
+        )
+        return script
+
     def _build_job_spec(
         self,
         run_id: str,
-        claude_args: list[str],
+        entry_script: str,
         child_env: dict[str, str],
     ) -> dict[str, Any]:
         """Build a Kubernetes Job manifest for this dispatch.
+
+        The container command is ["sh", "-c", "<entry_script>"] so the clone,
+        hook setup, and claude invocation all happen INSIDE the pod.
 
         I3: Only env vars present in child_env are forwarded to the pod.
         The caller (_build_child_env in the harness) guarantees that
         child_env contains only CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN, and
         auxiliary non-credential vars.  Master credentials (App private key,
         FORGE_TOKEN) are absent from child_env before this method is called.
+
+        I3 token: GH_TOKEN is in child_env and forwarded as a pod env var.
+        The token NEVER appears as a literal string in the Job manifest — the
+        entry script references it via ${GH_TOKEN} at runtime.
         """
         job_name = f"orch-agent-{run_id[:16]}"
         env_list = [{"name": k, "value": v} for k, v in child_env.items()]
@@ -463,7 +643,9 @@ class K8sJobBackend:
                             {
                                 "name": "agent",
                                 "image": self._image,
-                                "command": claude_args,
+                                # Entry-point is a shell script that clones, hooks,
+                                # and runs claude — all inside the pod.
+                                "command": ["sh", "-c", entry_script],
                                 "env": env_list,
                                 "resources": {
                                     "requests": {"cpu": "250m", "memory": "512Mi"},
@@ -490,14 +672,22 @@ class K8sJobBackend:
         self,
         *,
         run_id: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str | None,
         claude_args: list[str],
-        repo_dir: str,
-        work_dir: str,
         child_env: dict[str, str],
+        allowed_agent_refs: list[str] | None,
         event_store: RunEventStore,
+        harness: Any,
     ) -> None:
-        """Create a K8s Job and watch it in a background task."""
-        job_spec = self._build_job_spec(run_id, claude_args, child_env)
+        """Build the entry script, create a K8s Job, and watch it in a background task.
+
+        The control-plane does NOT clone the repo here — the entry script
+        (built by _build_entry_script) does the clone inside the pod.
+        """
+        entry_script = self._build_entry_script(repo_owner, repo_name, branch, claude_args)
+        job_spec = self._build_job_spec(run_id, entry_script, child_env)
         job_name: str = job_spec["metadata"]["name"]
         self._job_names[run_id] = job_name
 
@@ -513,7 +703,7 @@ class K8sJobBackend:
         )
 
         watcher = asyncio.create_task(
-            self._watch(run_id, job_name, work_dir, event_store),
+            self._watch(run_id, job_name, event_store),
             name=f"k8s-watch-{run_id[:8]}",
         )
         self._background_tasks.add(watcher)
@@ -523,7 +713,6 @@ class K8sJobBackend:
         self,
         run_id: str,
         job_name: str,
-        work_dir: str,
         event_store: RunEventStore,
     ) -> None:
         """Poll the Job status until completion or timeout."""
@@ -581,12 +770,6 @@ class K8sJobBackend:
                 break
 
             await asyncio.sleep(self._poll_interval_s)
-
-        # Clean up local temp dir
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
 
     def _cleanup_job(self, job_name: str) -> None:
         """Delete the K8s Job (best-effort; TTL handles it if this fails)."""
