@@ -9,7 +9,7 @@ data:
   # GitHub owner/repo for the default repo reference
   GITHUB_OWNER: {{ .Values.config.GITHUB_OWNER | quote }}
   GITHUB_REPO: {{ .Values.config.GITHUB_REPO | quote }}
-  # Comma-separated GitHub login allowlist (empty = all admitted)
+  # Comma-separated GitHub login allowlist (empty = owner-only default-deny, issue #48)
   ALLOWLIST: {{ .Values.config.ALLOWLIST | quote }}
   # Reconciler schedule (must match RECONCILER_CRON constant in SPEC §7)
   RECONCILE_CRON: {{ .Values.config.RECONCILE_CRON | quote }}
@@ -27,3 +27,12 @@ data:
   PUSH_VAPID_PUBLIC_KEY: {{ .Values.config.PUSH_VAPID_PUBLIC_KEY | quote }}
   # Optional OpenTelemetry exporter
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}
+  # Harness execution backend (issue #51): "subprocess" (dev) or "k8s" (prod isolation —
+  # each agent dispatch runs as an isolated K8s Job using HARNESS_K8S_IMAGE).
+  HARNESS_EXECUTION_BACKEND: {{ .Values.config.HARNESS_EXECUTION_BACKEND | quote }}
+  # Agent-runner image for the k8s backend (pin by digest in prod — see values-prod.yaml).
+  HARNESS_K8S_IMAGE: {{ .Values.config.HARNESS_K8S_IMAGE | quote }}
+  # Namespace + ServiceAccount for agent Jobs — wired to this chart's RBAC (rbac.yaml grants
+  # the SA job-manager in the release namespace), so no operator input needed.
+  HARNESS_K8S_NAMESPACE: {{ .Release.Namespace | quote }}
+  HARNESS_K8S_SERVICE_ACCOUNT: {{ include "orchestrator.serviceAccountName" . | quote }}

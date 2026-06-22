@@ -49,6 +49,12 @@ config:
   DB_URL: "sqlite:///data/orchestrator.db"
   RECONCILE_MODE: "internal"
   PUSH_VAPID_PUBLIC_KEY: ""
+  # Production runs agents as isolated K8s Jobs (issue #51) — the control-plane image has
+  # no claude CLI. Namespace + ServiceAccount are derived from the release + RBAC.
+  HARNESS_EXECUTION_BACKEND: "k8s"
+  # Agent-runner image. Tag shown; PIN BY DIGEST at install via:
+  #   --set config.HARNESS_K8S_IMAGE=ghcr.io/tuckermclean/orchestrator-agent-runner@sha256:<digest>
+  HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner:v0.1.1"
 
 ingress:
   enabled: true
