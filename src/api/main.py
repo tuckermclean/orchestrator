@@ -26,6 +26,7 @@ from src.db.counter import SQLiteCounterStore
 from src.db.dsn import db_path_from_url
 from src.db.operator_store import FakeOperatorStore, SQLiteOperatorStore
 from src.db.push_store import FakePushStore, SQLitePushStore
+from src.db.run_store import FakeRunStore, SQLiteRunStore
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import (
     FakeConvergeStateStore,
@@ -276,6 +277,7 @@ _ProdStores = tuple[
     AuditLog | None,
     SQLiteCounterStore | None,
     SQLiteConvergeStateStore | None,
+    SQLiteRunStore | None,
 ]
 
 
@@ -300,7 +302,7 @@ def _build_prod_service() -> _ProdStores:
 
     if not _has_prod_creds():
         _svc, _op, _push, _dev_reg = _build_dev_service()
-        return _svc, None, _op, _push, _dev_reg, None, None, None
+        return _svc, None, _op, _push, _dev_reg, None, None, None, None
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
@@ -351,25 +353,29 @@ def _build_prod_service() -> _ProdStores:
         )
 
     if db_path is not None:
-        # File-backed: all three engine stores use the same SQLite file.
+        # File-backed: all four engine stores use the same SQLite file.
         # init() is called in _lifespan before traffic arrives.
         audit: AuditLog = AuditLog(db_path=db_path)
         counter_store: SQLiteCounterStore | FakeCounterStore = SQLiteCounterStore(db_path)
         converge_store: SQLiteConvergeStateStore | FakeConvergeStateStore = (
             SQLiteConvergeStateStore(db_path)
         )
+        run_store_inst: SQLiteRunStore | FakeRunStore = SQLiteRunStore(db_path)
         db_audit: AuditLog | None = audit
         db_counter: SQLiteCounterStore | None = counter_store  # type: ignore[assignment]
         db_converge: SQLiteConvergeStateStore | None = converge_store  # type: ignore[assignment]
+        db_run_store: SQLiteRunStore | None = run_store_inst  # type: ignore[assignment]
     else:
         # In-memory: use AuditLog() (defaults to :memory:) and Fake stores.
         # These do not need lifespan init()/close() beyond what AuditLog already does.
         audit = AuditLog()
         counter_store = FakeCounterStore()
         converge_store = FakeConvergeStateStore()
+        run_store_inst = FakeRunStore()
         db_audit = audit  # AuditLog always needs init/close — returned for lifespan
         db_counter = None
         db_converge = None
+        db_run_store = None
 
     # I1: single-repo backward-compat allowlist (used when no registry or as fallback).
     # Multi-repo mode reads per-repo allowlist from the registry at event time.
@@ -385,6 +391,7 @@ def _build_prod_service() -> _ProdStores:
         registry=registry,
         counter=counter_store,
         converge_state=converge_store,
+        run_store=run_store_inst,
     )
 
     # Operator account store: SQLite when DB_URL names a file, Fake otherwise.
@@ -409,6 +416,7 @@ def _build_prod_service() -> _ProdStores:
         db_audit,
         db_counter,
         db_converge,
+        db_run_store,
     )
 
 
@@ -422,6 +430,7 @@ def _build_prod_service() -> _ProdStores:
     _db_audit,
     _db_counter,
     _db_converge,
+    _db_run_store,
 ) = _build_prod_service()
 
 
@@ -435,6 +444,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _db_counter.init()
     if _db_converge is not None:
         await _db_converge.init()
+    if _db_run_store is not None:
+        await _db_run_store.init()
     # SQLiteOperatorStore / SQLitePushStore also need init() when file-backed.
     if isinstance(_operator_store, SQLiteOperatorStore):
         await _operator_store.init()
@@ -479,6 +490,8 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await _db_counter.close()
         if _db_audit is not None:
             await _db_audit.close()
+        if _db_run_store is not None:
+            await _db_run_store.close()
         if isinstance(_operator_store, SQLiteOperatorStore):
             await _operator_store.close()
         if isinstance(_push_store, SQLitePushStore):
