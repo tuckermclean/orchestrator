@@ -48,7 +48,7 @@ _DEFAULT_SPEC_PATH = Path("SPEC.md")
 
 # Regex that matches SPEC.md §8 decision-function section headers.
 # Captures the section ID (e.g. "§8.1", "§8.2a", "§8.10").
-_SPEC_SECTION_RE = re.compile(r"^### (§8\.\d+[a-z]?)\b")
+_SPEC_SECTION_RE = re.compile(r"^### (§8\.\d+[a-z]*)\b")
 
 
 def load_coverage_map(path: Path = _DEFAULT_MAP_PATH) -> dict[str, dict[str, list[str]]]:
@@ -220,9 +220,17 @@ def collect_markers(
 
     The scan is purely AST-based; it does not import or execute any test code.
     """
-    search_root = rootdir if rootdir is not None else Path(".")
+    base = rootdir if rootdir is not None else Path(".")
+    # Scan only the project's own tests/ tree (mirrors pyproject testpaths and
+    # the `pytest --collect-only` scope used by collect_node_ids). Never descend
+    # into .venv or .claude/worktrees, which hold unrelated test_*.py copies
+    # (vendored packages, other branches) that would corrupt the marker set.
+    search_root = base / "tests" if (base / "tests").is_dir() else base
+    skip_dirs = {".venv", ".claude", "__pycache__", "node_modules", ".git"}
     markers: dict[tuple[str, str], list[str]] = {}
     for py_file in sorted(search_root.rglob("test_*.py")):
+        if any(part in skip_dirs for part in py_file.parts):
+            continue
         try:
             source = py_file.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(py_file))
