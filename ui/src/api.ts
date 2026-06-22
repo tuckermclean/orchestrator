@@ -133,6 +133,29 @@ function handle401(): never {
   throw new Error("Redirecting to login");
 }
 
+/**
+ * Single in-flight refresh promise shared across all concurrent callers.
+ *
+ * When multiple requests 401 simultaneously (e.g. on Dashboard mount), they
+ * all race into authFetch. Without this guard each caller would independently
+ * call refreshToken(), potentially hammering the auth endpoint and racing the
+ * token store. Instead:
+ *   - The first 401 creates the refresh promise and stores it here.
+ *   - Subsequent 401s await the same promise rather than starting a new one.
+ *   - Once resolved (success or failure) the slot is cleared so the next
+ *     expiry cycle starts fresh.
+ */
+let _refreshInFlight: Promise<string | null> | null = null;
+
+function getOrStartRefresh(): Promise<string | null> {
+  if (!_refreshInFlight) {
+    _refreshInFlight = refreshToken().finally(() => {
+      _refreshInFlight = null;
+    });
+  }
+  return _refreshInFlight;
+}
+
 async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -145,9 +168,11 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
 
   let resp = await fetch(`${BASE}${path}`, { ...init, headers });
 
-  // Attempt silent refresh on 401
+  // Attempt a concurrency-safe silent refresh on 401.
+  // All concurrent 401s share the same refresh promise; only one network
+  // request is made, and all callers retry with the new token once it lands.
   if (resp.status === 401 && token) {
-    const newToken = await refreshToken();
+    const newToken = await getOrStartRefresh();
     if (newToken) {
       headers["Authorization"] = `Bearer ${newToken}`;
       resp = await fetch(`${BASE}${path}`, { ...init, headers });
