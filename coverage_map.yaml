@@ -15,11 +15,11 @@
 
 "§8.2":  # resolve_blockers
   "row-1-file-present-not-sentinel":
-    tests: ["test_resolve_blockers_row1_from_json", "test_resolve_blockers_row1_zero", "test_resolve_blockers_row1_non_numeric_blockers_unknown"]
+    tests: ["test_resolve_blockers_row1_from_json", "test_resolve_blockers_row1_zero", "test_resolve_blockers_row1_non_numeric_blockers_unknown", "test_resolve_blockers_json_blockers_null", "test_resolve_blockers_json_blockers_string", "test_resolve_blockers_json_blockers_false"]
   "row-2-sentinel-round-started":
     tests: ["test_resolve_blockers_row2_footer_in_round", "test_resolve_blockers_row2_filters_stale_footer"]
   "row-3-sentinel-no-round-started":
-    tests: ["test_resolve_blockers_row3_footer_any_age"]
+    tests: ["test_resolve_blockers_row3_footer_any_age", "test_resolve_blockers_sentinel_unscoped_fallback"]
   "row-4-no-footer-unknown":
     tests: ["test_resolve_blockers_row4_no_footer_unknown", "test_resolve_blockers_row4_comment_without_footer"]
 
@@ -38,6 +38,8 @@
     tests: ["test_decide_round_r3_ci_red"]
   "row-7-r3-cap-reached":
     tests: ["test_decide_round_r3_cap_reached"]
+  "runtime-validation":  # SPEC §8.3 — Literal[1,2,3]/bool/int|"unknown" enforced at runtime
+    tests: ["test_decide_round_invalid_round_zero", "test_decide_round_invalid_round_four", "test_decide_round_invalid_ci_green", "test_decide_round_invalid_blockers", "test_decide_round_invalid_blockers_mixed"]
 
 "§8.12":  # decide_specialists
   "base-set-only":
@@ -51,7 +53,15 @@
   "cap-enforcement":
     tests: ["test_decide_specialists_cap_enforced"]
   "determinism-order":
-    tests: ["test_decide_specialists_definition_order", "test_decide_specialists_deterministic_repeat", "test_decide_specialists_no_duplicate_refs"]
+    tests: ["test_decide_specialists_definition_order", "test_decide_specialists_deterministic_repeat", "test_decide_specialists_no_duplicate_refs", "test_decide_specialists_all_three_routing_cap"]
+  "base-set-rounds":  # round arg unused; base set returned for R2/R3
+    tests: ["test_decide_specialists_base_set_round2", "test_decide_specialists_base_set_round3"]
+  "security-base-dedup":  # auth/session via base; security never duplicated
+    tests: ["test_decide_specialists_auth_path", "test_decide_specialists_session_path", "test_decide_specialists_security_not_duplicated", "test_decide_specialists_multi_routing_deduped"]
+  "i9-closure":  # SPEC §8.12 / SECURITY.md §3 I9 — output drawn only from base ∪ routing
+    tests: ["test_decide_specialists_result_from_routing_only", "test_decide_specialists_agent_ref_not_from_contributor_text", "test_security_agent_ref_not_from_contributor_text"]
+  "length-invariants":
+    tests: ["test_decide_specialists_result_length_invariant", "test_decide_specialists_base_size_le_cap", "test_decide_specialists_ui_dir_path", "test_decide_specialists_components_subdir_path"]
 
 "§8.9":
   "row-1-blocked":

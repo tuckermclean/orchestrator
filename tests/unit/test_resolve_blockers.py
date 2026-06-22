@@ -121,3 +121,57 @@ def test_parse_comment_blockers_extracts_count() -> None:
 
 def test_parse_comment_blockers_none_when_absent() -> None:
     assert parse_comment_blockers("no footer here") is None
+
+
+# ---------------------------------------------------------------------------
+# Row 1 — non-numeric .blockers values (null / string / false) → unknown (§2.3 floor)
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_blockers_json_blockers_null() -> None:
+    """Non-sentinel verdict with `"blockers": null` → unknown (non-numeric)."""
+    forge = FakeForgePort()
+    forge.seed_pr(_PR)
+    bad = json.dumps(
+        {"blockers": None, "suggestions": 0, "nits": [], "blocker_signatures": ["a:x"]}
+    )
+    forge.seed_file(_PR, ".converge-verdict.json", bad.encode())
+    assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
+
+
+async def test_resolve_blockers_json_blockers_string() -> None:
+    """Non-sentinel verdict with `"blockers": "bad"` → unknown (non-numeric)."""
+    forge = FakeForgePort()
+    forge.seed_pr(_PR)
+    bad = json.dumps(
+        {"blockers": "bad", "suggestions": 0, "nits": [], "blocker_signatures": ["a:x"]}
+    )
+    forge.seed_file(_PR, ".converge-verdict.json", bad.encode())
+    assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
+
+
+async def test_resolve_blockers_json_blockers_false() -> None:
+    """Non-sentinel verdict with `"blockers": false` → unknown (bool is not a real int)."""
+    forge = FakeForgePort()
+    forge.seed_pr(_PR)
+    bad = json.dumps(
+        {"blockers": False, "suggestions": 0, "nits": [], "blocker_signatures": ["a:x"]}
+    )
+    forge.seed_file(_PR, ".converge-verdict.json", bad.encode())
+    assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
+
+
+async def test_resolve_blockers_sentinel_unscoped_fallback() -> None:
+    """Sentinel + only a stale footer + round_started=None → stale footer count (row 3)."""
+    forge = FakeForgePort()
+    forge.seed_pr(_PR)
+    sentinel = Verdict(
+        blockers=1, suggestions=0, nits=[], blocker_signatures=["verdict-file-not-written"]
+    )
+    forge.seed_file(_PR, ".converge-verdict.json", sentinel.model_dump_json().encode())
+    stale = datetime.now(tz=UTC) - timedelta(hours=2)
+    forge._comments.setdefault(forge._entity_key(_PR), []).append(
+        Comment(id="1", body=_footer(1), created_at=stale, author="reviewer")
+    )
+    # No round scoping → the stale footer is honoured regardless of age.
+    assert await resolve_blockers(forge, _PR, 1, None) == 1
