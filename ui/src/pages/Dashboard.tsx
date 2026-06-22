@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type EscalationSummary, type HealthReport } from "../api";
+import { api, type EscalationSummary, type HealthReport, type RepoSummary } from "../api";
 
 const verdictColor: Record<string, string> = {
   BLOCKED: "#f85149",
@@ -16,15 +16,28 @@ const card: React.CSSProperties = {
   marginBottom: "16px",
 };
 
-// Default demo owner/repo for escalation listing
-const _DEMO_OWNER = "demo";
-const _DEMO_REPO = "repo";
-
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [escalations, setEscalations] = useState<EscalationSummary[]>([]);
+  // Active repo is resolved once from the registry and held for the lifetime of
+  // this component.  null = not yet resolved; undefined = no enabled repo found.
+  const [activeRepo, setActiveRepo] = useState<RepoSummary | null | undefined>(null);
+
+  // Resolve the active (first-enabled) repo from the registry on mount.
+  useEffect(() => {
+    api
+      .listRepos()
+      .then((repos) => {
+        // find returns undefined when no match; we store that as "no repo" sentinel
+        setActiveRepo(repos.find((r) => r.enabled) ?? undefined);
+      })
+      .catch(() => {
+        // If the registry call fails treat it as no-repo rather than crashing.
+        setActiveRepo(undefined);
+      });
+  }, []);
 
   const load = () => {
     api
@@ -35,24 +48,57 @@ export default function Dashboard() {
         setError(null);
       })
       .catch((e: Error) => setError(e.message));
-    api
-      .listEscalations(_DEMO_OWNER, _DEMO_REPO)
-      .then(setEscalations)
-      .catch(() => {
-        // non-fatal: escalation list is best-effort in the dashboard
-      });
+
+    // Only fetch escalations once we know which repo to query.
+    if (activeRepo) {
+      api
+        .listEscalations(activeRepo.owner, activeRepo.name)
+        .then(setEscalations)
+        .catch(() => {
+          // non-fatal: escalation list is best-effort in the dashboard
+        });
+    }
   };
 
+  // Re-run load whenever the active repo is resolved.
   useEffect(() => {
+    // Skip until repo resolution has settled (null = still loading).
+    if (activeRepo === null) return;
     load();
     const interval = setInterval(load, 15000);
     return () => clearInterval(interval);
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRepo]);
 
   if (error) {
     return (
       <div style={card}>
         <p style={{ color: "#f85149" }}>Error: {error}</p>
+      </div>
+    );
+  }
+
+  // activeRepo === null means repo resolution hasn't settled yet; wait before
+  // rendering the "no repos" state to avoid a flash.
+  if (!health && activeRepo === null) {
+    return (
+      <div style={card}>
+        <p style={{ color: "#8b949e" }}>Loading pipeline health…</p>
+      </div>
+    );
+  }
+
+  // No enabled repo in the registry — show a neutral informational state.
+  if (activeRepo === undefined && !health) {
+    return (
+      <div style={card}>
+        <p style={{ color: "#8b949e" }}>
+          No repos registered yet. Add a repo via the API or Helm chart to see pipeline
+          health and escalations here.
+        </p>
+        <Link to="/repos" style={{ color: "#58a6ff", textDecoration: "none", fontSize: "14px" }}>
+          → View repos
+        </Link>
       </div>
     );
   }
