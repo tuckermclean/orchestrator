@@ -109,6 +109,7 @@ async def test_converge_protected_path_non_matching_proceeds() -> None:
     assert len(harness.dispatch_calls) == 1
 
 
+@pytest.mark.covers("§8.12", "i9-closure")
 def test_security_agent_ref_not_from_contributor_text() -> None:
     """I9: AgentRef values come only from decide_specialists output (SECURITY.md §3).
 
