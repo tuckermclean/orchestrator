@@ -27,6 +27,7 @@ from src.ports.fakes import FakeForgePort
 _CONTRACT = "agents/orchestrator.md"
 
 
+@pytest.mark.covers("§8.1", "row-1-issues")
 def test_route_entry_issues() -> None:
     result = route_entry("issues")
     assert result.model == ADJUDICATION_MODEL
@@ -34,6 +35,7 @@ def test_route_entry_issues() -> None:
     assert result.contract == _CONTRACT
 
 
+@pytest.mark.covers("§8.1", "row-2-issue_comment")
 def test_route_entry_issue_comment() -> None:
     result = route_entry("issue_comment")
     assert result.model == DEFAULT_SWARM_MODEL
@@ -41,6 +43,7 @@ def test_route_entry_issue_comment() -> None:
     assert result.contract == _CONTRACT
 
 
+@pytest.mark.covers("§8.1", "row-2-pr_review_comment")
 def test_route_entry_pr_review_comment() -> None:
     result = route_entry("pull_request_review_comment")
     assert result.model == DEFAULT_SWARM_MODEL
@@ -48,6 +51,7 @@ def test_route_entry_pr_review_comment() -> None:
     assert result.contract == _CONTRACT
 
 
+@pytest.mark.covers("§8.1", "row-3-unknown")
 def test_route_entry_unknown() -> None:
     result = route_entry("pull_request")
     assert result.model == DEFAULT_SWARM_MODEL
@@ -55,6 +59,7 @@ def test_route_entry_unknown() -> None:
     assert result.contract == _CONTRACT
 
 
+@pytest.mark.covers("§8.1", "row-3-empty")
 def test_route_entry_empty_string() -> None:
     result = route_entry("")
     assert result.model == DEFAULT_SWARM_MODEL
@@ -78,6 +83,7 @@ def _make_repo() -> RepoRef:
     return RepoRef(owner="acme", name="repo")
 
 
+@pytest.mark.covers("§8.9", "row-3-on_track")
 async def test_health_on_track_empty() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -92,6 +98,7 @@ async def test_health_on_track_empty() -> None:
     assert "ON_TRACK" in report.report_md
 
 
+@pytest.mark.covers("§8.9", "row-3-on_track")
 async def test_health_on_track_mixed() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -110,6 +117,7 @@ async def test_health_on_track_mixed() -> None:
     assert report.verdict == "ON_TRACK"
 
 
+@pytest.mark.covers("§8.9", "row-1-blocked")
 async def test_health_blocked() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -123,6 +131,7 @@ async def test_health_blocked() -> None:
     assert "BLOCKED" in report.report_md
 
 
+@pytest.mark.covers("§8.9", "row-2-at_risk")
 async def test_health_at_risk_3_plus_2() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -138,6 +147,7 @@ async def test_health_at_risk_3_plus_2() -> None:
     assert report.verdict == "AT_RISK"
 
 
+@pytest.mark.covers("§8.9", "row-1-blocked")
 async def test_health_blocked_beats_at_risk() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -153,6 +163,7 @@ async def test_health_blocked_beats_at_risk() -> None:
     assert report.verdict == "BLOCKED"
 
 
+@pytest.mark.covers("§8.9", "row-2-at_risk")
 async def test_health_at_risk_4_plus_1() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -167,6 +178,7 @@ async def test_health_at_risk_4_plus_1() -> None:
     assert report.verdict == "AT_RISK"
 
 
+@pytest.mark.covers("§8.9", "row-3-on_track")
 async def test_health_on_track_four() -> None:
     forge = FakeForgePort()
     repo = _make_repo()
@@ -221,40 +233,49 @@ async def test_health_stale_drafts() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-closed")
 def test_derive_issue_closed() -> None:
     assert derive_issue_state([], closed=True) == "CLOSED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-escalated")
 def test_derive_issue_escalated() -> None:
     assert derive_issue_state([LABEL_NEEDS_HUMAN], closed=False) == "ESCALATED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-queued")
 def test_derive_issue_queued_agent_work() -> None:
     assert derive_issue_state(["agent-work"], closed=False) == "QUEUED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-queued")
 def test_derive_issue_queued_default() -> None:
     assert derive_issue_state([], closed=False) == "QUEUED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-closed")
 def test_derive_issue_closed_beats_needs_human() -> None:
     assert derive_issue_state([LABEL_NEEDS_HUMAN], closed=True) == "CLOSED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-closed")
 def test_derive_issue_closed_beats_agent_work() -> None:
     assert derive_issue_state(["agent-work"], closed=True) == "CLOSED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-pending")
 def test_derive_issue_pending() -> None:
     """awaiting-promotion label without closed/needs-human → PENDING (SPEC §8.10)."""
     assert derive_issue_state([LABEL_AWAITING_PROMOTION], closed=False) == "PENDING"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-closed")
 def test_derive_issue_closed_beats_awaiting_promotion() -> None:
     """closed=True beats awaiting-promotion — priority ordering."""
     assert derive_issue_state([LABEL_AWAITING_PROMOTION], closed=True) == "CLOSED"
 
 
+@pytest.mark.covers("§8.10", "derive_issue_state-escalated")
 def test_derive_issue_needs_human_beats_awaiting_promotion() -> None:
     """needs-human beats awaiting-promotion — priority ordering."""
     assert (
@@ -268,10 +289,12 @@ def test_derive_issue_needs_human_beats_awaiting_promotion() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-merged")
 def test_derive_pr_merged() -> None:
     assert derive_pr_state([], draft=False, merged=True, changed_files=5) == "MERGED"
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-escalated")
 def test_derive_pr_escalated() -> None:
     assert (
         derive_pr_state([LABEL_NEEDS_HUMAN], draft=False, merged=False, changed_files=5)
@@ -279,16 +302,19 @@ def test_derive_pr_escalated() -> None:
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-approved")
 def test_derive_pr_approved() -> None:
     assert (
         derive_pr_state([LABEL_READY], draft=False, merged=False, changed_files=5) == "APPROVED"
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-empty")
 def test_derive_pr_empty() -> None:
     assert derive_pr_state([], draft=False, merged=False, changed_files=0) == "EMPTY"
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-converging")
 def test_derive_pr_converging() -> None:
     assert (
         derive_pr_state([LABEL_CONVERGE], draft=False, merged=False, changed_files=3)
@@ -296,6 +322,7 @@ def test_derive_pr_converging() -> None:
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-building")
 def test_derive_pr_building_implementing() -> None:
     assert (
         derive_pr_state([LABEL_IMPLEMENTING], draft=False, merged=False, changed_files=3)
@@ -303,16 +330,19 @@ def test_derive_pr_building_implementing() -> None:
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-building")
 def test_derive_pr_building_default() -> None:
     assert derive_pr_state([], draft=False, merged=False, changed_files=3) == "BUILDING"
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-merged")
 def test_derive_pr_merged_beats_needs_human() -> None:
     assert (
         derive_pr_state([LABEL_NEEDS_HUMAN], draft=False, merged=True, changed_files=5) == "MERGED"
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-building")
 def test_derive_pr_converging_requires_non_draft() -> None:
     """Draft PR with converge label → BUILDING, not CONVERGING."""
     assert (
@@ -320,16 +350,19 @@ def test_derive_pr_converging_requires_non_draft() -> None:
     )
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-building")
 def test_derive_pr_draft_empty_is_building() -> None:
     """Draft PR with 0 changed files → BUILDING (not EMPTY, because draft)."""
     assert derive_pr_state([], draft=True, merged=False, changed_files=0) == "BUILDING"
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-empty")
 def test_derive_pr_non_draft_empty_is_empty() -> None:
     """Non-draft PR with 0 changed files → EMPTY."""
     assert derive_pr_state([], draft=False, merged=False, changed_files=0) == "EMPTY"
 
 
+@pytest.mark.covers("§8.10", "derive_pr_state-empty")
 def test_derive_pr_empty_before_converging() -> None:
     """EMPTY check comes before CONVERGING — 0 files + converge label → EMPTY."""
     assert (

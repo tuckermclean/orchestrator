@@ -22,6 +22,7 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.4",
     "coverage>=7",
+    "pyyaml>=6",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -41,3 +42,6 @@ python_version = "3.12"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "covers: mark a test as covering a SPEC §8 truth-table row; args: (section, row_id)",
+]

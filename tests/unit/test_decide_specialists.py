@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
     CONVERGE_REVIEW_BASE,
@@ -22,11 +24,13 @@ _ALLOWED_REFS = set(CONVERGE_REVIEW_BASE) | {
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "base-set-only")
 def test_decide_specialists_base_set_only() -> None:
     """No path matches routing → exactly the base set, in order."""
     assert decide_specialists(["README.md", "src/foo.py"], 1) == _BASE
 
 
+@pytest.mark.covers("§8.12", "base-set-only")
 def test_decide_specialists_empty_paths_returns_base() -> None:
     assert decide_specialists([], 1) == _BASE
 
@@ -36,46 +40,55 @@ def test_decide_specialists_empty_paths_returns_base() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "routing-db")
 def test_decide_specialists_db_migration() -> None:
     result = decide_specialists(["db/migrations/001_init.sql"], 1)
     assert "engineering-database-optimizer.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-db")
 def test_decide_specialists_sql_file() -> None:
     result = decide_specialists(["queries/report.sql"], 1)
     assert "engineering-database-optimizer.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-db")
 def test_decide_specialists_schema_file() -> None:
     result = decide_specialists(["src/schema.py"], 1)
     assert "engineering-database-optimizer.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-ui")
 def test_decide_specialists_ui_tsx() -> None:
     result = decide_specialists(["ui/src/App.tsx"], 1)
     assert "testing-accessibility-auditor.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-ui")
 def test_decide_specialists_css() -> None:
     result = decide_specialists(["ui/styles/main.css"], 1)
     assert "testing-accessibility-auditor.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-ui")
 def test_decide_specialists_components_dir() -> None:
     result = decide_specialists(["app/components/Button.jsx"], 1)
     assert "testing-accessibility-auditor.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-api")
 def test_decide_specialists_api_dir() -> None:
     result = decide_specialists(["src/api/routes.py"], 1)
     assert "testing-api-tester.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-api")
 def test_decide_specialists_routes_dir() -> None:
     result = decide_specialists(["src/routes/users.py"], 1)
     assert "testing-api-tester.md" in result
 
 
+@pytest.mark.covers("§8.12", "routing-api")
 def test_decide_specialists_handlers_dir() -> None:
     result = decide_specialists(["pkg/handlers/auth.go"], 1)
     assert "testing-api-tester.md" in result
@@ -86,6 +99,7 @@ def test_decide_specialists_handlers_dir() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "cap-enforcement")
 def test_decide_specialists_cap_enforced() -> None:
     """All three routing rows match → capped at PARALLEL_SPECIALIST_CAP, base retained."""
     paths = ["db/migrations/x.sql", "ui/App.tsx", "src/api/routes.py"]
@@ -105,6 +119,7 @@ def test_decide_specialists_cap_enforced() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "determinism-order")
 def test_decide_specialists_definition_order() -> None:
     """Extras appear in SPECIALIST_ROUTING definition order regardless of path order."""
     paths = ["src/api/routes.py", "db/x.sql"]  # api listed first, but db routes first
@@ -116,11 +131,13 @@ def test_decide_specialists_definition_order() -> None:
     ]
 
 
+@pytest.mark.covers("§8.12", "determinism-order")
 def test_decide_specialists_deterministic_repeat() -> None:
     paths = ["ui/App.tsx", "src/api/routes.py"]
     assert decide_specialists(paths, 1) == decide_specialists(paths, 3)
 
 
+@pytest.mark.covers("§8.12", "determinism-order")
 def test_decide_specialists_no_duplicate_refs() -> None:
     """Two paths hitting the same routing row do not duplicate the ref."""
     result = decide_specialists(["a.sql", "b.sql"], 1)
@@ -132,11 +149,13 @@ def test_decide_specialists_no_duplicate_refs() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "base-set-rounds")
 def test_decide_specialists_base_set_round2() -> None:
     """round == 2 with no routing matches → exactly the base set."""
     assert decide_specialists([], 2) == _BASE
 
 
+@pytest.mark.covers("§8.12", "base-set-rounds")
 def test_decide_specialists_base_set_round3() -> None:
     """round == 3 with no routing matches → exactly the base set."""
     assert decide_specialists([], 3) == _BASE
@@ -147,6 +166,7 @@ def test_decide_specialists_base_set_round3() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "security-base-dedup")
 def test_decide_specialists_auth_path() -> None:
     """Auth path → security via base set, no duplicate, no extra routing addition."""
     result = decide_specialists(["auth/login.py"], 1)
@@ -154,6 +174,7 @@ def test_decide_specialists_auth_path() -> None:
     assert result.count("engineering-security-engineer.md") == 1
 
 
+@pytest.mark.covers("§8.12", "security-base-dedup")
 def test_decide_specialists_session_path() -> None:
     """Session path → security via base set; no routing addition."""
     result = decide_specialists(["session/manager.py"], 1)
@@ -165,12 +186,14 @@ def test_decide_specialists_session_path() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "length-invariants")
 def test_decide_specialists_ui_dir_path() -> None:
     """A non-tsx file under a ui/ dir still routes to the accessibility auditor."""
     result = decide_specialists(["src/ui/panel.py"], 1)
     assert "testing-accessibility-auditor.md" in result
 
 
+@pytest.mark.covers("§8.12", "length-invariants")
 def test_decide_specialists_components_subdir_path() -> None:
     """**/components/** matches at depth, separate from the **/*.tsx pattern."""
     result = decide_specialists(["frontend/components/Header.tsx"], 1)
@@ -182,12 +205,14 @@ def test_decide_specialists_components_subdir_path() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "security-base-dedup")
 def test_decide_specialists_security_not_duplicated() -> None:
     """A security-bearing path plus an unrelated path → security appears exactly once."""
     result = decide_specialists(["auth/crypto.py", "src/main.py"], 1)
     assert result.count("engineering-security-engineer.md") == 1
 
 
+@pytest.mark.covers("§8.12", "security-base-dedup")
 def test_decide_specialists_multi_routing_deduped() -> None:
     """Two paths hitting the api routing row → api-tester appears exactly once."""
     result = decide_specialists(["api/users.py", "routes/auth.py"], 1)
@@ -199,6 +224,7 @@ def test_decide_specialists_multi_routing_deduped() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "determinism-order")
 def test_decide_specialists_all_three_routing_cap() -> None:
     """All 3 routing entries match → length 4: base + first 2 routing in definition order."""
     paths = ["db/schema.sql", "src/ui/panel.py", "api/v2/users.py"]
@@ -218,6 +244,7 @@ def test_decide_specialists_all_three_routing_cap() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "i9-closure")
 def test_decide_specialists_result_from_routing_only() -> None:
     """Every returned AgentRef ∈ CONVERGE_REVIEW_BASE ∪ SPECIALIST_ROUTING refs.
 
@@ -244,6 +271,7 @@ def test_decide_specialists_result_from_routing_only() -> None:
             assert "evil.md" not in result
 
 
+@pytest.mark.covers("§8.12", "i9-closure")
 def test_decide_specialists_agent_ref_not_from_contributor_text() -> None:
     """I9 alias (SECURITY.md §3): contributor-controlled path text never becomes an AgentRef.
 
@@ -264,12 +292,14 @@ def test_decide_specialists_agent_ref_not_from_contributor_text() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.12", "length-invariants")
 def test_decide_specialists_result_length_invariant() -> None:
     """len(result) <= PARALLEL_SPECIALIST_CAP for arbitrary inputs."""
     for paths in ([], ["a.sql"], ["a.sql", "b.tsx", "c/api/x.py", "d.css"]):
         assert len(decide_specialists(paths, 1)) <= PARALLEL_SPECIALIST_CAP
 
 
+@pytest.mark.covers("§8.12", "length-invariants")
 def test_decide_specialists_base_size_le_cap() -> None:
     """Static invariant: the base set fits within the parallel cap."""
     assert len(CONVERGE_REVIEW_BASE) <= PARALLEL_SPECIALIST_CAP

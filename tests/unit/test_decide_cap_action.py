@@ -14,46 +14,55 @@ from src.decisions.decide_cap_action import MAX_REDISPATCHES, decide_cap_action
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_redispatch_zero_with_issue() -> None:
     """redispatch_count=0, has_issue=True → escalate."""
     assert decide_cap_action(0, True) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_redispatch_zero_no_issue() -> None:
     """redispatch_count=0, has_issue=False → escalate."""
     assert decide_cap_action(0, False) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_at_max_with_issue() -> None:
     """redispatch_count=MAX_REDISPATCHES, has_issue=True → escalate."""
     assert decide_cap_action(MAX_REDISPATCHES, True) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_at_max_no_issue() -> None:
     """redispatch_count=MAX_REDISPATCHES, has_issue=False → escalate."""
     assert decide_cap_action(MAX_REDISPATCHES, False) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_below_max_with_issue() -> None:
     """redispatch_count=MAX_REDISPATCHES-1, has_issue=True → escalate (D3: no redispatch)."""
     assert decide_cap_action(MAX_REDISPATCHES - 1, True) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_below_max_no_issue() -> None:
     """redispatch_count=MAX_REDISPATCHES-1, has_issue=False → escalate (D3: no redispatch)."""
     assert decide_cap_action(MAX_REDISPATCHES - 1, False) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_above_max_with_issue() -> None:
     """redispatch_count > MAX_REDISPATCHES, has_issue=True → escalate."""
     assert decide_cap_action(MAX_REDISPATCHES + 1, True) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_above_max_no_issue() -> None:
     """redispatch_count > MAX_REDISPATCHES, has_issue=False → escalate."""
     assert decide_cap_action(MAX_REDISPATCHES + 1, False) == "escalate"
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 def test_decide_cap_action_large_count() -> None:
     """Very large redispatch_count → escalate (D3 is unconditional)."""
     assert decide_cap_action(999, False) == "escalate"
@@ -64,6 +73,7 @@ def test_decide_cap_action_large_count() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.4", "max-redispatches-constant")
 def test_max_redispatches_is_named_constant() -> None:
     """MAX_REDISPATCHES is a named constant (never hardcoded 2 — SPEC §7 / OQ-2)."""
     from src.domain.types import MAX_REDISPATCHES as domain_max
@@ -72,6 +82,7 @@ def test_max_redispatches_is_named_constant() -> None:
     assert MAX_REDISPATCHES == domain_max
 
 
+@pytest.mark.covers("§8.4", "row-1-always-escalate")
 @pytest.mark.parametrize("count", range(MAX_REDISPATCHES + 2))
 def test_decide_cap_action_all_counts_escalate(count: int) -> None:
     """All integer redispatch_count values from 0 to MAX_REDISPATCHES+1 → escalate."""

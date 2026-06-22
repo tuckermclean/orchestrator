@@ -93,6 +93,8 @@ def _zero_verdict(*, nits: list[str] | None = None) -> Verdict:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.3-integration", "row-2-fix-r1-engine-wired")
+@pytest.mark.covers("§8.3-integration", "row-4-fix-r2-engine-wired")
 async def test_converge_r1_blocker_fix_r2_approve() -> None:
     """R1 reviewer finds blockers → fixer dispatched → R2 reviewer approves → APPROVED."""
     forge = FakeForgePort()
@@ -125,6 +127,7 @@ async def test_converge_r1_blocker_fix_r2_approve() -> None:
     assert (_PR, LABEL_CONVERGE) in forge.remove_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-2-fix-r1-engine-wired")
 async def test_converge_r1_fixer_allowed_refs_match_specialists() -> None:
     """Fixer dispatch carries the same allowed_agent_refs as the reviewer (I9/D2)."""
     forge = FakeForgePort()
@@ -144,6 +147,7 @@ async def test_converge_r1_fixer_allowed_refs_match_specialists() -> None:
     assert fixer_ctx.allowed_agent_refs == expected_refs
 
 
+@pytest.mark.covers("§8.3-integration", "row-4-fix-r2-engine-wired")
 async def test_converge_r3_adjudication_model() -> None:
     """R3 reviewer uses ADJUDICATION_MODEL (Opus); R1/R2 use DEFAULT_SWARM_MODEL."""
     forge = FakeForgePort()
@@ -173,6 +177,8 @@ async def test_converge_r3_adjudication_model() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.3-integration", "row-3-no-progress-engine-wired")
+@pytest.mark.covers("§6-escalations", "E2-no-progress")
 async def test_converge_no_progress_e2() -> None:
     """R1 and R2 produce identical non-empty signatures → ESCALATED (E2)."""
     forge = FakeForgePort()
@@ -191,6 +197,8 @@ async def test_converge_no_progress_e2() -> None:
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-3-no-progress-engine-wired")
+@pytest.mark.covers("§6-escalations", "E2-no-progress")
 async def test_converge_no_progress_e2_r3_fires_before_cap_reached() -> None:
     """R3 no-progress fires before cap-reached (row 3 > row 7 priority)."""
     forge = FakeForgePort()
@@ -223,6 +231,8 @@ async def test_converge_no_progress_e2_r3_fires_before_cap_reached() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.3-integration", "row-5-no-verdict-engine-wired")
+@pytest.mark.covers("§6-escalations", "E3-no-verdict")
 async def test_converge_no_verdict_retry_then_cap_e3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -253,6 +263,8 @@ async def test_converge_no_verdict_retry_then_cap_e3(
     assert (_PR, LABEL_NEEDS_HUMAN) in forge2.add_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-5-no-verdict-engine-wired")
+@pytest.mark.covers("§6-escalations", "E3-no-verdict")
 async def test_converge_no_verdict_retry_below_cap_returns_converging(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,6 +299,8 @@ async def test_converge_no_verdict_retry_below_cap_returns_converging(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
+@pytest.mark.covers("§6-escalations", "E4-ci-red")
 async def test_converge_ci_red_recovery_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -322,6 +336,8 @@ async def test_converge_ci_red_recovery_approve(
     assert (_PR, LABEL_READY) in forge.add_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
+@pytest.mark.covers("§6-escalations", "E4-ci-red")
 async def test_converge_ci_red_retrigger_fails_e4(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -347,6 +363,8 @@ async def test_converge_ci_red_retrigger_fails_e4(
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
+@pytest.mark.covers("§6-escalations", "E4-ci-red")
 async def test_converge_ci_red_polls_all_six_blocking_checks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -381,6 +399,8 @@ async def test_converge_ci_red_polls_all_six_blocking_checks(
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
 
 
+@pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
+@pytest.mark.covers("§6-escalations", "E4-ci-red")
 async def test_converge_ci_red_docker_still_red_escalates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -429,6 +449,8 @@ async def test_converge_ci_red_docker_still_red_escalates(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.3-integration", "row-7-cap-reached-engine-wired")
+@pytest.mark.covers("§6-escalations", "E5-cap-reached")
 async def test_converge_cap_reached_e5() -> None:
     """R3 remaining blockers → ESCALATED (E5, D3: always human)."""
     forge = FakeForgePort()
@@ -456,6 +478,7 @@ async def test_converge_cap_reached_e5() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§6-escalations", "E11-fixer-timeout")
 async def test_converge_fixer_timeout_e11(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixer times out at R1 → harness.cancel(fixer_handle) → ESCALATED (E11)."""
     monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 0)
@@ -479,6 +502,7 @@ async def test_converge_fixer_timeout_e11(monkeypatch: pytest.MonkeyPatch) -> No
     assert harness.cancel_calls[0].run_id == fixer_run_id
 
 
+@pytest.mark.covers("§6-escalations", "E11-fixer-timeout")
 async def test_converge_fixer_timeout_r2_e11(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fixer times out at R2 → ESCALATED (E11)."""
     monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 0)

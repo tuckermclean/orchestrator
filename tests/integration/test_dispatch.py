@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.domain.types import (
     LABEL_AGENT_WORK,
     LABEL_CONVERGE,
@@ -29,6 +31,7 @@ def _engine(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-1-opens-draft-pr")
 async def test_dispatch_opens_draft_pr() -> None:
     """issues:labeled with agent-work → draft PR with Closes #N; LABEL_IMPLEMENTING added."""
     forge = FakeForgePort()
@@ -69,6 +72,7 @@ async def test_dispatch_opens_draft_pr() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-2-calls-harness-opus-40")
 async def test_dispatch_calls_harness() -> None:
     """issues:labeled → harness.dispatch called with model=claude-opus-4-8, max_turns=40."""
     forge = FakeForgePort()
@@ -94,6 +98,7 @@ async def test_dispatch_calls_harness() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-3-comment-sonnet-30")
 async def test_dispatch_comment_uses_sonnet() -> None:
     """issue_comment event dispatches with Sonnet/30 params when issue has LABEL_AGENT_WORK."""
     forge = FakeForgePort()
@@ -120,6 +125,7 @@ async def test_dispatch_comment_uses_sonnet() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-4-redispatch-via-comment")
 async def test_dispatch_redispatch_via_comment() -> None:
     """PR in BUILDING state; @claude comment on issue → second harness.dispatch call."""
     forge = FakeForgePort()
@@ -158,6 +164,7 @@ async def test_dispatch_redispatch_via_comment() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-5-full-lifecycle")
 async def test_dispatch_full_lifecycle() -> None:
     """Full lifecycle: issue dispatched; PR transitions through label states."""
     forge = FakeForgePort()
@@ -201,6 +208,7 @@ async def test_dispatch_full_lifecycle() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-6-pr-review-comment")
 async def test_dispatch_pr_review_comment_triggers_dispatch() -> None:
     """pull_request_review_comment on PR with LABEL_IMPLEMENTING → Sonnet/30 dispatch."""
     forge = FakeForgePort()
@@ -232,6 +240,7 @@ async def test_dispatch_pr_review_comment_triggers_dispatch() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§4.2", "row-7-no-dispatch-without-agent-work")
 async def test_dispatch_no_dispatch_without_agent_work_label() -> None:
     """issue_comment @claude; issue has only LABEL_TRIAGE (no LABEL_AGENT_WORK) → no dispatch."""
     forge = FakeForgePort()
