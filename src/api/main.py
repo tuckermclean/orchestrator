@@ -25,7 +25,7 @@ from src.db.push_store import FakePushStore, SQLitePushStore
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
-from src.service.registry import EnvRepoRegistry
+from src.service.registry import EnvRepoRegistry, FakeRepoRegistry, RepoConfig, RepoRegistryPort
 
 
 def _has_prod_creds() -> bool:
@@ -54,6 +54,7 @@ def create_app(
     webhook_secret: str | None = None,
     operator_store: FakeOperatorStore | SQLiteOperatorStore | None = None,
     push_store: FakePushStore | SQLitePushStore | None = None,
+    registry: RepoRegistryPort | None = None,
 ) -> FastAPI:
     """Create the FastAPI application, mounting static UI if built.
 
@@ -65,6 +66,8 @@ def create_app(
             the webhook endpoint is not registered.
         operator_store: Operator account store; defaults to FakeOperatorStore if None.
         push_store: VAPID push subscription store; defaults to FakePushStore if None.
+        registry: Repo registry for resolving the active repo per request.
+            Defaults to an empty FakeRepoRegistry when None.
     """
     from src.db.operator_store import FakeOperatorStore as _FakeOp
     from src.db.push_store import FakePushStore as _FakePush
@@ -75,6 +78,7 @@ def create_app(
     _push_store: FakePushStore | SQLitePushStore = (
         push_store if push_store is not None else _FakePush()
     )
+    _registry: RepoRegistryPort = registry if registry is not None else FakeRepoRegistry()
 
     app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
 
@@ -140,7 +144,7 @@ def create_app(
     app.include_router(_make_push_router(_push_store))
 
     # Core API routes — JWT-protected via Depends(require_auth) on each route
-    app.include_router(_make_router(service))
+    app.include_router(_make_router(service, _registry))
 
     # Register webhook ingress when a secret is configured.
     # POST /api/webhook is authenticated by HMAC-SHA256, NOT by JWT.
@@ -156,12 +160,19 @@ def create_app(
     return app
 
 
-def _build_dev_service() -> tuple[OrchestratorService, FakeOperatorStore, FakePushStore]:
+def _build_dev_service() -> (
+    tuple[OrchestratorService, FakeOperatorStore, FakePushStore, FakeRepoRegistry]
+):
     """Wire fake ports for dev/demo mode."""
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
     forge = FakeForgePort()
     audit = AuditLog()  # in-memory for dev
+
+    # Dev registry: seed with the demo repo so routes resolve correctly.
+    dev_registry = FakeRepoRegistry(
+        [RepoConfig(repo=RepoRef(owner="demo", name="repo"))]
+    )
 
     service = OrchestratorService(
         forge=forge,
@@ -170,6 +181,7 @@ def _build_dev_service() -> tuple[OrchestratorService, FakeOperatorStore, FakePu
         audit=audit,
         allowlist=[],
         owner="demo",  # dev mode: owner is "demo" (matches seed data RepoRef)
+        registry=dev_registry,
     )
 
     # Seed a default dev operator account (username: admin, password: admin)
@@ -177,7 +189,7 @@ def _build_dev_service() -> tuple[OrchestratorService, FakeOperatorStore, FakePu
     operator_store.seed("admin", hash_password("admin"))
 
     push_store = FakePushStore()
-    return service, operator_store, push_store
+    return service, operator_store, push_store, dev_registry
 
 
 async def _seed_demo_data(service: OrchestratorService) -> None:
@@ -236,6 +248,7 @@ _ProdStores = tuple[
     str | None,
     FakeOperatorStore | SQLiteOperatorStore,
     FakePushStore | SQLitePushStore,
+    RepoRegistryPort,
 ]
 
 
@@ -251,8 +264,8 @@ def _build_prod_service() -> _ProdStores:
     from src.ports.provider import PortProvider
 
     if not _has_prod_creds():
-        svc, op_store, push_store = _build_dev_service()
-        return svc, None, op_store, push_store
+        svc, op_store, push_store, dev_registry = _build_dev_service()
+        return svc, None, op_store, push_store, dev_registry
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
@@ -308,11 +321,11 @@ def _build_prod_service() -> _ProdStores:
         op_store.seed("admin", hash_password(bootstrap_password))
 
     push_store_inst = FakePushStore()
-    return service, webhook_secret, op_store, push_store_inst
+    return service, webhook_secret, op_store, push_store_inst, registry
 
 
 # Singleton for ASGI app (used by uvicorn)
-_service, _webhook_secret, _operator_store, _push_store = _build_prod_service()
+_service, _webhook_secret, _operator_store, _push_store, _registry = _build_prod_service()
 
 
 @asynccontextmanager
@@ -330,6 +343,7 @@ app = create_app(
     webhook_secret=_webhook_secret,
     operator_store=_operator_store,
     push_store=_push_store,
+    registry=_registry,
 )
 
 

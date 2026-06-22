@@ -104,6 +104,14 @@ export interface TriageItem {
   triager_comment?: string;
 }
 
+export interface RepoSummary {
+  owner: string;
+  name: string;
+  enabled: boolean;
+  intake_enabled: boolean;
+  required_checks: string[];
+}
+
 export interface OperatorRecord {
   id: string;
   created_at: string;
@@ -194,6 +202,9 @@ export const api = {
     ),
   devReconcile: () =>
     json<ReconcileReport[]>("/api/dev/reconcile", { method: "POST" }),
+
+  // Repos
+  listRepos: () => json<RepoSummary[]>("/api/repos"),
 
   // Triage
   listTriage: () => json<TriageItem[]>("/api/triage"),

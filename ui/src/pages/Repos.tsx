@@ -1,10 +1,10 @@
 /**
  * Repos screen (WEBUI.md §5.3)
  *
- * Manage the repo registry. Stub implementation — list view with
- * placeholder for add/edit (registry API endpoints are Step 9 backend scope).
+ * Displays the repo registry returned by GET /api/repos.
  */
 import { useEffect, useState } from "react";
+import { api, RepoSummary } from "../api";
 
 const s = {
   page: { padding: "24px", maxWidth: "900px", margin: "0 auto" } as React.CSSProperties,
@@ -17,6 +17,7 @@ const s = {
     marginBottom: "16px",
   } as React.CSSProperties,
   muted: { color: "#8b949e", fontSize: "14px" } as React.CSSProperties,
+  error: { color: "#f85149", fontSize: "14px" } as React.CSSProperties,
   badge: (enabled: boolean): React.CSSProperties => ({
     display: "inline-block",
     padding: "2px 8px",
@@ -29,24 +30,22 @@ const s = {
   }),
 };
 
-interface RepoEntry {
-  owner: string;
-  name: string;
-  enabled: boolean;
-  allowlist_size: number;
-}
-
 export default function Repos() {
-  const [repos, setRepos] = useState<RepoEntry[]>([]);
+  const [repos, setRepos] = useState<RepoSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Repos registry API (GET /api/repos) is a planned endpoint.
-    // For now, surface a stub with the demo repo from session context.
-    setRepos([
-      { owner: "demo", name: "repo", enabled: true, allowlist_size: 0 },
-    ]);
-    setLoading(false);
+    api
+      .listRepos()
+      .then((data) => {
+        setRepos(data);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load repos");
+        setLoading(false);
+      });
   }, []);
 
   return (
@@ -59,7 +58,13 @@ export default function Repos() {
         </div>
       )}
 
-      {!loading && repos.length === 0 && (
+      {error && (
+        <div role="alert" style={s.error}>
+          {error}
+        </div>
+      )}
+
+      {!loading && !error && repos.length === 0 && (
         <div style={s.card}>
           <p style={s.muted}>
             No repos registered. Use the API or Helm chart to configure repos.
@@ -67,27 +72,40 @@ export default function Repos() {
         </div>
       )}
 
-      <ul aria-label="Registered repos" style={{ listStyle: "none" }}>
-        {repos.map((repo) => (
-          <li key={`${repo.owner}/${repo.name}`} style={s.card}>
-            <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-              <strong style={{ fontSize: "16px" }}>
-                {repo.owner}/{repo.name}
-              </strong>
-              <span
-                style={s.badge(repo.enabled)}
-                role="status"
-                aria-label={`Status: ${repo.enabled ? "enabled" : "paused"}`}
-              >
-                {repo.enabled ? "Enabled" : "Paused"}
-              </span>
-            </div>
-            <div style={{ ...s.muted, marginTop: "8px" }}>
-              Allowlist: {repo.allowlist_size === 0 ? "empty (gate disabled)" : `${repo.allowlist_size} users`}
-            </div>
-          </li>
-        ))}
-      </ul>
+      {!loading && !error && repos.length > 0 && (
+        <ul aria-label="Registered repos" style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          {repos.map((repo) => (
+            <li key={`${repo.owner}/${repo.name}`} style={s.card}>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <strong style={{ fontSize: "16px" }}>
+                  {repo.owner}/{repo.name}
+                </strong>
+                <span
+                  style={s.badge(repo.enabled)}
+                  role="status"
+                  aria-label={`Status: ${repo.enabled ? "enabled" : "paused"}`}
+                >
+                  {repo.enabled ? "Enabled" : "Paused"}
+                </span>
+                {!repo.intake_enabled && (
+                  <span
+                    style={s.badge(false)}
+                    role="status"
+                    aria-label="Intake disabled"
+                  >
+                    Intake off
+                  </span>
+                )}
+              </div>
+              {repo.required_checks.length > 0 && (
+                <div style={{ ...s.muted, marginTop: "8px" }}>
+                  Required checks: {repo.required_checks.join(", ")}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </main>
   );
 }

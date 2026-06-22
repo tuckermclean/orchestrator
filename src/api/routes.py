@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from src.api.auth import require_auth
 from src.domain.types import (
@@ -20,28 +21,50 @@ from src.domain.types import (
     TriageItem,
 )
 from src.service.orchestrator import OrchestratorService
-
-# Default demo repo used in dev mode
-_DEV_REPO = RepoRef(owner="demo", name="repo")
+from src.service.registry import RepoRegistryPort
 
 # Type alias for the auth dependency payload
 AuthPayload = dict[str, object]
 
 
-def _make_router(service: OrchestratorService) -> APIRouter:
+class RepoSummary(BaseModel):
+    """Public view of a repo registry entry (no credentials — I3)."""
+
+    owner: str
+    name: str
+    enabled: bool
+    intake_enabled: bool
+    required_checks: list[str]
+
+
+async def _active_repo(registry: RepoRegistryPort) -> RepoRef | None:
+    """Return the first enabled repo from the registry, or None if empty."""
+    enabled = await registry.enabled_repos()
+    if not enabled:
+        return None
+    return enabled[0].repo
+
+
+def _make_router(service: OrchestratorService, registry: RepoRegistryPort) -> APIRouter:
     r = APIRouter()
 
-    @r.get("/api/status", response_model=HealthReport)
+    @r.get("/api/status", response_model=HealthReport | None)
     async def get_status(
         auth: Annotated[AuthPayload, Depends(require_auth)],
-    ) -> HealthReport:
-        return await service.status(_DEV_REPO)
+    ) -> HealthReport | None:
+        repo = await _active_repo(registry)
+        if repo is None:
+            return None
+        return await service.status(repo)
 
     @r.get("/api/runs", response_model=list[RunSummary])
     async def list_runs(
         auth: Annotated[AuthPayload, Depends(require_auth)],
     ) -> list[RunSummary]:
-        return await service.list_runs(_DEV_REPO)
+        repo = await _active_repo(registry)
+        if repo is None:
+            return []
+        return await service.list_runs(repo)
 
     @r.get("/api/runs/{run_id}", response_model=RunDetail)
     async def get_run(
@@ -78,7 +101,10 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         auth: Annotated[AuthPayload, Depends(require_auth)],
     ) -> dict[str, str]:
         response.headers["X-Dev-Mode"] = "true"
-        handle = await service.dev_dispatch(_DEV_REPO)
+        repo = await _active_repo(registry)
+        if repo is None:
+            repo = RepoRef(owner="demo", name="repo")
+        handle = await service.dev_dispatch(repo)
         return {"run_id": handle.run_id}
 
     # ------------------------------------------------------------------
@@ -89,7 +115,10 @@ def _make_router(service: OrchestratorService) -> APIRouter:
     async def list_triage(
         auth: Annotated[AuthPayload, Depends(require_auth)],
     ) -> list[TriageItem]:
-        return await service.list_triage(_DEV_REPO)
+        repo = await _active_repo(registry)
+        if repo is None:
+            return []
+        return await service.list_triage(repo)
 
     @r.post("/api/triage/{issue_number}/promote")
     async def promote_issue(
@@ -97,7 +126,10 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         auth: Annotated[AuthPayload, Depends(require_auth)],
     ) -> dict[str, str]:
         operator = str(auth.get("sub", "operator"))
-        issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
+        repo = await _active_repo(registry)
+        if repo is None:
+            repo = RepoRef(owner="demo", name="repo")
+        issue_ref = IssueRef(repo=repo, number=issue_number)
         handle = await service.promote(issue_ref, operator=operator)
         return {"status": "promoted", "run_id": handle.run_id}
 
@@ -107,7 +139,10 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         auth: Annotated[AuthPayload, Depends(require_auth)],
     ) -> dict[str, str]:
         operator = str(auth.get("sub", "operator"))
-        issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
+        repo = await _active_repo(registry)
+        if repo is None:
+            repo = RepoRef(owner="demo", name="repo")
+        issue_ref = IssueRef(repo=repo, number=issue_number)
         await service.decline(issue_ref, operator=operator)
         return {"status": "declined"}
 
@@ -154,6 +189,26 @@ def _make_router(service: OrchestratorService) -> APIRouter:
                 "escalated": r.escalated,
             }
             for r in reports
+        ]
+
+    # ------------------------------------------------------------------
+    # Repo registry endpoint
+    # ------------------------------------------------------------------
+
+    @r.get("/api/repos", response_model=list[RepoSummary])
+    async def list_repos(
+        auth: Annotated[AuthPayload, Depends(require_auth)],
+    ) -> list[RepoSummary]:
+        configs = await registry.list_repos()
+        return [
+            RepoSummary(
+                owner=cfg.repo.owner,
+                name=cfg.repo.name,
+                enabled=cfg.enabled,
+                intake_enabled=cfg.intake_enabled,
+                required_checks=list(cfg.required_checks),
+            )
+            for cfg in configs
         ]
 
     return r
