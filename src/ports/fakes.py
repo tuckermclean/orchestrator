@@ -445,6 +445,9 @@ class FakeHarnessPort:
         # the footer comment) so Engine.converge can read a real round outcome.
         self._forge: FakeForgePort | None = forge
         self._verdict_script: list[Verdict] = []
+        # When True, dispatched runs stay "in_progress" (never auto-complete) so the
+        # Engine's _await_run hits its CI_WAIT_S timeout — exercises the cancel path.
+        self.never_completes: bool = False
 
         # Call logs
         self.dispatch_calls: list[DispatchContext] = []
@@ -508,8 +511,12 @@ class FakeHarnessPort:
         # Reviewer dispatches write their queued verdict to the forge branch.
         self._emit_verdict(context)
 
-        # Default: immediately completed/success (overridable via seed_run)
-        self._runs[run_id] = RunStatus(state="completed", conclusion="success")
+        # Default: immediately completed/success (overridable via seed_run). When
+        # never_completes is set, the run stays in_progress to force a timeout/cancel.
+        if self.never_completes:
+            self._runs[run_id] = RunStatus(state="in_progress")
+        else:
+            self._runs[run_id] = RunStatus(state="completed", conclusion="success")
 
         # Set up event queue for SSE streaming
         queue: asyncio.Queue[RunEvent | None] = asyncio.Queue()

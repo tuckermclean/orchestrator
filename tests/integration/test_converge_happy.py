@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
     BLOCKING_CI_CHECKS,
     DEFAULT_SWARM_MODEL,
     LABEL_CONVERGE,
+    LABEL_NEEDS_HUMAN,
     LABEL_READY,
     PRRef,
     RepoRef,
     Verdict,
 )
+from src.engine import dispatch as dispatch_mod
 from src.engine.dispatch import Engine
 from src.ports.fakes import (
     FakeConvergeStateStore,
@@ -164,3 +168,31 @@ async def test_converge_nit_followup_issue() -> None:
     assert len(forge.create_issue_calls) == 1
     _repo, _title, body = forge.create_issue_calls[0]
     assert body.count("nit-a") == 1
+
+
+async def test_converge_reviewer_timeout_cancels_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On reviewer CI_WAIT_S timeout, the engine cancels the reviewer handle (SPEC §10.2 4b).
+
+    A ghost reviewer must not complete later and overwrite the next round's sentinel/verdict.
+    """
+    # Force an immediate timeout in _await_run (deadline = now + 0).
+    monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 0)
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    harness.never_completes = True  # reviewer run stays in_progress → _await_run times out
+    _green_pr(forge, changed_files=["src/foo.py"])
+    engine = _engine(forge, harness)
+
+    state = await engine.converge(_PR)
+
+    # The reviewer was dispatched, timed out, and was cancelled with its own handle.
+    assert len(harness.dispatch_calls) == 1
+    assert len(harness.cancel_calls) == 1
+    reviewer_run_id = "fake-run-1"
+    assert harness.cancel_calls[0].run_id == reviewer_run_id
+    # Sentinel verdict survives (reviewer never wrote one) → non-approve → escalates.
+    assert state == "ESCALATED"
+    assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
