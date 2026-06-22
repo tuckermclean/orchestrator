@@ -16,6 +16,7 @@ from src.domain.types import (
     IssueRef,
     PRRef,
     PRState,
+    RepoRef,
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
@@ -122,6 +123,12 @@ class Engine:
         from src.engine.converge import converge as _converge
 
         return await _converge(self, pr_ref)
+
+    async def reconcile(self, repo: RepoRef) -> "ReconcileReport":
+        """Run the four RC channels for a repo (SPEC §10.3)."""
+        from src.engine.reconcile import ReconcileReport, reconcile as _reconcile
+
+        return await _reconcile(self, repo)
 
     async def _await_run(self, handle: RunHandle) -> bool:
         """Poll a dispatched run until completed or CI_WAIT_S elapses.
