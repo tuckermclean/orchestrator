@@ -31,6 +31,8 @@ class AuditLog:
 
     async def init(self) -> None:
         """Open the database connection and create the table if absent."""
+        if self._db is not None:
+            return
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_TABLE)
