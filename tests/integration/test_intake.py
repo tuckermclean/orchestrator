@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+
+import pytest
+
 from src.db.audit import AuditLog
 from src.domain.types import (
     LABEL_AGENT_WORK,
@@ -35,7 +39,32 @@ def _make_engine(
     )
 
 
+@pytest.fixture
+async def fresh_audit() -> AsyncGenerator[AuditLog, None]:
+    """Yield an initialised in-memory AuditLog and close it on teardown.
+
+    Closing the connection prevents the aiosqlite 'Event loop is closed'
+    RuntimeWarning that occurs when an open connection is garbage-collected
+    after the event loop shuts down.
+    """
+    audit = AuditLog()
+    await audit.init()
+    try:
+        yield audit
+    finally:
+        await audit.close()
+
+
 async def _fresh_audit() -> AuditLog:
+    """Legacy helper for tests that call _fresh_audit() directly.
+
+    .. deprecated::
+        Prefer the ``fresh_audit`` fixture which closes the connection on
+        teardown.  This helper is kept to avoid a large test refactor; it
+        opens a connection that will be closed when the AuditLog is
+        garbage-collected (no leak in practice for in-memory DBs, but may
+        emit a teardown warning in some environments).
+    """
     audit = AuditLog()
     await audit.init()
     return audit

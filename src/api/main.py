@@ -20,12 +20,26 @@ from src.api.push_routes import _make_push_router
 from src.api.routes import _make_router
 from src.api.webhook import _make_webhook_router
 from src.db.audit import AuditLog
+from src.db.converge_state import SQLiteConvergeStateStore
+from src.db.counter import SQLiteCounterStore
+from src.db.dsn import db_path_from_url
 from src.db.operator_store import FakeOperatorStore, SQLiteOperatorStore
 from src.db.push_store import FakePushStore, SQLitePushStore
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
-from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
+from src.ports.fakes import (
+    FakeConvergeStateStore,
+    FakeCounterStore,
+    FakeForgePort,
+    FakeHarnessPort,
+    FakeSessionPort,
+)
 from src.service.orchestrator import OrchestratorService
-from src.service.registry import EnvRepoRegistry, FakeRepoRegistry, RepoConfig, RepoRegistryPort
+from src.service.registry import (
+    EnvRepoRegistry,
+    FakeRepoRegistry,
+    RepoConfig,
+    RepoRegistryPort,
+)
 
 
 def _has_prod_creds() -> bool:
@@ -249,6 +263,10 @@ _ProdStores = tuple[
     FakeOperatorStore | SQLiteOperatorStore,
     FakePushStore | SQLitePushStore,
     RepoRegistryPort,
+    # DB-backed engine stores that need lifespan init()/close() — may be None in dev mode.
+    AuditLog | None,
+    SQLiteCounterStore | None,
+    SQLiteConvergeStateStore | None,
 ]
 
 
@@ -260,12 +278,20 @@ def _build_prod_service() -> _ProdStores:
     GITHUB_APP_INSTALLATION_ID) are present.  PortProvider.from_env() enforces the
     same condition; this guard must match it so that App-only deployments (which
     omit FORGE_TOKEN) correctly enter real mode rather than dev/fake mode.
+
+    Store selection (Counter / ConvergeState / Audit):
+      - DB_URL is a sqlite:///path → SQLite-backed stores (file persists across restarts).
+      - DB_URL unset / empty / sqlite:///:memory: → in-memory Fake/AuditLog() (default).
+      - DB_URL is a Postgres DSN → NotImplementedError (not supported yet).
+
+    The returned tuple includes the three DB-backed engine stores (or None for in-memory)
+    so the ASGI lifespan can call init() before traffic and close() on shutdown.
     """
     from src.ports.provider import PortProvider
 
     if not _has_prod_creds():
-        svc, op_store, push_store, dev_registry = _build_dev_service()
-        return svc, None, op_store, push_store, dev_registry
+        _svc, _op, _push, _dev_reg = _build_dev_service()
+        return _svc, None, _op, _push, _dev_reg, None, None, None
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
@@ -297,7 +323,36 @@ def _build_prod_service() -> _ProdStores:
 
     provider = PortProvider.from_env()
     forge, harness, session = provider.ports(default_repo)
-    audit = AuditLog()
+
+    # --- Engine store selection: SQLite-backed when DB_URL names a file path ---
+    #
+    # DB_URL (default "sqlite:///data/orchestrator.db") is parsed by db_path_from_url():
+    #   sqlite:///data/orchestrator.db → "/data/orchestrator.db" (file, survives restarts)
+    #   sqlite:///:memory: / unset     → None (in-memory, not durable)
+    #   postgresql://...               → NotImplementedError (not yet implemented)
+    db_url = os.environ.get("DB_URL", "sqlite:///data/orchestrator.db")
+    db_path = db_path_from_url(db_url)
+
+    if db_path is not None:
+        # File-backed: all three engine stores use the same SQLite file.
+        # init() is called in _lifespan before traffic arrives.
+        audit: AuditLog = AuditLog(db_path=db_path)
+        counter_store: SQLiteCounterStore | FakeCounterStore = SQLiteCounterStore(db_path)
+        converge_store: SQLiteConvergeStateStore | FakeConvergeStateStore = (
+            SQLiteConvergeStateStore(db_path)
+        )
+        db_audit: AuditLog | None = audit
+        db_counter: SQLiteCounterStore | None = counter_store  # type: ignore[assignment]
+        db_converge: SQLiteConvergeStateStore | None = converge_store  # type: ignore[assignment]
+    else:
+        # In-memory: use AuditLog() (defaults to :memory:) and Fake stores.
+        # These do not need lifespan init()/close() beyond what AuditLog already does.
+        audit = AuditLog()
+        counter_store = FakeCounterStore()
+        converge_store = FakeConvergeStateStore()
+        db_audit = audit  # AuditLog always needs init/close — returned for lifespan
+        db_counter = None
+        db_converge = None
 
     # I1: single-repo backward-compat allowlist (used when no registry or as fallback).
     # Multi-repo mode reads per-repo allowlist from the registry at event time.
@@ -311,30 +366,93 @@ def _build_prod_service() -> _ProdStores:
         allowlist=allowlist,
         owner=default_repo.owner,
         registry=registry,
+        counter=counter_store,
+        converge_state=converge_store,
     )
 
-    # Use in-memory stores for prod too until a DB path is configured.
-    # A persistent SQLite path can be wired in a future enhancement.
-    op_store = FakeOperatorStore()
+    # Operator account store: SQLite when DB_URL names a file, Fake otherwise.
+    # SessionPort: FakeSessionPort is acceptable (observability, not durability-critical).
+    if db_path is not None:
+        op_store: FakeOperatorStore | SQLiteOperatorStore = SQLiteOperatorStore(db_path)
+        push_store_inst: FakePushStore | SQLitePushStore = SQLitePushStore(db_path)
+    else:
+        op_store = FakeOperatorStore()
+        push_store_inst = FakePushStore()
+
     bootstrap_password = os.environ.get("OPERATOR_BOOTSTRAP_PASSWORD", "")
-    if bootstrap_password:
+    if bootstrap_password and isinstance(op_store, FakeOperatorStore):
         op_store.seed("admin", hash_password(bootstrap_password))
 
-    push_store_inst = FakePushStore()
-    return service, webhook_secret, op_store, push_store_inst, registry
+    return (
+        service,
+        webhook_secret,
+        op_store,
+        push_store_inst,
+        registry,
+        db_audit,
+        db_counter,
+        db_converge,
+    )
 
 
 # Singleton for ASGI app (used by uvicorn)
-_service, _webhook_secret, _operator_store, _push_store, _registry = _build_prod_service()
+(
+    _service,
+    _webhook_secret,
+    _operator_store,
+    _push_store,
+    _registry,
+    _db_audit,
+    _db_counter,
+    _db_converge,
+) = _build_prod_service()
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # Init DB-backed stores before accepting traffic (SPEC §6 crash-only-durability).
+    # AuditLog always needs init() — whether backed by file or :memory:.
+    if _db_audit is not None:
+        await _db_audit.init()
+    if _db_counter is not None:
+        await _db_counter.init()
+    if _db_converge is not None:
+        await _db_converge.init()
+    # SQLiteOperatorStore / SQLitePushStore also need init() when file-backed.
+    if isinstance(_operator_store, SQLiteOperatorStore):
+        await _operator_store.init()
+        # Bootstrap the admin account when a password is configured and the store
+        # is fresh (create_operator raises ValueError if it already exists, which
+        # is the normal case on subsequent restarts — silently skip it).
+        bootstrap_password = os.environ.get("OPERATOR_BOOTSTRAP_PASSWORD", "")
+        if bootstrap_password:
+            try:
+                await _operator_store.create_operator(
+                    "admin", hash_password(bootstrap_password)
+                )
+            except ValueError:
+                pass  # admin already exists — normal on pod restarts
+    if isinstance(_push_store, SQLitePushStore):
+        await _push_store.init()
+
     await _service.startup()
     # Only seed demo data in dev mode (no production credentials)
     if not _has_prod_creds():
         await _seed_demo_data(_service)
-    yield
+    try:
+        yield
+    finally:
+        # Close DB connections on shutdown to avoid aiosqlite event-loop teardown warnings.
+        if _db_converge is not None:
+            await _db_converge.close()
+        if _db_counter is not None:
+            await _db_counter.close()
+        if _db_audit is not None:
+            await _db_audit.close()
+        if isinstance(_operator_store, SQLiteOperatorStore):
+            await _operator_store.close()
+        if isinstance(_push_store, SQLitePushStore):
+            await _push_store.close()
 
 
 app = create_app(
