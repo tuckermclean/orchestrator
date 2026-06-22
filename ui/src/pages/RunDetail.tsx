@@ -110,6 +110,45 @@ export default function RunDetail() {
             <div><span style={{ color: "#8b949e" }}>Type: </span>{detail.type}</div>
             <div><span style={{ color: "#8b949e" }}>Repo: </span>{detail.repo.owner}/{detail.repo.name}</div>
             <div><span style={{ color: "#8b949e" }}>Started: </span>{new Date(detail.started_at).toLocaleString()}</div>
+            {detail.build_status && (
+              <div>
+                <span style={{ color: "#8b949e" }}>Build: </span>
+                <span style={{
+                  display: "inline-block",
+                  padding: "2px 8px",
+                  borderRadius: "12px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  background:
+                    detail.build_status === "BUILDING" ? "#7d4e00" :
+                    detail.build_status === "CONVERGING" ? "#0d419d" :
+                    detail.build_status === "APPROVED" ? "#1a4f1a" :
+                    "#21262d",
+                  color:
+                    detail.build_status === "BUILDING" ? "#e3b341" :
+                    detail.build_status === "CONVERGING" ? "#58a6ff" :
+                    detail.build_status === "APPROVED" ? "#3fb950" :
+                    "#8b949e",
+                }}>
+                  {detail.build_status}
+                </span>
+              </div>
+            )}
+            {detail.pr_ref && (
+              <div>
+                <span style={{ color: "#8b949e" }}>Draft PR: </span>
+                <span>#{detail.pr_ref.number}</span>
+              </div>
+            )}
+            {detail.issue_ref && (
+              <div>
+                <span style={{ color: "#8b949e" }}>Issue: </span>
+                <span>#{detail.issue_ref.number}</span>
+              </div>
+            )}
+            {detail.changed_files != null && (
+              <div><span style={{ color: "#8b949e" }}>Changed files: </span>{detail.changed_files}</div>
+            )}
           </div>
         </div>
       )}

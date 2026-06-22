@@ -28,6 +28,10 @@ export interface RunEvent {
 
 export interface RunDetail extends RunSummary {
   events: RunEvent[];
+  pr_ref?: { repo: { owner: string; name: string }; number: number } | null;
+  issue_ref?: { repo: { owner: string; name: string }; number: number } | null;
+  build_status?: string | null;
+  changed_files?: number | null;
 }
 
 const BASE = "";

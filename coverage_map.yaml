@@ -43,6 +43,22 @@
   "derive_pr_state-building":
     tests: ["test_derive_pr_building_implementing", "test_derive_pr_building_default", "test_derive_pr_draft_empty_is_building", "test_derive_pr_converging_requires_non_draft"]
 
+"§4.2":
+  "row-1-opens-draft-pr":
+    tests: ["test_dispatch_opens_draft_pr"]
+  "row-2-calls-harness-opus-40":
+    tests: ["test_dispatch_calls_harness"]
+  "row-3-comment-sonnet-30":
+    tests: ["test_dispatch_comment_uses_sonnet"]
+  "row-4-redispatch-via-comment":
+    tests: ["test_dispatch_redispatch_via_comment"]
+  "row-5-full-lifecycle":
+    tests: ["test_dispatch_full_lifecycle"]
+  "row-6-pr-review-comment":
+    tests: ["test_dispatch_pr_review_comment_triggers_dispatch"]
+  "row-7-no-dispatch-without-agent-work":
+    tests: ["test_dispatch_no_dispatch_without_agent_work_label"]
+
 # I7 invariant: awaiting-promotion and agent-work must never coexist on an issue.
 # Test not yet implemented — belongs in Step 2 security test suite.
 # "I7-invariant-awaiting-and-agent-work-never-coexist":

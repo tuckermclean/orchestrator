@@ -123,25 +123,24 @@ class OrchestratorService:
         return await pipeline_health(repo, self.forge)
 
     async def dev_dispatch(self, repo: RepoRef) -> RunHandle:
-        """Fire a fake issues:labeled agent-work event."""
-        issue_ref = IssueRef(repo=repo, number=1)
-        handle = await self.engine.dispatch("issues", issue_ref=issue_ref)
-        if handle is None:
-            # Dedup guard fired; bypass it for the dev dispatch button (demo-only path).
-            from src.decisions.route_entry import route_entry as _route_entry
-            from src.domain.types import DispatchContext
+        """Fire a fake issues:labeled agent-work event (dev/demo path only).
 
-            result = _route_entry("issues")
-            context = DispatchContext(
-                issue_ref=issue_ref,
-                contract=result.contract,
-                model=result.model,
-                max_turns=result.max_turns,
-                forge_token_scope="repo-branch",
-                allowed_agent_refs=None,
-            )
-            handle = await self.harness.dispatch(context)
-        return handle
+        Bypasses the full Engine.dispatch path so forge state setup is unnecessary.
+        """
+        from src.decisions.route_entry import route_entry as _route_entry
+        from src.domain.types import DispatchContext
+
+        issue_ref = IssueRef(repo=repo, number=1)
+        result = _route_entry("issues")
+        context = DispatchContext(
+            issue_ref=issue_ref,
+            contract=result.contract,
+            model=result.model,
+            max_turns=result.max_turns,
+            forge_token_scope="repo-branch",
+            allowed_agent_refs=None,
+        )
+        return await self.harness.dispatch(context)
 
     # -----------------------------------------------------------------------
     # Triage (human intake gate) — SPEC §11.3
