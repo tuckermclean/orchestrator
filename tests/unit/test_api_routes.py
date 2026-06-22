@@ -29,7 +29,7 @@ from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
 from src.service.registry import EnvRepoRegistry, FakeRepoRegistry, RepoConfig
 
-_TEST_OPERATOR_SECRET = "test-routes-operator-secret"
+_TEST_OPERATOR_SECRET = "test-routes-operator-secret-padded-to-32b"
 _PROD_OWNER = "tuckermclean"
 _PROD_REPO = "sandbox-derp"
 _PROD_REPO_REF = RepoRef(owner=_PROD_OWNER, name=_PROD_REPO)

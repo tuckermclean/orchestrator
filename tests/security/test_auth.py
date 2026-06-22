@@ -29,7 +29,7 @@ from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
 
 _TEST_SECRET = "test-secret-for-auth-tests"
-_TEST_OPERATOR_SECRET = "test-operator-secret-key"
+_TEST_OPERATOR_SECRET = "test-operator-secret-key-padded-to-32b"
 
 
 def _make_service() -> OrchestratorService:
