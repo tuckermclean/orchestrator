@@ -37,6 +37,7 @@ from src.ports.base import (
     LockProvider,
     SessionPort,
 )
+from src.service.registry import RepoRegistryPort
 
 # Default LRU dedup window (number of delivery IDs to remember)
 _DEFAULT_DEDUP_WINDOW = 1000
@@ -66,6 +67,7 @@ class OrchestratorService:
         converge_state: ConvergeStateStore | None = None,
         lock_provider: LockProvider | None = None,
         dedup_window: int = _DEFAULT_DEDUP_WINDOW,
+        registry: RepoRegistryPort | None = None,
     ) -> None:
         self.engine = Engine(
             forge=forge,
@@ -92,6 +94,10 @@ class OrchestratorService:
         self._allowlist = allowlist if allowlist is not None else []
         self._owner = owner
 
+        # Repo registry — multi-repo support (issue #49).
+        # When None, the service operates in single-repo mode using _allowlist/_owner.
+        self._registry = registry
+
         self._intake_engine = IntakeEngine(
             forge=forge,
             harness=harness,
@@ -116,18 +122,25 @@ class OrchestratorService:
         """Initialise async resources (call once from the ASGI lifespan handler)."""
         await self._audit.init()
 
-    async def start_reconciler(self, repo: RepoRef) -> None:
-        """Start the reconciler cron loop for the given repo.
+    async def start_reconciler(self, repo: RepoRef | None = None) -> None:
+        """Start the reconciler cron loop.
 
-        Runs ``Engine.reconcile`` every ``RECONCILER_CRON`` cadence (15 min) in the
-        background.  Call ``stop_reconciler()`` to cancel the task cleanly.
+        When ``repo`` is supplied, the loop reconciles that one repo every tick.
+        When ``repo`` is None (multi-repo mode), each tick calls ``reconcile_now()``
+        which iterates all enabled repos from the registry (or the dev default).
+
+        Runs every ``RECONCILER_CRON`` cadence (15 min) in the background.
+        Call ``stop_reconciler()`` to cancel the task cleanly.
         """
 
         async def _loop() -> None:
             while True:
                 await asyncio.sleep(_cron_to_seconds(RECONCILER_CRON))
                 try:
-                    await self.engine.reconcile(repo)
+                    if repo is not None:
+                        await self.engine.reconcile(repo)
+                    else:
+                        await self.reconcile_now()
                 except Exception:
                     pass  # isolated: reconciler errors never crash the loop
 
@@ -198,8 +211,32 @@ class OrchestratorService:
             if isinstance(comment_data, dict):
                 comment_body = str(comment_data.get("body", ""))
 
+        # Per-repo config lookup: when the registry is set, look up the config
+        # for the event's repo and use its allowlist/owner.  If the repo is not
+        # registered or not enabled, ignore the event (no-op, not an error).
+        if self._registry is not None:
+            event_repo = _extract_repo(payload)
+            if event_repo is not None:
+                repo_config = await self._registry.get_repo(event_repo)
+                if repo_config is None or not repo_config.enabled:
+                    # Unknown or disabled repo — silently ignore.
+                    return {"handled": False, "reason": "repo_not_registered"}
+                # Rebuild the intake engine with per-repo allowlist/owner for this event.
+                intake_engine = IntakeEngine(
+                    forge=self.forge,
+                    harness=self.harness,
+                    session=self.session,
+                    audit=self._audit,
+                    allowlist=repo_config.allowlist,
+                    owner=repo_config.repo.owner,
+                )
+            else:
+                intake_engine = self._intake_engine
+        else:
+            intake_engine = self._intake_engine
+
         if event_name == "issues" and issue_ref is not None:
-            await self.run_intake(issue_ref)
+            await intake_engine.intake(issue_ref)
         else:
             await self.engine.dispatch(
                 event_name,
@@ -215,12 +252,32 @@ class OrchestratorService:
     # -----------------------------------------------------------------------
 
     async def reconcile_now(self, repo: RepoRef | None = None) -> list[ReconcileReport]:
-        """Run reconcile immediately for one repo (or the default repo).
+        """Run reconcile immediately — iterates all enabled repos from the registry.
+
+        When ``repo`` is explicitly supplied the reconciler is scoped to that
+        one repo (useful for targeted operator invocations or tests).  When
+        ``repo`` is None and a registry is set, ALL enabled repos are reconciled
+        concurrently.  Without a registry, falls back to the single-repo default
+        (``demo/repo`` in dev mode).
 
         Idempotent: calling twice produces the same effect as calling once since
         the reconciler re-reads live forge label state and skips already-acted entities.
         """
-        target = repo if repo is not None else RepoRef(owner="demo", name="repo")
+        if repo is not None:
+            report = await self.engine.reconcile(repo)
+            return [report]
+
+        if self._registry is not None:
+            enabled = await self._registry.enabled_repos()
+            if not enabled:
+                return []
+            reports = await asyncio.gather(
+                *[self.engine.reconcile(cfg.repo) for cfg in enabled]
+            )
+            return list(reports)
+
+        # No registry — fall back to the single-repo default (dev / legacy mode).
+        target = RepoRef(owner="demo", name="repo")
         report = await self.engine.reconcile(target)
         return [report]
 
@@ -349,7 +406,24 @@ class OrchestratorService:
     # -----------------------------------------------------------------------
 
     async def run_intake(self, issue_ref: IssueRef) -> RunHandle | None:
-        """Run the intake gate for an issue (called by event routing)."""
+        """Run the intake gate for an issue (called by event routing).
+
+        When a registry is configured and the issue's repo is registered, the
+        per-repo allowlist and owner are used.  Falls back to the service-level
+        defaults for unregistered repos or when no registry is set.
+        """
+        if self._registry is not None:
+            repo_config = await self._registry.get_repo(issue_ref.repo)
+            if repo_config is not None and repo_config.enabled:
+                engine = IntakeEngine(
+                    forge=self.forge,
+                    harness=self.harness,
+                    session=self.session,
+                    audit=self._audit,
+                    allowlist=repo_config.allowlist,
+                    owner=repo_config.repo.owner,
+                )
+                return await engine.intake(issue_ref)
         return await self._intake_engine.intake(issue_ref)
 
     async def list_triage(self, repo: RepoRef) -> list[TriageItem]:
