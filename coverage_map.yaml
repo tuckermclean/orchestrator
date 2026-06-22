@@ -306,6 +306,18 @@
   "lock-asyncio-serializes":
     tests: ["test_asyncio_lock_provider_serializes_same_entity", "test_asyncio_lock_provider_different_entities_parallel"]
 
+"§7-converge-gate":  # SPEC §7 BLOCKING_CI_CHECKS — per-repo required_checks gate (closes #71)
+  "narrowed-subset-approves":
+    tests: ["test_converge_narrowed_subset_approves_when_subset_green"]
+  "narrowed-subset-full-still-required":
+    tests: ["test_converge_narrowed_subset_escalates_when_subset_red"]
+  "default-behaviour-unchanged":
+    tests: ["test_converge_default_checks_all_six_required"]
+  "no-registry-fallback":
+    tests: ["test_engine_converge_no_required_checks_uses_blocking_ci_checks"]
+  "service-layer-resolves-registry":
+    tests: ["test_service_converge_pr_resolves_per_repo_required_checks", "test_service_converge_pr_no_registry_uses_global_constant", "test_service_converge_pr_unregistered_repo_uses_global_constant"]
+
 "§3.2":  # ForgePort contract suite (TESTING.md §3.2) — parametrized over [fake, real]
   "forge-get-issue":
     tests: ["test_forge_get_issue_returns_correct_fields"]
