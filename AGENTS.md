@@ -431,3 +431,63 @@ Step 1 as a gate that "rejects missing rows," but the `@covers` enforcement was 
 implemented — truth-table coverage was enforced only by human/swarm review (which is how a
 dangling row name survived into a PR). A hand-maintained map with no validator gives false
 confidence: if a doc claims a gate, verify the gate exists and has teeth before relying on it.
+
+---
+
+The notes below were added after a full autonomous build session (≈10 issues, ≈14 PRs in
+one run). Each is tagged **[Obligatory]** (a gate, invariant, or merge correctness depends
+on it — skipping it has bitten us) or **[Advisory]** (saves time/tokens, no correctness risk).
+
+**[Obligatory] Know the exact CI gates; never instruct an implementer to run `ruff format`.**
+CI (`.github/workflows/ci.yml`) runs exactly four things: `pytest`, `mypy --strict src/`,
+`ruff check src/ tests/`, and the `ui-build`. **`ruff format --check` is NOT a gate.** When
+an implementer prompt told an agent to satisfy `ruff format --check`, it ran `ruff format`
+across the tree and bundled **26 unrelated reformatted files** into its PR — which then
+conflicted with every other in-flight branch and buried the real change. Scope every
+implementer's gate list to those four commands and explicitly forbid `ruff format`. (`mypy`
+on CI is `--strict src/` only; running it over `tools/` too is fine but not required.)
+
+**[Obligatory] Treat GitHub CI as the source of truth for gates — agent worktree venvs lie.**
+A background agent's isolated worktree may have an **incomplete venv** (one lacked `PyJWT`),
+so the agent reported "8 pre-existing failures / 4 mypy errors" that **did not exist** on
+`main` and were pure environment artifacts. Do not merge on an agent's pytest counts. Either
+re-run in a known-good venv pointing at the branch's `src`, or — simplest and canonical —
+push the branch and read `gh pr checks` (CI installs full deps in a clean env). This extends
+"re-run the gates yourself": the *where* matters as much as the *whether*.
+
+**[Obligatory] Hook-based controls deny with exit code 2, not 1.** The I9 spawn-allow-set
+PreToolUse hook denied out-of-set spawns by exiting **1** — but Claude Code's hook contract
+blocks a tool **only on exit 2** (or exit 0 + JSON `{"hookSpecificOutput":{"permission
+Decision":"deny"}}`); exit 1 is a *non-blocking* error and the tool proceeds. The control was
+inert, and its 30 unit tests all passed because they asserted the script's own return value,
+not the runtime contract. For any hook enforcing a security invariant: deny == `exit 2`, and
+verify against the published hooks reference — a self-referential unit test proves nothing
+about whether the runtime actually blocks.
+
+**[Obligatory] Adjudicate the diff and strip scope-creep before merge.** Beyond re-running
+gates, read the security/correctness-critical lines yourself — that is how the exit-1 hook
+bug and the over-privileged token scope were caught. When an agent's PR carries changes
+outside its task (the reformat pollution above), revert them to `origin/main`
+(`git checkout origin/main -- <files>`) and amend, so the PR is *only* its real change. A PR
+that touches 32 files when 6 are real is both a conflict magnet and unreviewable.
+
+**[Obligatory] Parallelize only on disjoint files; serialize on the contention hubs.**
+Multiple implementers run concurrently safely **iff** their file sets don't overlap. The hubs
+that force serialization in this repo: `src/api/main.py`, `src/ports/harness.py`, `SPEC.md`,
+and the shared contract suite (`tests/contracts/`). `coverage_map.yaml` is touched by almost
+every PR but concurrent additions of *different* sections auto-merge on rebase, so it rarely
+truly conflicts. Before launching a wave, map each issue to the hub it touches and never
+start two issues that write the same hub at once — adjudicate-and-merge one, then launch the
+next onto fresh `main`.
+
+**[Advisory] After `gh pr merge --delete-branch`, the local branch survives if a worktree
+holds it.** Clean up with `git worktree remove <wt> --force` then `git branch -D <branch>`
+(and `git worktree prune`). Also: keep the orchestrator's *own* checkout parked on `main` —
+worktree-isolated agents have been observed leaving the main checkout switched onto a feature
+branch with uncommitted state; verify `git branch --show-current` before operating there.
+
+**[Advisory] Docs/spec/config-only changes don't need the full review swarm.** For a verified
+documentation, `coverage_map`-neutral, or single-line config change, self-review against the
+ground-truth source (the code or the implemented convention) and merge — spending a multi-
+agent swarm on a typo-class edit burns tokens for no added assurance. Reserve the swarm for
+behavioral code. (Still rebase, still confirm CI.)
