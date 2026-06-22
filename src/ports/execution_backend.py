@@ -623,27 +623,36 @@ class K8sJobBackend:
             '@github.com/.insteadOf=https://github.com/"'
         )
 
-        # Contract materialisation step (#111).
-        # The contract path is repo-relative (e.g. "agents/orchestrator.md").
-        # The baked file is at /app/agents/<basename>.
-        # Copy it into the clone so the agent can read it at the expected path.
+        # Contract materialisation step (#111, full-set fix).
+        # The orchestrator contract delegates to sibling contracts by relative path
+        # (agents/implementer.md, agents/converge-reviewer.md, etc.).  Copying only
+        # the dispatched contract leaves those paths unresolvable; the running agent
+        # logs "There's no implementer.md" and improvises a generic subagent that
+        # ignores the sibling contract's disciplines.  Copy the FULL baked agents/
+        # dir instead so every relative-path reference resolves.
+        #
+        # The baked dir is /app/agents/ (COPY agents/ /app/agents/ in the Dockerfile).
+        # Fail loudly if the *dispatched* contract is absent — never silently allow
+        # the agent to run without its primary governing contract (#111).
         contract_basename = contract.rsplit("/", 1)[-1] if contract else ""
         if contract_basename:
             baked_contract = shlex.quote(f"{_BAKED_CONTRACT_DIR}/{contract_basename}")
             contract_step = (
-                # Fail loudly if the baked contract is absent — never silently
-                # allow the agent to run without its governing contract (#111).
+                # Fail loudly if the dispatched contract is absent.
                 f"[ -f {baked_contract} ] || "
                 f'{{ echo "FATAL: contract not found: {baked_contract}" >&2; exit 1; }}\n'
+                # Copy the entire baked agents/ dir so sibling-contract references
+                # resolve.  Copy the *contents* (trailing /.) into an ensured target
+                # dir rather than `cp -r src dest`, which would nest into
+                # agents/agents/ if the cloned repo already has an agents/ dir.
                 "mkdir -p /workspace/repo/agents\n"
-                f"cp {baked_contract} /workspace/repo/agents/{shlex.quote(contract_basename)}\n"
-                # Git-ignore the materialised contract so `git add -A` cannot sweep
-                # it into the PR.  agents/** is a PROTECTED_PATH; a committed contract
-                # would trip the converge protected-path check (E1) and stall a
-                # greenfield run.  .git/info/exclude is repo-local and only affects
-                # untracked files (#111).
+                f"cp -r {shlex.quote(_BAKED_CONTRACT_DIR)}/. /workspace/repo/agents/\n"
+                # Git-ignore the entire materialised agents/ dir so `git add -A`
+                # cannot sweep any contract into the PR.  agents/** is a
+                # PROTECTED_PATH; a committed copy trips the converge protected-path
+                # check (E1) and stalls a greenfield run (#111).
                 "mkdir -p /workspace/repo/.git/info\n"
-                f"echo {shlex.quote('/' + contract)} >> /workspace/repo/.git/info/exclude\n"
+                "echo '/agents/**' >> /workspace/repo/.git/info/exclude\n"
             )
         else:
             contract_step = ""

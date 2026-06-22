@@ -467,17 +467,25 @@ class ClaudeCodeHarnessPort:
         return env
 
     def _materialize_contract(self, contract: str, repo_dir: str) -> None:
-        """Copy the agent contract file from the package into the cloned workspace.
+        """Copy ALL orchestration contracts from the package into the cloned workspace.
 
-        Used by SubprocessBackend (dev/CI path) so the agent can read its contract
-        at the repo-relative path the prompt references (e.g. "agents/orchestrator.md").
+        Used by SubprocessBackend (dev/CI path) so the agent can read its contract —
+        and any sibling contracts it references by relative path — from the
+        repo-relative path the prompt uses (e.g. "agents/orchestrator.md").
 
-        The contract is sourced from the orchestrator package's own agents/ directory
-        (sibling of src/ at the repo root), NOT from the cloned target repo — which
-        will never contain orchestrator's own contracts (#111).
+        The orchestrator contract delegates to sibling contracts by relative path
+        (agents/implementer.md, agents/converge-reviewer.md, etc.).  Materialising
+        only the dispatched contract leaves those paths unresolvable, causing the
+        running agent to improvise a generic subagent that ignores the sibling
+        contract's disciplines (#111 follow-up).
 
-        Fails loudly with a clear error message if the contract file is absent,
-        rather than silently letting the agent run without its governing instructions.
+        The contracts are sourced from the orchestrator package's own agents/
+        directory (sibling of src/ at the repo root), NOT from the cloned target
+        repo — which will never contain orchestrator's own contracts (#111).
+
+        Fail-loud: raises FileNotFoundError if the *dispatched* contract is absent,
+        regardless of whether other contracts are present.  The agent must never run
+        without its primary governing instructions.
 
         Args:
           contract:  DispatchContext.contract, e.g. "agents/orchestrator.md".
@@ -486,31 +494,44 @@ class ClaudeCodeHarnessPort:
         import pathlib
         import shutil
 
-        basename = contract.rsplit("/", 1)[-1]
+        dispatched_basename = contract.rsplit("/", 1)[-1]
         # Locate the package's own agents/ dir: src/ports/harness.py → ../../agents/
         package_agents_dir = pathlib.Path(__file__).parent.parent.parent / "agents"
-        src_path = package_agents_dir / basename
-        if not src_path.exists():
+
+        # Fail loudly if the dispatched contract is absent — the agent must never
+        # run without its primary governing instructions (#111).
+        dispatched_src = package_agents_dir / dispatched_basename
+        if not dispatched_src.exists():
             raise FileNotFoundError(
-                f"Agent contract not found at expected package path: {src_path}. "
+                f"Agent contract not found at expected package path: {dispatched_src}. "
                 f"Contract '{contract}' cannot be materialised into the workspace. "
                 "The orchestrator's contracts are in the 'agents/' directory at the "
                 "repo root; they are baked into the agent-runner image at /app/agents/ "
                 "for K8s dispatches. Check that agents/ is present and the contract "
-                f"basename '{basename}' matches an existing file."
+                f"basename '{dispatched_basename}' matches an existing file."
             )
+
         dest_dir = pathlib.Path(repo_dir) / "agents"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src_path), str(dest_dir / basename))
 
-        # Git-ignore the materialised contract so an agent's `git add -A` cannot
-        # sweep it into the PR.  agents/** is a PROTECTED_PATH, so a committed
-        # contract would trip the converge protected-path check (E1) and stall a
+        # Copy the FULL orchestration-contract set (all *.md files) so any
+        # relative-path reference between contracts resolves.  The orchestrator
+        # contract delegates to sibling contracts by relative path (Step 5 reads
+        # agents/implementer.md; it also references agents/converge-reviewer.md and
+        # agents/converge-fixer.md).  Without the full set the running agent logs
+        # "There's no implementer.md" and improvises a generic subagent that ignores
+        # the implementer contract's disciplines (commit hygiene, D4, etc.).
+        for src_path in package_agents_dir.glob("*.md"):
+            shutil.copy2(str(src_path), str(dest_dir / src_path.name))
+
+        # Git-ignore the entire materialised agents/ dir so an agent's `git add -A`
+        # cannot sweep any contract into the PR.  agents/** is a PROTECTED_PATH, so
+        # a committed copy trips the converge protected-path check (E1) and stalls a
         # greenfield run on a spurious escalation.  .git/info/exclude is repo-local
-        # and only affects *untracked* files — a repo that legitimately tracks the
-        # contract (e.g. the orchestrator's own repo) is unaffected (#111).
+        # and only affects *untracked* files — a repo that legitimately tracks
+        # contracts (e.g. the orchestrator's own repo) is unaffected (#111).
         exclude_path = pathlib.Path(repo_dir) / ".git" / "info" / "exclude"
-        exclude_line = f"/{contract}\n"
+        exclude_line = "/agents/**\n"
         try:
             exclude_path.parent.mkdir(parents=True, exist_ok=True)
             existing = exclude_path.read_text() if exclude_path.exists() else ""
