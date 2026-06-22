@@ -23,6 +23,14 @@
   "row-4-no-footer-unknown":
     tests: ["test_resolve_blockers_row4_no_footer_unknown", "test_resolve_blockers_row4_comment_without_footer"]
 
+"§8.2a":  # CounterStore — counter reads and increments (SPEC §8.2a)
+  "get-increment-reset":
+    tests: ["test_counter_get_zero_initial", "test_counter_increment_returns_new_value", "test_counter_increment_twice", "test_counter_reset_returns_zero"]
+  "channel-isolation":
+    tests: ["test_counter_channel_isolation", "test_counter_stale_pr_channel"]
+  "atomic-increment":
+    tests: ["test_counter_atomic_increment_concurrent"]
+
 "§8.3":  # decide_round
   "row-1-approve":
     tests: ["test_decide_round_approve_r1", "test_decide_round_approve_r2", "test_decide_round_approve_r3", "test_decide_round_zero_blockers_ci_red_not_approve_r1", "test_decide_round_unknown_never_approves_even_ci_green"]

@@ -18,20 +18,24 @@ def counter_store() -> FakeCounterStore:
     return FakeCounterStore()
 
 
+@pytest.mark.covers("§8.2a", "get-increment-reset")
 async def test_counter_get_zero_initial(counter_store: FakeCounterStore) -> None:
     assert await counter_store.get_count(_PR, "stale-pr") == 0
 
 
+@pytest.mark.covers("§8.2a", "get-increment-reset")
 async def test_counter_increment_returns_new_value(counter_store: FakeCounterStore) -> None:
     assert await counter_store.increment(_PR, "stale-pr") == 1
 
 
+@pytest.mark.covers("§8.2a", "get-increment-reset")
 async def test_counter_increment_twice(counter_store: FakeCounterStore) -> None:
     await counter_store.increment(_PR, "stale-pr")
     await counter_store.increment(_PR, "stale-pr")
     assert await counter_store.get_count(_PR, "stale-pr") == 2
 
 
+@pytest.mark.covers("§8.2a", "channel-isolation")
 async def test_counter_channel_isolation(counter_store: FakeCounterStore) -> None:
     await counter_store.increment(_PR, "stale-pr")
     await counter_store.increment(_PR, "stale-pr")
@@ -40,12 +44,14 @@ async def test_counter_channel_isolation(counter_store: FakeCounterStore) -> Non
     assert await counter_store.get_count(_PR, "orphan") == 1
 
 
+@pytest.mark.covers("§8.2a", "channel-isolation")
 async def test_counter_stale_pr_channel(counter_store: FakeCounterStore) -> None:
     for _ in range(3):
         await counter_store.increment(_PR, "stale-pr")
     assert await counter_store.get_count(_PR, "stale-pr") == 3
 
 
+@pytest.mark.covers("§8.2a", "get-increment-reset")
 async def test_counter_reset_returns_zero(counter_store: FakeCounterStore) -> None:
     for _ in range(3):
         await counter_store.increment(_PR, "stale-pr")
@@ -53,6 +59,7 @@ async def test_counter_reset_returns_zero(counter_store: FakeCounterStore) -> No
     assert await counter_store.get_count(_PR, "stale-pr") == 0
 
 
+@pytest.mark.covers("§8.2a", "atomic-increment")
 async def test_counter_atomic_increment_concurrent(counter_store: FakeCounterStore) -> None:
     results = await asyncio.gather(
         counter_store.increment(_PR, "stale-pr"),

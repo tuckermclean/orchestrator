@@ -15,6 +15,7 @@ from src.domain.types import RECONCILER_STALE_REDISPATCH_CAP
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-1-escalate-cap")
 def test_stale_escalate_at_cap() -> None:
     """redispatch_count == RECONCILER_STALE_REDISPATCH_CAP → escalate (E8)."""
     assert (
@@ -25,6 +26,7 @@ def test_stale_escalate_at_cap() -> None:
     )
 
 
+@pytest.mark.covers("§8.5", "row-1-escalate-cap")
 def test_stale_escalate_above_cap() -> None:
     """redispatch_count > RECONCILER_STALE_REDISPATCH_CAP → escalate."""
     assert (
@@ -35,11 +37,13 @@ def test_stale_escalate_above_cap() -> None:
     )
 
 
+@pytest.mark.covers("§8.5", "row-1-escalate-cap")
 def test_stale_escalate_far_above_cap() -> None:
     """Large redispatch_count → escalate (row 1 is first-match)."""
     assert decide_stale_action(999, 1, False, 0, True, True, True) == "escalate"
 
 
+@pytest.mark.covers("§8.5", "row-1-escalate-cap")
 def test_stale_escalate_row1_beats_ci_runs_zero() -> None:
     """Row 1 beats row 2: cap reached even when ci_runs == 0 → escalate (not trigger-ci)."""
     assert (
@@ -55,16 +59,19 @@ def test_stale_escalate_row1_beats_ci_runs_zero() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-2-trigger-ci-no-run")
 def test_stale_trigger_ci_no_runs() -> None:
     """ci_runs == 0, below cap → trigger-ci."""
     assert decide_stale_action(0, 0, False, 0, True, True, True) == "trigger-ci"
 
 
+@pytest.mark.covers("§8.5", "row-2-trigger-ci-no-run")
 def test_stale_trigger_ci_no_runs_not_draft() -> None:
     """ci_runs == 0, non-draft, below cap → trigger-ci."""
     assert decide_stale_action(0, 0, False, 0, True, True, False) == "trigger-ci"
 
 
+@pytest.mark.covers("§8.5", "row-2-trigger-ci-no-run")
 def test_stale_trigger_ci_beats_nodiff() -> None:
     """Row 2 beats rows 2.5: ci_runs == 0 fires before 0-diff check."""
     assert decide_stale_action(0, 0, False, 0, True, False, True) == "trigger-ci"
@@ -75,21 +82,25 @@ def test_stale_trigger_ci_beats_nodiff() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-2.5a-redispatch")
 def test_stale_nodiff_draft_with_issue_redispatch() -> None:
     """Row 2.5a: has_diff=False, is_draft=True, has_issue=True → redispatch."""
     assert decide_stale_action(0, 1, False, 2, True, False, True) == "redispatch"
 
 
+@pytest.mark.covers("§8.5", "row-2.5b-needs-human")
 def test_stale_nodiff_draft_no_issue_needs_human() -> None:
     """Row 2.5b: has_diff=False, is_draft=True, has_issue=False → needs-human (E9)."""
     assert decide_stale_action(0, 1, False, 2, False, False, True) == "needs-human"
 
 
+@pytest.mark.covers("§8.5", "row-2.5c-needs-human")
 def test_stale_nodiff_nondraft_needs_human() -> None:
     """Row 2.5c: has_diff=False, is_draft=False → needs-human (D4: finished-empty)."""
     assert decide_stale_action(0, 1, False, 0, True, False, False) == "needs-human"
 
 
+@pytest.mark.covers("§8.5", "row-2.5c-needs-human")
 def test_stale_nodiff_nondraft_no_issue_needs_human() -> None:
     """Row 2.5c: non-draft, 0-diff, no issue → needs-human."""
     assert decide_stale_action(0, 1, False, 0, False, False, False) == "needs-human"
@@ -100,11 +111,13 @@ def test_stale_nodiff_nondraft_no_issue_needs_human() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-3-mark-ready")
 def test_stale_mark_ready_has_converge() -> None:
     """has_converge=True, has_diff=True → mark-ready."""
     assert decide_stale_action(0, 3, True, 1, False, True, True) == "mark-ready"
 
 
+@pytest.mark.covers("§8.5", "row-3-mark-ready")
 def test_stale_mark_ready_has_converge_nondraft() -> None:
     """has_converge=True, non-draft, has_diff=True → mark-ready."""
     assert decide_stale_action(1, 2, True, 0, True, True, False) == "mark-ready"
@@ -115,6 +128,7 @@ def test_stale_mark_ready_has_converge_nondraft() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-4-mark-ready-and-converge")
 def test_stale_mark_ready_and_converge_ci_clean() -> None:
     """failing_count == 0, no converge label, has_diff=True → mark-ready-and-converge."""
     assert (
@@ -123,6 +137,7 @@ def test_stale_mark_ready_and_converge_ci_clean() -> None:
     )
 
 
+@pytest.mark.covers("§8.5", "row-4-mark-ready-and-converge")
 def test_stale_mark_ready_and_converge_no_issue() -> None:
     """failing_count == 0, no issue → mark-ready-and-converge (row 4 beats rows 5/6)."""
     assert (
@@ -136,11 +151,13 @@ def test_stale_mark_ready_and_converge_no_issue() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-5-redispatch")
 def test_stale_redispatch_has_issue_failing() -> None:
     """CI failing, has_issue=True → redispatch."""
     assert decide_stale_action(0, 2, False, 3, True, True, True) == "redispatch"
 
 
+@pytest.mark.covers("§8.5", "row-5-redispatch")
 def test_stale_redispatch_has_issue_below_cap() -> None:
     """redispatch_count < cap, has_issue=True, failing_count > 0 → redispatch."""
     count = RECONCILER_STALE_REDISPATCH_CAP - 1
@@ -152,11 +169,13 @@ def test_stale_redispatch_has_issue_below_cap() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "row-6-needs-human")
 def test_stale_needs_human_failing_no_issue() -> None:
     """CI failing, no issue → needs-human (E9)."""
     assert decide_stale_action(0, 2, False, 1, False, True, True) == "needs-human"
 
 
+@pytest.mark.covers("§8.5", "row-6-needs-human")
 def test_stale_needs_human_failing_no_issue_nondraft() -> None:
     """Non-draft, CI failing, no issue → needs-human."""
     assert decide_stale_action(0, 3, False, 2, False, True, False) == "needs-human"
@@ -167,6 +186,7 @@ def test_stale_needs_human_failing_no_issue_nondraft() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "enum-exhaustiveness")
 def test_reconciler_stale_redispatch_cap_is_named_constant() -> None:
     """RECONCILER_STALE_REDISPATCH_CAP comes from domain types (never hardcoded 3)."""
     from src.domain.types import RECONCILER_STALE_REDISPATCH_CAP as domain_cap
@@ -180,6 +200,7 @@ def test_reconciler_stale_redispatch_cap_is_named_constant() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "enum-exhaustiveness")
 def test_stale_below_cap_does_not_escalate() -> None:
     """redispatch_count == RECONCILER_STALE_REDISPATCH_CAP - 1 → does not escalate."""
     count = RECONCILER_STALE_REDISPATCH_CAP - 1
@@ -192,6 +213,7 @@ def test_stale_below_cap_does_not_escalate() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.5", "enum-exhaustiveness")
 def test_stale_action_arity() -> None:
     """Missing argument raises TypeError."""
     with pytest.raises(TypeError):

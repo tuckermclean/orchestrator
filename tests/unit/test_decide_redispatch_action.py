@@ -15,16 +15,19 @@ from src.domain.types import ISSUE_COOLDOWN_S, ISSUE_REDISPATCH_CAP
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "row-1-has-pr")
 def test_redispatch_skip_has_pr() -> None:
     """has_open_pr=True → skip-has-pr regardless of other inputs."""
     assert decide_redispatch_action(True, None, 0) == "skip-has-pr"
 
 
+@pytest.mark.covers("§8.8", "row-1-has-pr")
 def test_redispatch_skip_has_pr_beats_cap() -> None:
     """has_open_pr=True beats cap (row 1 is first-match)."""
     assert decide_redispatch_action(True, 0, ISSUE_REDISPATCH_CAP) == "skip-has-pr"
 
 
+@pytest.mark.covers("§8.8", "row-1-has-pr")
 def test_redispatch_skip_has_pr_beats_recent() -> None:
     """has_open_pr=True beats skip-recent (row 1 before row 2)."""
     assert decide_redispatch_action(True, 0, 0) == "skip-has-pr"
@@ -35,6 +38,7 @@ def test_redispatch_skip_has_pr_beats_recent() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "row-2-recent")
 def test_redispatch_skip_recent_below_cooldown() -> None:
     """seconds_since_last_activity < ISSUE_COOLDOWN_S → skip-recent."""
     assert (
@@ -42,17 +46,20 @@ def test_redispatch_skip_recent_below_cooldown() -> None:
     )
 
 
+@pytest.mark.covers("§8.8", "row-2-recent")
 def test_redispatch_skip_recent_zero() -> None:
     """seconds_since_last_activity == 0 → skip-recent."""
     assert decide_redispatch_action(False, 0, 0) == "skip-recent"
 
 
+@pytest.mark.covers("§8.8", "cooldown-boundary")
 def test_redispatch_not_skip_recent_exactly_cooldown() -> None:
     """seconds_since == ISSUE_COOLDOWN_S → NOT recent (strict <)."""
     result = decide_redispatch_action(False, ISSUE_COOLDOWN_S, 0)
     assert result != "skip-recent"
 
 
+@pytest.mark.covers("§8.8", "row-2-recent")
 def test_redispatch_skip_recent_none_skips_guard() -> None:
     """seconds_since_last_activity == None → skip recency guard, falls to row 3/4."""
     result = decide_redispatch_action(False, None, 0)
@@ -64,6 +71,7 @@ def test_redispatch_skip_recent_none_skips_guard() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "row-3-escalate")
 def test_redispatch_escalate_at_cap() -> None:
     """redispatch_count == ISSUE_REDISPATCH_CAP → escalate (E10)."""
     assert (
@@ -71,6 +79,7 @@ def test_redispatch_escalate_at_cap() -> None:
     )
 
 
+@pytest.mark.covers("§8.8", "row-3-escalate")
 def test_redispatch_escalate_above_cap() -> None:
     """redispatch_count > ISSUE_REDISPATCH_CAP → escalate."""
     assert (
@@ -78,6 +87,7 @@ def test_redispatch_escalate_above_cap() -> None:
     )
 
 
+@pytest.mark.covers("§8.8", "row-3-escalate")
 def test_redispatch_escalate_at_cap_with_old_activity() -> None:
     """At cap + old activity (>= ISSUE_COOLDOWN_S) → escalate."""
     assert (
@@ -91,6 +101,7 @@ def test_redispatch_escalate_at_cap_with_old_activity() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "row-4-redispatch")
 def test_redispatch_else_no_pr_old_activity() -> None:
     """No PR, old enough, below cap → redispatch."""
     assert (
@@ -98,11 +109,13 @@ def test_redispatch_else_no_pr_old_activity() -> None:
     )
 
 
+@pytest.mark.covers("§8.8", "row-4-redispatch")
 def test_redispatch_else_no_pr_no_activity() -> None:
     """No PR, None activity (no recency guard), count=0 → redispatch."""
     assert decide_redispatch_action(False, None, 0) == "redispatch"
 
 
+@pytest.mark.covers("§8.8", "row-4-redispatch")
 def test_redispatch_else_below_cap() -> None:
     """count == ISSUE_REDISPATCH_CAP - 1, no recency block → redispatch."""
     count = ISSUE_REDISPATCH_CAP - 1
@@ -114,6 +127,7 @@ def test_redispatch_else_below_cap() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "cooldown-boundary")
 def test_issue_redispatch_cap_is_named_constant() -> None:
     """ISSUE_REDISPATCH_CAP is sourced from domain types (never hardcoded 3)."""
     from src.domain.types import ISSUE_REDISPATCH_CAP as domain_cap
@@ -122,6 +136,7 @@ def test_issue_redispatch_cap_is_named_constant() -> None:
     assert ISSUE_REDISPATCH_CAP > 0
 
 
+@pytest.mark.covers("§8.8", "cooldown-boundary")
 def test_issue_cooldown_is_named_constant() -> None:
     """ISSUE_COOLDOWN_S is sourced from domain types."""
     from src.domain.types import ISSUE_COOLDOWN_S as domain_cool
@@ -135,6 +150,7 @@ def test_issue_cooldown_is_named_constant() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.8", "enum-exhaustiveness")
 def test_redispatch_arity() -> None:
     """Missing argument raises TypeError."""
     with pytest.raises(TypeError):
