@@ -28,8 +28,6 @@ from src.domain.types import (
     LABEL_READY,
     STALE_DRAFT_THRESHOLD_S,
     DispatchContext,
-    IssueRef,
-    PRRef,
     RepoRef,
     RunStatus,
 )
@@ -210,7 +208,7 @@ async def _rc3_rearm(engine: Engine, repo: RepoRef) -> int:
         # Scope: non-draft only
         if pr.draft:
             continue
-        # Scope: NOT needs-human (scope filter — has_needs_human is always False when we call decide)
+        # Scope: NOT needs-human (scope filter)
         if LABEL_NEEDS_HUMAN in pr.labels:
             continue
 

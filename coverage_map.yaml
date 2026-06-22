@@ -154,3 +154,65 @@
     tests: ["test_intake_allowlisted_first", "test_intake_allowlisted_second", "test_intake_single_match"]
   "row-unlisted-queue":
     tests: ["test_intake_unlisted", "test_intake_single_nomatch", "test_intake_case_sensitive_upper_in_list", "test_intake_case_sensitive_lower_in_list"]
+
+"§8.5":  # decide_stale_action
+  "row-1-escalate-cap":
+    tests: ["test_stale_row1_escalate_at_cap", "test_stale_row1_escalate_above_cap", "test_stale_row1_escalate_only_at_cap"]
+  "row-2-trigger-ci-no-run":
+    tests: ["test_stale_row2_trigger_ci_no_run_fresh", "test_stale_row2_trigger_ci_no_run_stale"]
+  "row-2.5a-mark-ready":
+    tests: ["test_stale_row2_5a_mark_ready"]
+  "row-2.5b-mark-ready-and-converge":
+    tests: ["test_stale_row2_5b_mark_ready_and_converge"]
+  "row-2.5c-redispatch":
+    tests: ["test_stale_row2_5c_redispatch"]
+  "row-3-redispatch":
+    tests: ["test_stale_row3_redispatch_below_cap"]
+  "row-4-needs-human-no-issue":
+    tests: ["test_stale_row4_needs_human_no_issue"]
+  "row-5-mark-ready":
+    tests: ["test_stale_row5_mark_ready_draft_false"]
+  "enum-exhaustiveness":
+    tests: ["test_stale_exhaustive_ci_run_states", "test_stale_literal_return_values"]
+
+"§8.6":  # decide_rearm_action
+  "row-0-escalated":
+    tests: ["test_rearm_row0_skip_escalated"]
+  "row-1-in-progress":
+    tests: ["test_rearm_row1_skip_in_progress"]
+  "row-2-done-recent":
+    tests: ["test_rearm_row2_skip_done_recent"]
+  "row-3-done-stale":
+    tests: ["test_rearm_row3_trigger_ci_done_stale"]
+  "row-4-no-run":
+    tests: ["test_rearm_row4_trigger_ci_no_run"]
+  "row-5-rearm-non-draft":
+    tests: ["test_rearm_row5_rearm_non_draft", "test_rearm_row5_rearm_with_run"]
+  "row-6-rearm-draft":
+    tests: ["test_rearm_row6_rearm_draft"]
+  "runtime-guard":
+    tests: ["test_rearm_guard_seconds_boundary", "test_rearm_guard_recent_inside_window", "test_rearm_guard_stale_at_boundary"]
+
+"§8.7":  # decide_conflict_action
+  "row-1-has-conflict-no-label":
+    tests: ["test_conflict_row1_escalate", "test_conflict_escalate_no_needs_human_yet"]
+  "row-2-no-conflict":
+    tests: ["test_conflict_row2_skip_no_conflict_clean", "test_conflict_row2_skip_no_conflict_unknown"]
+  "row-3-already-labeled":
+    tests: ["test_conflict_row3_skip_already_labeled", "test_conflict_both_conditions_skip"]
+  "enum-exhaustiveness":
+    tests: ["test_conflict_action_literal_type"]
+
+"§8.8":  # decide_redispatch_action
+  "row-1-has-pr":
+    tests: ["test_redispatch_row1_skip_has_pr"]
+  "row-2-recent":
+    tests: ["test_redispatch_row2_skip_recent_at_boundary", "test_redispatch_row2_skip_recent_inside"]
+  "row-3-escalate":
+    tests: ["test_redispatch_row3_escalate_at_cap", "test_redispatch_row3_escalate_above_cap"]
+  "row-4-redispatch":
+    tests: ["test_redispatch_row4_redispatch_below_cap", "test_redispatch_row4_at_zero"]
+  "cooldown-boundary":
+    tests: ["test_redispatch_cooldown_boundary_stale", "test_redispatch_cooldown_boundary_fresh", "test_redispatch_stale_enough_redispatch"]
+  "enum-exhaustiveness":
+    tests: ["test_redispatch_literal_return_values"]

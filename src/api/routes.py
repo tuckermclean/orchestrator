@@ -8,7 +8,15 @@ from collections.abc import AsyncGenerator
 from fastapi import APIRouter, Response
 from fastapi.responses import StreamingResponse
 
-from src.domain.types import HealthReport, IssueRef, RepoRef, RunDetail, RunSummary, TriageItem
+from src.domain.types import (
+    HealthReport,
+    IssueRef,
+    PRRef,
+    RepoRef,
+    RunDetail,
+    RunSummary,
+    TriageItem,
+)
 from src.service.orchestrator import OrchestratorService
 
 # Default demo repo used in dev mode
@@ -83,5 +91,44 @@ def _make_router(service: OrchestratorService) -> APIRouter:
         issue_ref = IssueRef(repo=_DEV_REPO, number=issue_number)
         await service.decline(issue_ref, operator=operator)
         return {"status": "declined"}
+
+    # ------------------------------------------------------------------
+    # Escalation endpoints (Step 6 — SPEC §8.9)
+    # ------------------------------------------------------------------
+
+    @r.get("/api/repos/{owner}/{repo_name}/escalations")
+    async def list_escalations(
+        owner: str,
+        repo_name: str,
+    ) -> list[dict[str, object]]:
+        repo = RepoRef(owner=owner, name=repo_name)
+        return await service.list_escalations(repo)
+
+    @r.post("/api/repos/{owner}/{repo_name}/prs/{pr_number}/deescalate")
+    async def deescalate_pr(
+        owner: str,
+        repo_name: str,
+        pr_number: int,
+        operator: str = "operator",
+    ) -> dict[str, str]:
+        repo = RepoRef(owner=owner, name=repo_name)
+        pr_ref = PRRef(repo=repo, number=pr_number)
+        await service.deescalate_pr(pr_ref, operator=operator)
+        return {"status": "deescalated"}
+
+    @r.post("/api/dev/reconcile")
+    async def dev_reconcile(response: Response) -> list[dict[str, object]]:
+        response.headers["X-Dev-Mode"] = "true"
+        reports = await service.reconcile_now()
+        return [
+            {
+                "stale_acted": r.stale_acted,
+                "conflicts_flagged": r.conflicts_flagged,
+                "rearmed": r.rearmed,
+                "redispatched": r.redispatched,
+                "escalated": r.escalated,
+            }
+            for r in reports
+        ]
 
     return r

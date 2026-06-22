@@ -13,7 +13,6 @@ import pytest
 from src.db.counter import SQLiteCounterStore
 from src.domain.types import IssueRef, PRRef, RepoRef
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

@@ -10,7 +10,6 @@ import pytest
 from src.decisions.decide_redispatch_action import decide_redispatch_action
 from src.domain.types import ISSUE_COOLDOWN_S, ISSUE_REDISPATCH_CAP
 
-
 # ---------------------------------------------------------------------------
 # Row 1 — has_open_pr: skip-has-pr (SPEC §8.8 row 1)
 # ---------------------------------------------------------------------------

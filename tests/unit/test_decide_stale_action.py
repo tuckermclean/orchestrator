@@ -10,7 +10,6 @@ import pytest
 from src.decisions.decide_stale_action import decide_stale_action
 from src.domain.types import RECONCILER_STALE_REDISPATCH_CAP
 
-
 # ---------------------------------------------------------------------------
 # Row 1 — cap reached: escalate (SPEC §8.5 row 1)
 # ---------------------------------------------------------------------------

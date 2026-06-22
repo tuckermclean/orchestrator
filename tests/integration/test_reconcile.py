@@ -5,7 +5,6 @@ All tests use FakeForgePort / FakeHarnessPort / FakeCounterStore; no real forge.
 
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -27,8 +26,13 @@ from src.domain.types import (
     RepoRef,
 )
 from src.engine.dispatch import Engine
-from src.engine.reconcile import ReconcileReport
-from src.ports.fakes import FakeConvergeStateStore, FakeCounterStore, FakeForgePort, FakeHarnessPort, FakeSessionPort
+from src.ports.fakes import (
+    FakeConvergeStateStore,
+    FakeCounterStore,
+    FakeForgePort,
+    FakeHarnessPort,
+    FakeSessionPort,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,7 +188,7 @@ async def test_reconciler_rc1_nondraft_implementing_no_converge() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc1_crash_draft_empty_redispatches() -> None:
-    """RC-1: draft PR, changed_files=0, has_issue=True, stale → harness.dispatch (D4 crash-draft)."""
+    """RC-1: draft PR, changed_files=0, has_issue=True, stale → dispatch (D4 crash-draft)."""
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     pr_ref = _pr(7)
@@ -210,7 +214,7 @@ async def test_reconciler_rc1_crash_draft_empty_redispatches() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc1_nondraft_empty_needs_human() -> None:
-    """RC-1: non-draft PR, changed_files=0, agent:implementing, no converge, stale → LABEL_NEEDS_HUMAN."""
+    """RC-1: non-draft PR, changed_files=0, implementing, no converge, stale → NEEDS_HUMAN."""
     forge = FakeForgePort()
     pr_ref = _pr(8)
     forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=False, changed_files=0)
@@ -262,7 +266,7 @@ async def test_reconciler_rc1_needs_human_excluded() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc1_mark_ready_and_converge() -> None:
-    """RC-1: draft PR, failing_count=0, no converge label, not empty, stale → mark-ready-and-converge."""
+    """RC-1: draft PR, failing_count=0, no converge, not empty, stale → mark-ready-and-converge."""
     forge = FakeForgePort()
     pr_ref = _pr(11)
     forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, changed_files=3)
@@ -421,7 +425,7 @@ async def test_reconciler_rc2_mergeable_skip() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc3_rearm_triggers() -> None:
-    """RC-3: non-draft converge PR, last run > REARM_RECENT_GUARD_S ago → trigger_workflow called."""
+    """RC-3: non-draft converge PR, last run > REARM_RECENT_GUARD_S → trigger_workflow."""
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     pr_ref = _pr(30)
@@ -524,7 +528,7 @@ async def test_reconciler_rc3_skip_recent() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc4_redispatch_orphan() -> None:
-    """RC-4: agent-work issue, no open PR, seconds_since >= ISSUE_COOLDOWN_S, count=0 → redispatch."""
+    """RC-4: agent-work issue, no open PR, stale, count=0 → redispatch."""
     from src.domain.types import Comment as DomainComment
 
     forge2 = FakeForgePort()
@@ -547,7 +551,7 @@ async def test_reconciler_rc4_redispatch_orphan() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc4_escalate_cap() -> None:
-    """RC-4: agent-work issue, no open PR, redispatch_count == ISSUE_REDISPATCH_CAP → LABEL_NEEDS_HUMAN (E10)."""
+    """RC-4: agent-work, no open PR, count == ISSUE_REDISPATCH_CAP → NEEDS_HUMAN (E10)."""
     forge = FakeForgePort()
     issue_ref = _issue(101)
     forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
@@ -638,7 +642,7 @@ async def test_reconciler_rc4_audit_marker_posted() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc5_nudge_stale_awaiting_promotion() -> None:
-    """RC-5: issue with LABEL_AWAITING_PROMOTION, last activity > AWAITING_PROMOTION_NUDGE_S → post_comment."""
+    """RC-5: AWAITING_PROMOTION issue, last activity > NUDGE_S → post_comment."""
     forge = FakeForgePort()
     issue_ref = _issue(200)
     forge.seed_issue(issue_ref, labels=[LABEL_AWAITING_PROMOTION])
@@ -657,7 +661,7 @@ async def test_reconciler_rc5_nudge_stale_awaiting_promotion() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_rc5_skip_recent_awaiting_promotion() -> None:
-    """RC-5: issue with LABEL_AWAITING_PROMOTION, last comment within AWAITING_PROMOTION_NUDGE_S → no nudge."""
+    """RC-5: AWAITING_PROMOTION issue, last comment within NUDGE_S → no nudge."""
     forge = FakeForgePort()
     issue_ref = _issue(201)
     forge.seed_issue(issue_ref, labels=[LABEL_AWAITING_PROMOTION])
@@ -687,7 +691,7 @@ async def test_reconciler_rc5_skip_recent_awaiting_promotion() -> None:
 
 @pytest.mark.asyncio
 async def test_reconciler_runs_all_channels() -> None:
-    """Mixed setup: 1 stale draft + 1 conflict + 1 converge + 1 orphan → ReconcileReport has all counts."""
+    """Mixed: 1 stale draft + 1 conflict + 1 converge + 1 orphan → all ReconcileReport counts."""
     forge = FakeForgePort()
     harness = FakeHarnessPort()
 

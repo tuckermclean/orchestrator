@@ -9,7 +9,6 @@ import pytest
 
 from src.decisions.decide_conflict_action import decide_conflict_action
 
-
 # ---------------------------------------------------------------------------
 # Row 1 — CONFLICTING + not already labeled: escalate (SPEC §8.7 row 1)
 # ---------------------------------------------------------------------------

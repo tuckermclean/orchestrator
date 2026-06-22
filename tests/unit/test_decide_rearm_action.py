@@ -10,7 +10,6 @@ import pytest
 from src.decisions.decide_rearm_action import decide_rearm_action
 from src.domain.types import REARM_RECENT_GUARD_S, RunStatus
 
-
 # ---------------------------------------------------------------------------
 # Row 0 — has_needs_human: skip-escalated (SPEC §8.6 row 0)
 # ---------------------------------------------------------------------------

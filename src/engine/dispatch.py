@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import TYPE_CHECKING
 
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
@@ -20,6 +21,9 @@ from src.domain.types import (
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
+
+if TYPE_CHECKING:
+    from src.engine.reconcile import ReconcileReport
 
 
 class Engine:
@@ -124,9 +128,9 @@ class Engine:
 
         return await _converge(self, pr_ref)
 
-    async def reconcile(self, repo: RepoRef) -> "ReconcileReport":
+    async def reconcile(self, repo: RepoRef) -> ReconcileReport:
         """Run the four RC channels for a repo (SPEC §10.3)."""
-        from src.engine.reconcile import ReconcileReport, reconcile as _reconcile
+        from src.engine.reconcile import reconcile as _reconcile
 
         return await _reconcile(self, repo)
 
