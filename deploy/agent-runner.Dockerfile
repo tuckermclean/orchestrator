@@ -68,7 +68,9 @@ RUN git clone --no-tags --filter=blob:none "${AGENT_PACK_REPO_URL}" /tmp/agency-
  && git -C /tmp/agency-agents checkout "${AGENT_PACK_PINNED_REF}" \
  && [ "$(git -C /tmp/agency-agents rev-parse HEAD)" = "${AGENT_PACK_PINNED_REF}" ] \
  && mkdir -p "/app/${AGENT_PACK_DEST_DIR}" \
- && find /tmp/agency-agents -mindepth 2 -name "*.md" | while IFS= read -r f; do \
+ # Per-directory README.md files are not agents and are the one duplicate basename
+ # in the pack — exclude them; the collision guard still catches real AgentRef dupes.
+ && find /tmp/agency-agents -mindepth 2 -name "*.md" ! -iname "README.md" | while IFS= read -r f; do \
       target="/app/${AGENT_PACK_DEST_DIR}/$(basename "$f")"; \
       [ -e "$target" ] && { echo "ERROR: basename collision: $f" >&2; exit 1; }; \
       cp "$f" "$target"; \
