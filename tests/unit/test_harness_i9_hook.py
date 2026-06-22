@@ -112,7 +112,7 @@ def test_hook_denies_when_env_var_missing() -> None:
     """Missing ORCHESTRATOR_ALLOWED_AGENT_REFS → DENY (fail closed)."""
     payload = _make_task_payload("agents/reviewer.md")
     result = _run_hook(allowed_refs=None, stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 # --- Fail-closed: empty allow-set ---
@@ -121,14 +121,14 @@ def test_hook_denies_when_allow_set_is_empty_string() -> None:
     """Empty string env var → empty allow-set → DENY all Task spawns."""
     payload = _make_task_payload("agents/reviewer.md")
     result = _run_hook(allowed_refs="", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_denies_when_allow_set_is_whitespace_only() -> None:
     """Env var containing only commas/whitespace → empty allow-set → DENY."""
     payload = _make_task_payload("agents/reviewer.md")
     result = _run_hook(allowed_refs=",,,", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 # --- Fail-closed: bad stdin ---
@@ -136,13 +136,13 @@ def test_hook_denies_when_allow_set_is_whitespace_only() -> None:
 def test_hook_denies_on_invalid_json_stdin() -> None:
     """Unparseable stdin JSON → DENY (fail closed)."""
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_raw="NOT JSON {{{{")
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_denies_on_empty_stdin() -> None:
     """Empty stdin → JSON parse error → DENY."""
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_raw="")
-    assert result == 1
+    assert result == 2
 
 
 # --- Fail-closed: missing subagent_type ---
@@ -151,21 +151,21 @@ def test_hook_denies_when_subagent_type_absent() -> None:
     """tool_input without subagent_type → DENY."""
     payload = {"tool_name": "Task", "tool_input": {"description": "oops"}}
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_denies_when_tool_input_missing() -> None:
     """Payload without tool_input → DENY."""
     payload = {"tool_name": "Task"}
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_denies_when_tool_input_not_a_dict() -> None:
     """tool_input is a non-dict → DENY."""
     payload = {"tool_name": "Task", "tool_input": ["not", "a", "dict"]}
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 # --- In-set: allow ---
@@ -199,21 +199,21 @@ def test_security_spawn_ref_outside_allowset_rejected() -> None:
     """
     payload = _make_task_payload("rogue-agent.md")
     result = _run_hook(allowed_refs="agents/reviewer.md,agents/fixer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_denies_out_of_set_single_entry_allow_set() -> None:
     """Single-entry allow-set; different subagent_type → DENY."""
     payload = _make_task_payload("agents/different.md")
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 def test_hook_deny_is_case_sensitive() -> None:
     """Allow-set matching is case-sensitive: 'Agents/Reviewer.md' != 'agents/reviewer.md'."""
     payload = _make_task_payload("Agents/Reviewer.md")
     result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
-    assert result == 1
+    assert result == 2
 
 
 # ===========================================================================

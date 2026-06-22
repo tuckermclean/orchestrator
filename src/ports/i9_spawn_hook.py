@@ -6,7 +6,10 @@ from .claude/settings.json as a PreToolUse hook for the Task tool.
 Protocol (Claude Code hook contract):
   - Receives tool input JSON on stdin.
   - Exits 0   → allow the Task spawn.
-  - Exits 1   → deny the Task spawn (Claude Code blocks the tool call).
+  - Exits 2   → deny the Task spawn. Per the Claude Code PreToolUse contract ONLY
+                exit code 2 blocks the tool (stderr is fed back to Claude); exit
+                code 1 is a NON-blocking error and the spawn would proceed. Every
+                deny path below returns 2 — do not "fix" these back to 1.
 
 Fail-closed semantics (SECURITY.md §3 I9):
   - If ORCHESTRATOR_ALLOWED_AGENT_REFS is not set     → DENY.
@@ -32,7 +35,7 @@ import sys
 
 
 def main() -> int:
-    """Return 0 (allow) or 1 (deny)."""
+    """Return 0 (allow) or 2 (deny — the Claude Code PreToolUse blocking code)."""
     # 1. Read allow-set from env — fail closed if missing.
     raw_refs = os.environ.get("ORCHESTRATOR_ALLOWED_AGENT_REFS")
     if raw_refs is None:
@@ -40,7 +43,7 @@ def main() -> int:
         sys.stderr.write(
             "I9 hook: ORCHESTRATOR_ALLOWED_AGENT_REFS not set — spawn DENIED\n"
         )
-        return 1
+        return 2
 
     # 2. Parse allow-set — empty string means empty list (deny all spawns).
     allowed: set[str] = set(filter(None, raw_refs.split(",")))
@@ -48,7 +51,7 @@ def main() -> int:
         sys.stderr.write(
             "I9 hook: allow-set is empty — all Task spawns DENIED\n"
         )
-        return 1
+        return 2
 
     # 3. Parse tool input from stdin — fail closed on parse error.
     try:
@@ -56,19 +59,19 @@ def main() -> int:
         payload = json.loads(raw)
     except Exception as exc:
         sys.stderr.write(f"I9 hook: failed to parse stdin JSON ({exc}) — spawn DENIED\n")
-        return 1
+        return 2
 
     # 4. Extract subagent_type — fail closed if absent.
     # Claude Code delivers: {"tool_name": "Task", "tool_input": {...}}
     tool_input = payload.get("tool_input", {})
     if not isinstance(tool_input, dict):
         sys.stderr.write("I9 hook: tool_input is not a dict — spawn DENIED\n")
-        return 1
+        return 2
 
     subagent_type = tool_input.get("subagent_type")
     if subagent_type is None:
         sys.stderr.write("I9 hook: subagent_type absent from tool_input — spawn DENIED\n")
-        return 1
+        return 2
 
     # 5. Enforce allow-set membership.
     if subagent_type not in allowed:
@@ -76,7 +79,7 @@ def main() -> int:
             f"I9 hook: subagent_type '{subagent_type}' not in allow-set "
             f"{sorted(allowed)} — spawn DENIED\n"
         )
-        return 1
+        return 2
 
     # 6. In allow-set — permit.
     return 0
