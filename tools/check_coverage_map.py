@@ -11,7 +11,7 @@ Run as:
 Exit codes:
   0 — all checks passed
   1 — one or more validation failures (dangling names or uncovered rows)
-  2 — usage / I/O error (file not found, YAML parse error, etc.)
+  2 — I/O or usage error (file not found, YAML parse error, pytest collection error)
 """
 
 from __future__ import annotations
@@ -69,9 +69,22 @@ def load_coverage_map(path: Path = _DEFAULT_MAP_PATH) -> dict[str, dict[str, lis
     return result
 
 
+class CollectionError(RuntimeError):
+    """Raised when pytest --collect-only exits with a collection error (returncode != 0, 5)."""
+
+
 def collect_test_names(rootdir: Path | None = None) -> set[str]:
-    """Run pytest --collect-only -q and return the set of collected test node IDs
-    (bare function names, without module path)."""
+    """Run pytest --collect-only -q and return the set of collected bare function names.
+
+    Returns bare function names (without module path or parametrize suffix), e.g.
+    ``tests/unit/test_foo.py::test_bar_baz[param]`` → ``"test_bar_baz"``.
+
+    Raises:
+        CollectionError: if pytest exits with a returncode other than 0 (success) or
+            5 (no tests collected).  Exit code 2 indicates a collection error such as
+            an import or syntax error in a test module; validating against a partial
+            node list would produce a false-OK result, so we fail hard instead.
+    """
     cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--tb=no"]
     result = subprocess.run(
         cmd,
@@ -79,6 +92,20 @@ def collect_test_names(rootdir: Path | None = None) -> set[str]:
         text=True,
         cwd=str(rootdir) if rootdir else None,
     )
+    # returncode 0  = ok, tests found
+    # returncode 5  = no tests collected — treat as empty set, still valid to proceed
+    # anything else = error (e.g. 2 = collection error: import/syntax failure in a
+    #                 test module).  Pytest may still emit a partial node list; never
+    #                 validate against it — fail hard instead.
+    if result.returncode not in (0, 5):
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        raise CollectionError(
+            f"pytest --collect-only exited {result.returncode} (collection error); "
+            "stderr shown above. Fix the import/syntax error before re-running."
+        )
+    if result.returncode == 5:
+        return set()
     names: set[str] = set()
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -129,7 +156,11 @@ def run(
         print(f"ERROR loading {map_path}: {exc}", file=sys.stderr)
         return 2
 
-    collected = collect_test_names(rootdir)
+    try:
+        collected = collect_test_names(rootdir)
+    except CollectionError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     dangling, uncovered = validate(coverage_map, collected)
 
     total_sections = len(coverage_map)

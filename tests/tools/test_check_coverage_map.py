@@ -195,3 +195,28 @@ def test_run_missing_map_returns_2(tmp_path: Path) -> None:
     """A missing coverage_map.yaml → exit code 2 (I/O error, not validation failure)."""
     result = run(map_path=tmp_path / "no_such_file.yaml")
     assert result == 2
+
+
+def test_run_collection_error_exits_2(tmp_path: Path) -> None:
+    """A test tree with an import error causes pytest --collect-only to exit non-zero.
+
+    run() must return 2 (I/O/usage error) rather than 0 or 1 — it must NOT validate
+    against the partial node list that pytest still emits before aborting.
+    """
+    # Write a conftest-free test module that fails at import time.
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "__init__.py").write_text("")
+    (tests_dir / "test_broken.py").write_text(
+        "import nonexistent_xyz_module_that_does_not_exist\n\ndef test_dummy() -> None:\n    pass\n"
+    )
+
+    # Write a minimal but valid coverage_map.yaml so the map-load step succeeds.
+    map_path = tmp_path / "coverage_map.yaml"
+    map_path.write_text('"§8.1":\n  "row-1":\n    tests: ["test_dummy"]\n')
+
+    result = run(map_path=map_path, rootdir=tmp_path)
+    assert result == 2, (
+        f"Expected exit 2 (collection error) but got {result}. "
+        "The validator must not proceed against a partial node list."
+    )
