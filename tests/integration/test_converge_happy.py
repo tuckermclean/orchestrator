@@ -201,3 +201,26 @@ async def test_converge_reviewer_timeout_cancels_handle(
     # Fixer timeout → terminal_escalate(E11).
     assert state == "ESCALATED"
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
+
+async def test_converge_pr_dispatch_uses_head_branch() -> None:
+    """P0.4: reviewer and fixer DispatchContexts include head_branch from the PR.
+
+    This ensures the harness checks out the actual PR branch rather than the
+    default branch, so reviewers/fixers see the PR diff.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    # seed_pr sets head_branch="feature-branch" by default
+    _green_pr(forge, changed_files=["src/foo.py"])
+    harness.script_reviewer_verdicts(
+        Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
+    )
+    engine = _engine(forge, harness)
+
+    await engine.converge(_PR)
+
+    assert harness.dispatch_calls, "No dispatch calls"
+    reviewer_ctx = harness.dispatch_calls[0]
+    assert reviewer_ctx.head_branch == "feature-branch", (
+        f"P0.4: reviewer context must carry head_branch; got {reviewer_ctx.head_branch!r}"
+    )

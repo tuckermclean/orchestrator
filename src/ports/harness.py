@@ -1,157 +1,611 @@
-"""RealHarnessPort — anthropics/claude-code-action HarnessPort implementation."""
+"""ClaudeCodeHarnessPort — Claude Code subprocess HarnessPort implementation.
+
+The harness spawns `claude` (Claude Code CLI) as a supervised async child process.
+Each dispatch:
+  1. Mints a scoped GitHub App installation token (forge_token_scope determines perms).
+  2. Clones the target repo into a temp dir with that token.
+  3. Spawns `claude -p "<prompt>" --output-format stream-json --permission-mode
+     bypassPermissions --verbose` in the working tree.
+  4. Streams JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
+  5. Returns a RunHandle immediately (PID + run_id); process is watched in background.
+
+I3 invariants:
+  - Only CLAUDE_CODE_OAUTH_TOKEN and a scoped GH_TOKEN reach the child env.
+  - Orchestrator master creds (App private key, FORGE_TOKEN) are NEVER forwarded.
+  - No contributor text in env or subprocess args (I9).
+
+trigger_workflow / trigger_ci remain for re-running the repo's own CI via GitHub
+Actions.  All agent-dispatch-via-workflow_dispatch code is removed.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import shutil
+import signal
+import tempfile
+import time
+import uuid
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
+import jwt
 
 from src.domain.types import (
     DispatchContext,
     PRRef,
+    RunEvent,
     RunHandle,
     RunStatus,
 )
-from src.ports.github import (
-    _DISPATCH_WORKFLOW_NAME,
-    _GITHUB_API,
-    _parse_run_conclusion,
-    _parse_run_state,
-)
 
-# claude-code-action workflow filename (dispatched on the target repo).
-# The base name is shared with github.py to avoid duplication.
-_CLAUDE_CODE_ACTION_WORKFLOW = f"{_DISPATCH_WORKFLOW_NAME}.yml"
+# ---------------------------------------------------------------------------
+# GitHub API constants (shared with github.py — keep in sync)
+# ---------------------------------------------------------------------------
 
-# Workflow ref (branch/tag) for triggering the claude-code-action workflow
-_CLAUDE_CODE_ACTION_REF = "main"
+# _GITHUB_API duplicated here for standalone import; authoritative copy is github.py.
+_GITHUB_API = "https://api.github.com"
 
 
-class RealHarnessPort:
-    """HarnessPort that dispatches via anthropics/claude-code-action.
+# ---------------------------------------------------------------------------
+# ProcessRunner seam — injectable for unit tests
+# ---------------------------------------------------------------------------
 
-    Dispatch is fire-and-forget: the workflow is triggered on the forge repo and
-    a RunHandle is returned immediately.  The Engine polls get_run_status.
+class ProcessResult:
+    """Slim wrapper around a running subprocess."""
 
-    The harness API key is never logged or injected into the sandbox; it is held
-    only by this adapter (invariant I3).
+    def __init__(self, process: asyncio.subprocess.Process) -> None:
+        self._process = process
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.returncode
+
+    @property
+    def stdout(self) -> asyncio.StreamReader | None:
+        return self._process.stdout
+
+    async def wait(self) -> int:
+        return await self._process.wait()
+
+    async def terminate(self) -> None:
+        """Send SIGTERM to the entire process group (kills child processes too).
+
+        Uses os.killpg so that the root claude process and all its children
+        (git, tools, sub-agents) are signalled together.  Falls back to the
+        process's own terminate() when the process group is unavailable (e.g.
+        the process was not spawned with start_new_session=True in unit tests).
+        """
+        try:
+            pgid = os.getpgid(self._process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            # Process already dead or pgid unavailable — try single-process.
+            try:
+                self._process.terminate()
+            except (ProcessLookupError, PermissionError, AttributeError):
+                pass  # already dead — idempotent
+
+    async def kill(self) -> None:
+        """Send SIGKILL to the entire process group."""
+        try:
+            pgid = os.getpgid(self._process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            # Process already dead or pgid unavailable — try single-process.
+            try:
+                self._process.kill()
+            except (ProcessLookupError, PermissionError, AttributeError):
+                pass
+
+
+# Callable type: (args, cwd, env) → ProcessResult
+ProcessRunner = Callable[
+    [list[str], str, dict[str, str]],
+    Coroutine[Any, Any, ProcessResult],
+]
+
+
+async def _default_process_runner(
+    args: list[str],
+    cwd: str,
+    env: dict[str, str],
+) -> ProcessResult:
+    """Default runner: spawns the real claude subprocess.
+
+    start_new_session=True places the child in its own process group so that
+    cancel() can signal the entire group (claude + git + sub-agents) rather
+    than only the root process.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+        start_new_session=True,
+    )
+    return ProcessResult(process)
+
+
+# ---------------------------------------------------------------------------
+# Run-event store — in-process; Step 9 wires SSE on top of this
+# ---------------------------------------------------------------------------
+
+class RunEventStore:
+    """Per-run event accumulator.  Thread-safe (asyncio single-threaded).
+
+    Holds events in memory.  Step 9 (issue #31) will expose these via SSE;
+    for #45 they are captured and queryable here.
+    """
+
+    def __init__(self) -> None:
+        self._events: dict[str, list[RunEvent]] = {}
+        self._statuses: dict[str, RunStatus] = {}
+        # Per-run asyncio.Queue for live streaming; None signals completion.
+        self._queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
+
+    def register(self, run_id: str) -> None:
+        """Initialise storage for a new run."""
+        self._events[run_id] = []
+        self._statuses[run_id] = RunStatus(state="queued")
+        self._queues[run_id] = asyncio.Queue()
+
+    def append(self, run_id: str, event: RunEvent) -> None:
+        """Record an event and push it to the live queue."""
+        self._events.setdefault(run_id, []).append(event)
+        if run_id in self._queues:
+            self._queues[run_id].put_nowait(event)
+
+    def set_status(self, run_id: str, status: RunStatus) -> None:
+        current = self._statuses.get(run_id)
+        if current is not None and current.state == "completed":
+            # Already terminal — guard against double-sentinel on the queue.
+            return
+        self._statuses[run_id] = status
+        if status.state == "completed" and run_id in self._queues:
+            # Signal end-of-stream
+            self._queues[run_id].put_nowait(None)
+
+    def get_status(self, run_id: str) -> RunStatus:
+        return self._statuses.get(run_id, RunStatus(state="queued"))
+
+    def get_events(self, run_id: str) -> list[RunEvent]:
+        return list(self._events.get(run_id, []))
+
+    def get_queue(self, run_id: str) -> asyncio.Queue[RunEvent | None] | None:
+        """Return the live event queue for SSE streaming (Step 9)."""
+        return self._queues.get(run_id)
+
+
+# ---------------------------------------------------------------------------
+# Token minting — scoped GitHub App installation token (I3)
+# ---------------------------------------------------------------------------
+
+def _mint_app_jwt(app_id: str, private_key_pem: str) -> str:
+    """Return a short-lived GitHub App JWT (10 min)."""
+    now = int(time.time())
+    payload = {
+        "iat": now - 60,  # allow 60 s clock skew
+        "exp": now + 600,
+        "iss": app_id,
+    }
+    return jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+
+async def _mint_scoped_installation_token(
+    app_id: str,
+    private_key_pem: str,
+    installation_id: str,
+    forge_token_scope: str,
+    repo_owner: str,
+    repo_name: str,
+    http_client: httpx.AsyncClient,
+) -> str:
+    """Mint a GitHub App installation token scoped to the dispatch permissions.
+
+    forge_token_scope mapping (SPEC §9.2, SECURITY.md §3 I3):
+      "repo-comment" → contents:read + issues:write (triager: comment only)
+      "repo-branch"  → contents:write + pull_requests:write (implementer/reviewer/fixer)
+
+    The token is scoped to the specific repository only (minimum-privilege).
+    Operator credentials (private_key_pem, app_id) are NEVER forwarded.
+    """
+    if forge_token_scope == "repo-comment":
+        permissions = {
+            "contents": "read",
+            "issues": "write",
+            "metadata": "read",
+        }
+    else:  # "repo-branch"
+        permissions = {
+            "contents": "write",
+            "issues": "write",
+            "pull_requests": "write",
+            "metadata": "read",
+        }
+
+    app_jwt = _mint_app_jwt(app_id, private_key_pem)
+    resp = await http_client.post(
+        f"{_GITHUB_API}/app/installations/{installation_id}/access_tokens",
+        headers={
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={
+            "repositories": [repo_name],
+            "permissions": permissions,
+        },
+    )
+    resp.raise_for_status()
+    return str(resp.json()["token"])
+
+
+# ---------------------------------------------------------------------------
+# Main port
+# ---------------------------------------------------------------------------
+
+class ClaudeCodeHarnessPort:
+    """HarnessPort that dispatches by spawning Claude Code as a supervised subprocess.
+
+    dispatch(context):
+      - Mints a scoped GH installation token for the target repo.
+      - Clones the repo into a per-dispatch temp dir.
+      - Spawns `claude -p <prompt> --output-format stream-json
+          --permission-mode bypassPermissions --verbose` in the working tree.
+      - Streams JSON events from stdout into the RunEventStore.
+      - Returns a RunHandle immediately (non-blocking).
+
+    get_run_status / cancel reflect live process state.
+
+    Security (I3 / I9):
+      - Child env contains ONLY CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN (scoped).
+      - Operator master creds (App key, FORGE_TOKEN) never reach the child.
+      - No contributor text in args or env.
+
+    I9 spawn gap (tracked in #52): the allow-set (allowed_agent_refs) is
+    enforced as a prompt instruction in _build_prompt. Hard rejection via a
+    claude PreToolUse hook is tracked separately in issue #52. Blast radius is
+    bounded by the single-repo scoped token from _mint_scoped_installation_token.
+
+    trigger_workflow / trigger_ci: retained for CI re-runs via GitHub Actions.
     """
 
     def __init__(
         self,
-        forge_token: str,
+        claude_oauth_token: str,
+        app_id: str,
+        private_key_pem: str,
+        installation_id: str,
         repo_owner: str,
         repo_name: str,
-        harness_api_key: str | None = None,
-        client: httpx.AsyncClient | None = None,
+        event_store: RunEventStore | None = None,
+        process_runner: ProcessRunner | None = None,
+        http_client: httpx.AsyncClient | None = None,
+        # Kept for compatibility with tests that wire trigger_ci/trigger_workflow
+        forge_token: str = "",
     ) -> None:
-        self._forge_token = forge_token
+        self._claude_oauth_token = claude_oauth_token
+        self._app_id = app_id
+        self._private_key_pem = private_key_pem
+        self._installation_id = installation_id
         self._repo_owner = repo_owner
         self._repo_name = repo_name
-        # harness_api_key reserved for future authenticated harness APIs
-        self._harness_api_key = harness_api_key
-        self._client = client or httpx.AsyncClient(
-            base_url=_GITHUB_API,
-            headers={
-                "Authorization": f"Bearer {forge_token}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
-            timeout=30.0,
-        )
+        self._event_store = event_store or RunEventStore()
+        self._process_runner = process_runner or _default_process_runner
+        self._http_client = http_client or httpx.AsyncClient(timeout=30.0)
+        self._forge_token = forge_token  # used only for trigger_ci / trigger_workflow
 
-    def _headers(self) -> dict[str, str]:
+        # Active process map: run_id → (ProcessResult, temp_dir)
+        self._processes: dict[str, tuple[ProcessResult, str]] = {}
+        # Background watcher tasks — kept so cancel() can cancel them and to
+        # prevent garbage collection before the task completes.
+        self._background_tasks: set[asyncio.Task[None]] = set()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_prompt(self, context: DispatchContext) -> str:
+        """Build the Claude Code prompt from the dispatch context.
+
+        Security (I9): prompt contains ONLY the contract path and structured
+        references from the DispatchContext — never raw contributor text.
+        """
+        lines: list[str] = [
+            f"Act as the agent defined in {context.contract}. Read that file first.",
+        ]
+        if context.issue_ref is not None:
+            lines.append(
+                f"Task: work on issue #{context.issue_ref.number} in "
+                f"{context.issue_ref.repo.owner}/{context.issue_ref.repo.name}."
+            )
+        if context.pr_ref is not None:
+            lines.append(
+                f"PR context: PR #{context.pr_ref.number} in "
+                f"{context.pr_ref.repo.owner}/{context.pr_ref.repo.name}."
+            )
+        if context.allowed_agent_refs is not None:
+            # Allowed refs from decide_specialists output only — never contributor text (I9).
+            refs_str = ", ".join(context.allowed_agent_refs)
+            lines.append(
+                f"You may spawn sub-agents only from this allow-set: [{refs_str}]."
+            )
+        lines.append(
+            f"Use at most {context.max_turns} turns. "
+            "Write all changes through your tools; do not ask interactive questions."
+        )
+        return " ".join(lines)
+
+    def _build_child_env(self, gh_token: str) -> dict[str, str]:
+        """Build the child process environment.
+
+        I3: Only CLAUDE_CODE_OAUTH_TOKEN and GH_TOKEN (scoped) are injected.
+        The orchestrator's FORGE_TOKEN, App private key, and all other operator
+        credentials are NEVER forwarded to the child environment.
+        """
         return {
-            "Authorization": f"Bearer {self._forge_token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            # Claude auth (OAuth token — operator env, never repo secret)
+            "CLAUDE_CODE_OAUTH_TOKEN": self._claude_oauth_token,
+            # Scoped GitHub token (freshly minted, repo-limited, permission-limited)
+            "GH_TOKEN": gh_token,
+            # Required for git to work non-interactively
+            "GIT_TERMINAL_PROMPT": "0",
+            # Forward PATH so the claude binary is findable
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            # HOME is required for some git operations
+            "HOME": os.environ.get("HOME", "/root"),
         }
 
-    async def _post(self, url: str, json_body: dict[str, Any]) -> Any:
-        resp = await self._client.post(url, headers=self._headers(), json=json_body)
-        resp.raise_for_status()
-        # 204 No Content is the normal success for workflow_dispatch
-        if resp.status_code == 204 or not resp.content:
-            return {}
-        return resp.json()
+    async def _clone_repo(self, gh_token: str, work_dir: str, branch: str | None) -> None:
+        """Clone the target repo into work_dir using the scoped GH_TOKEN.
 
-    async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        resp = await self._client.get(url, headers=self._headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
+        Security: the token is passed via GIT_CONFIG_* env vars so it never
+        appears in process argv (/proc/PID/cmdline) or in .git/config.
+        """
+        plain_url = f"https://github.com/{self._repo_owner}/{self._repo_name}.git"
+        # Inject the token via git's url.insteadOf mechanism (env-only; not
+        # written to .git/config because --no-local / env-only config is
+        # transient for this subprocess only).
+        clone_env = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": (
+                f"url.https://x-access-token:{gh_token}@github.com/.insteadOf"
+            ),
+            "GIT_CONFIG_VALUE_0": "https://github.com/",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/root"),
+        }
+        args = ["git", "clone", "--depth", "1"]
+        if branch:
+            args += ["--branch", branch]
+        args += [plain_url, work_dir]
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=clone_env,
+        )
+        await proc.wait()
+        # Non-zero exit means clone failed; callers let the exception propagate.
+        if proc.returncode != 0:
+            stderr_bytes = b""
+            if proc.stderr is not None:
+                stderr_bytes = await proc.stderr.read()
+            raise RuntimeError(
+                f"git clone failed (exit {proc.returncode}): "
+                f"{stderr_bytes.decode(errors='replace')}"
+            )
 
-    async def _delete(self, url: str) -> None:
-        resp = await self._client.delete(url, headers=self._headers())
-        if resp.status_code not in (200, 204):
-            resp.raise_for_status()
+    def _target_branch(self, context: DispatchContext) -> str | None:
+        """Return the branch to check out, or None for default branch.
+
+        P0.4: head_branch is set by converge() so reviewers/fixers operate on
+        the actual PR diff rather than the default branch.
+        """
+        return context.head_branch
+
+    async def _watch_process(
+        self,
+        run_id: str,
+        process: ProcessResult,
+        work_dir: str,
+    ) -> None:
+        """Background task: stream JSON events from stdout, update run status on exit."""
+        self._event_store.set_status(run_id, RunStatus(state="in_progress"))
+
+        if process.stdout is not None:
+            async for raw_line in process.stdout:
+                line = raw_line.decode(errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    event_type = str(data.get("type", "stream"))
+                    event = RunEvent(
+                        event_type=event_type,
+                        data={k: v for k, v in data.items() if k != "type"},
+                        timestamp=datetime.now(tz=UTC),
+                    )
+                    self._event_store.append(run_id, event)
+                except Exception:
+                    # Non-JSON line (e.g. stderr bleed) — record as raw text event
+                    event = RunEvent(
+                        event_type="raw",
+                        data={"line": line},
+                        timestamp=datetime.now(tz=UTC),
+                    )
+                    self._event_store.append(run_id, event)
+
+        exit_code = await process.wait()
+        run_conclusion = "success" if exit_code == 0 else "failure"
+        self._event_store.set_status(
+            run_id,
+            RunStatus(
+                state="completed",
+                conclusion="success" if run_conclusion == "success" else "failure",
+            ),
+        )
+
+        # Clean up the working tree
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        # Remove from active map
+        self._processes.pop(run_id, None)
 
     # ------------------------------------------------------------------
     # HarnessPort implementation
     # ------------------------------------------------------------------
 
     async def dispatch(self, context: DispatchContext) -> RunHandle:
-        """Dispatch a claude-code-action workflow run (fire-and-forget).
+        """Spawn Claude Code as a supervised child process and return a RunHandle.
 
-        Triggers workflow_dispatch on the target repo.  The workflow ID returned
-        by GitHub is used to construct a RunHandle.  Returns immediately.
+        Non-blocking: returns immediately after spawning.  The child is watched
+        in a background asyncio task.
 
-        Security — I3 / I9 / D2:
-          - FORGE_TOKEN and HARNESS_API_KEY are NEVER included in workflow inputs.
-            This adapter holds credentials but does not forward them to the sandbox.
-          - allowed_agent_refs is serialized into workflow inputs as a JSON string so
-            the agent runtime (claude-code-action) can enforce the allow-set at
-            execution time.
-          - Out-of-set spawn rejection is enforced by the agent-runtime layer
-            (claude-code-action contract + harness), NOT by this dispatch call.
-            This adapter cannot observe sub-agent spawns that occur inside the
-            sandboxed workflow execution.  The serialized allowed_agent_refs value
-            is the authoritative contract boundary passed to that runtime.
+        Security:
+          - I3: only CLAUDE_CODE_OAUTH_TOKEN + scoped GH_TOKEN in child env.
+          - I9: prompt built from context.contract path only; no contributor text.
         """
-        # Build inputs from DispatchContext (I3: never expose forge credentials)
-        inputs: dict[str, str] = {
-            "contract": context.contract,
-            "model": context.model,
-            "max_turns": str(context.max_turns),
-            "forge_token_scope": context.forge_token_scope,
-        }
-        if context.issue_ref is not None:
-            inputs["issue_number"] = str(context.issue_ref.number)
-            inputs["issue_repo"] = (
-                f"{context.issue_ref.repo.owner}/{context.issue_ref.repo.name}"
-            )
-        if context.pr_ref is not None:
-            inputs["pr_number"] = str(context.pr_ref.number)
-        if context.allowed_agent_refs is not None:
-            inputs["allowed_agent_refs"] = json.dumps(context.allowed_agent_refs)
+        run_id = str(uuid.uuid4())
+        self._event_store.register(run_id)
 
-        ref = _CLAUDE_CODE_ACTION_REF
-        await self._post(
-            f"{_GITHUB_API}/repos/{self._repo_owner}/{self._repo_name}"
-            f"/actions/workflows/{_CLAUDE_CODE_ACTION_WORKFLOW}/dispatches",
-            json_body={"ref": ref, "inputs": inputs},
+        # 1. Mint a scoped installation token for the target repo (I3).
+        gh_token = await _mint_scoped_installation_token(
+            app_id=self._app_id,
+            private_key_pem=self._private_key_pem,
+            installation_id=self._installation_id,
+            forge_token_scope=context.forge_token_scope,
+            repo_owner=self._repo_owner,
+            repo_name=self._repo_name,
+            http_client=self._http_client,
         )
 
-        # GitHub workflow_dispatch returns 204 with no run ID.  We resolve the
-        # most recently created run for this workflow to build the handle.
-        run_id = await self._resolve_latest_run_id()
+        # 2. Clone the repo into a fresh temp dir.
+        work_dir = tempfile.mkdtemp(prefix=f"orch-run-{run_id[:8]}-")
+        repo_dir = os.path.join(work_dir, "repo")
+        os.makedirs(repo_dir, exist_ok=True)
+
+        branch = self._target_branch(context)
+        try:
+            await self._clone_repo(gh_token, repo_dir, branch)
+        except Exception as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._event_store.set_status(
+                run_id,
+                RunStatus(state="completed", conclusion="failure"),
+            )
+            event = RunEvent(
+                event_type="error",
+                data={"message": f"Clone failed: {exc}"},
+                timestamp=datetime.now(tz=UTC),
+            )
+            self._event_store.append(run_id, event)
+            return RunHandle(run_id=run_id)
+
+        # 3. Build the prompt (I9: contract path only, no contributor text).
+        prompt = self._build_prompt(context)
+
+        # 4. Build the child env (I3: only CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN).
+        child_env = self._build_child_env(gh_token)
+
+        # 5. Build the claude CLI invocation.
+        #    -p / --print: headless (non-interactive) mode
+        #    --output-format stream-json: NDJSON event stream on stdout
+        #    --permission-mode bypassPermissions: autonomous run (no interactive prompts)
+        #    --verbose: include tool-use events in the stream
+        #    --model: use the model from the dispatch context
+        claude_args = [
+            "claude",
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
+            "--permission-mode",
+            "bypassPermissions",
+            "--verbose",
+            "--model",
+            context.model,
+        ]
+
+        # 6. Spawn the subprocess via the injectable runner.
+        process = await self._process_runner(claude_args, repo_dir, child_env)
+
+        # 7. Track the process.
+        self._processes[run_id] = (process, work_dir)
+
+        # 8. Watch in background — "fire and watch" (AGENTS.md §1).
+        watcher = asyncio.create_task(
+            self._watch_process(run_id, process, work_dir),
+            name=f"harness-watch-{run_id[:8]}",
+        )
+        self._background_tasks.add(watcher)
+        watcher.add_done_callback(self._background_tasks.discard)
+
         return RunHandle(run_id=run_id)
 
-    async def _resolve_latest_run_id(self) -> str:
-        """Resolve the most recently triggered workflow run ID."""
-        try:
-            data = await self._get(
-                f"{_GITHUB_API}/repos/{self._repo_owner}/{self._repo_name}"
-                f"/actions/workflows/{_CLAUDE_CODE_ACTION_WORKFLOW}/runs",
-                params={"per_page": 1},
-            )
-            runs = data.get("workflow_runs", [])
-            if runs:
-                return str(runs[0]["id"])
-        except httpx.HTTPStatusError:
-            pass
-        # Fallback: generate a synthetic ID so dispatch never blocks
-        return f"dispatch-{id(self)}"
+    async def get_run_status(self, handle: RunHandle) -> RunStatus:
+        """Return the live status of the run.
+
+        P1.8: Unknown run IDs return completed/failure (avoids polling a dead
+        handle as pending; consistent with crash-only recovery).
+        """
+        if handle.run_id not in self._event_store._statuses:
+            return RunStatus(state="completed", conclusion="failure")
+        return self._event_store.get_status(handle.run_id)
+
+    async def cancel(self, handle: RunHandle) -> None:
+        """Terminate the child process group and clean up (idempotent)."""
+        status = self._event_store.get_status(handle.run_id)
+        if status.state == "completed":
+            # Already terminal — no-op (SPEC §9.2)
+            return
+
+        # Cancel any outstanding background watcher task for this run.
+        for task in list(self._background_tasks):
+            if handle.run_id in (task.get_name() or ""):
+                task.cancel()
+
+        entry = self._processes.get(handle.run_id)
+        if entry is not None:
+            process, work_dir = entry
+            await process.terminate()
+            # Give the process group a moment to exit cleanly, then force-kill.
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except TimeoutError:
+                await process.kill()
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self._processes.pop(handle.run_id, None)
+
+        self._event_store.set_status(
+            handle.run_id,
+            RunStatus(state="completed", conclusion="cancelled"),
+        )
+
+    # ------------------------------------------------------------------
+    # CI re-run methods (GitHub Actions — retained, separate concern)
+    # ------------------------------------------------------------------
+
+    def _gh_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self._forge_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
 
     async def trigger_workflow(
         self,
@@ -159,83 +613,53 @@ class RealHarnessPort:
         ref: str,
         inputs: dict[str, object],
     ) -> None:
-        """Trigger an arbitrary GitHub Actions workflow by filename."""
-        await self._post(
+        """Trigger an arbitrary GitHub Actions workflow by filename.
+
+        Used only for re-running the repo's own CI (tests/lint), NOT for
+        agent dispatch (which is handled by dispatch() above).
+        """
+        resp = await self._http_client.post(
             f"{_GITHUB_API}/repos/{self._repo_owner}/{self._repo_name}"
             f"/actions/workflows/{name}/dispatches",
-            json_body={"ref": ref, "inputs": inputs},
+            headers=self._gh_headers(),
+            json={"ref": ref, "inputs": inputs},
         )
+        resp.raise_for_status()
 
     async def trigger_ci(self, pr_ref: PRRef) -> None:
         """Re-trigger CI on a PR by re-running the most recent failed workflow run.
 
-        Implements the RC-1 'trigger-ci' recovery by calling the GitHub Actions
-        rerun-failed-jobs API on the most recent workflow run for the PR's head SHA.
-
-        Strategy:
-          1. Fetch the PR to get the head SHA.
-          2. List workflow runs for the head SHA to find the most recent one.
-          3. POST to /actions/runs/{run_id}/rerun-failed-jobs.
-
-        Raises httpx.HTTPStatusError on unexpected failures (does NOT swallow errors
-        silently — callers can decide to log/ignore if needed).
+        Fetches PR head SHA, finds the most recent workflow run, and calls
+        POST /actions/runs/{run_id}/rerun-failed-jobs.
         """
-        pr_data = await self._get(
+        pr_resp = await self._http_client.get(
             f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
-            f"/pulls/{pr_ref.number}"
+            f"/pulls/{pr_ref.number}",
+            headers=self._gh_headers(),
         )
-        head_sha = str(pr_data["head"]["sha"])
+        pr_resp.raise_for_status()
+        head_sha = str(pr_resp.json()["head"]["sha"])
 
-        # Find the most recent workflow run for this commit
-        runs_data = await self._get(
+        runs_resp = await self._http_client.get(
             f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
-            f"/actions/runs",
-            params={"head_sha": head_sha, "per_page": 1},
+            "/actions/runs",
+            headers=self._gh_headers(),
+            params={"head_sha": head_sha, "per_page": "1"},
         )
-        runs = runs_data.get("workflow_runs", [])
+        runs_resp.raise_for_status()
+        runs = runs_resp.json().get("workflow_runs", [])
         if not runs:
-            # No workflow runs found for this SHA — nothing to rerun
             return
 
-        run_id = str(runs[0]["id"])
-
-        # Re-run failed jobs for the most recent run
-        await self._post(
+        run_id_str = str(runs[0]["id"])
+        rerun_resp = await self._http_client.post(
             f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
-            f"/actions/runs/{run_id}/rerun-failed-jobs",
-            json_body={},
+            f"/actions/runs/{run_id_str}/rerun-failed-jobs",
+            headers=self._gh_headers(),
+            json={},
         )
+        rerun_resp.raise_for_status()
 
-    async def get_run_status(self, handle: RunHandle) -> RunStatus:
-        """Poll the GitHub Actions run status for the given handle."""
-        try:
-            data = await self._get(
-                f"{_GITHUB_API}/repos/{self._repo_owner}/{self._repo_name}"
-                f"/actions/runs/{handle.run_id}"
-            )
-            status_str = str(data.get("status", "queued"))
-            conclusion_str = data.get("conclusion")
-            state = _parse_run_state(None, status_str)
-            conclusion = _parse_run_conclusion(
-                str(conclusion_str) if conclusion_str else None
-            )
-            return RunStatus(state=state, conclusion=conclusion)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return RunStatus(state="queued")
-            raise
 
-    async def cancel(self, handle: RunHandle) -> None:
-        """Cancel the GitHub Actions run for the given handle (idempotent)."""
-        try:
-            await self._post(
-                f"{_GITHUB_API}/repos/{self._repo_owner}/{self._repo_name}"
-                f"/actions/runs/{handle.run_id}/cancel",
-                json_body={},
-            )
-        except httpx.HTTPStatusError as exc:
-            # 404 = run already gone (terminal no-op per SPEC §9.2)
-            # 409 = already in a terminal state (idempotent no-op per SPEC §9.2)
-            # 422 = already completed (idempotent no-op per SPEC §9.2)
-            if exc.response.status_code not in (404, 409, 422):
-                raise
+# Deprecated: RealHarnessPort is an alias for back-compat. Use ClaudeCodeHarnessPort.
+RealHarnessPort = ClaudeCodeHarnessPort

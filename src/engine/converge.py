@@ -165,6 +165,8 @@ async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
 
         specialist_refs = decide_specialists(changed_paths, r)
         model = ADJUDICATION_MODEL if r == CONVERGE_ROUNDS else DEFAULT_SWARM_MODEL
+        # P0.4: head_branch ensures the reviewer/fixer operate on the PR diff.
+        pr_head_branch: str = pr.head_branch
         reviewer_context = DispatchContext(
             pr_ref=pr_ref,
             contract=_CONVERGE_REVIEWER_CONTRACT,
@@ -172,6 +174,7 @@ async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
             max_turns=_REVIEWER_MAX_TURNS,
             forge_token_scope="repo-branch",
             allowed_agent_refs=specialist_refs,
+            head_branch=pr_head_branch,
         )
         reviewer_handle = await engine.harness.dispatch(reviewer_context)
         # Persist the handle so RC-3 can poll run status on the next reconcile tick.
@@ -227,6 +230,7 @@ async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
                 max_turns=_FIXER_MAX_TURNS,
                 forge_token_scope="repo-branch",
                 allowed_agent_refs=specialist_refs,
+                head_branch=pr_head_branch,
             )
             fixer_handle = await engine.harness.dispatch(fixer_context)
             completed = await engine._await_run(fixer_handle)
