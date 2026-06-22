@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -41,6 +42,8 @@ from src.ports.base import (
     SessionPort,
 )
 from src.service.registry import RepoRegistryPort
+
+_log = logging.getLogger(__name__)
 
 # Default LRU dedup window (number of delivery IDs to remember)
 _DEFAULT_DEDUP_WINDOW = 1000
@@ -90,6 +93,61 @@ class RunRecordingHarness:
             model=context.model,
             started_at=datetime.now(tz=UTC),
         )
+
+        # Write-through status propagation (issue #101).
+        # Register a sync sink on the harness RunEventStore so every subsequent
+        # set_status() call (queued → in_progress → completed/failure) is
+        # immediately written into the run_store.  The sink maps RunStatus to
+        # the run_store's flat (status_str, completed_at) interface.
+        # Only wired when the harness exposes register_run_status_sink — the
+        # FakeHarnessPort used in most tests does not, so those tests are
+        # unaffected unless they specifically exercise the status path.
+        if hasattr(self._harness, "register_run_status_sink"):
+            run_id = handle.run_id
+            run_store = self._run_store
+
+            def _status_sink(rid: str, status: RunStatus) -> None:
+                # Map RunStatus → run_store.set_status flat interface.
+                # Terminal states use conclusion-derived strings so the UI can
+                # distinguish completed-success from completed-failure without a
+                # separate conclusion field in RunSummary.
+                #   success   → "completed"
+                #   failure   → "failed"
+                #   cancelled → "cancelled"
+                # Non-terminal: propagate state string directly.
+                _CONCLUSION_TO_STATUS: dict[str, str] = {
+                    "success": "completed",
+                    "failure": "failed",
+                    "cancelled": "cancelled",
+                }
+                store_status: str
+                if status.state == "completed":
+                    conclusion = status.conclusion or "failure"
+                    store_status = _CONCLUSION_TO_STATUS.get(conclusion, conclusion)
+                    completed_at: datetime | None = datetime.now(tz=UTC)
+                else:
+                    store_status = status.state
+                    completed_at = None
+                try:
+                    run_store.set_status(rid, store_status, completed_at)
+                except Exception:
+                    _log.exception(
+                        "RunRecordingHarness status sink failed for run_id=%s status=%s",
+                        rid,
+                        status,
+                    )
+
+            self._harness.register_run_status_sink(run_id, _status_sink)
+
+            # Catch-up: some backends (FakeExecutionBackend, or a synchronous
+            # watcher that completes during dispatch()) may have already called
+            # set_status before we registered the sink above.  Read the current
+            # live status from the event_store and apply it now so the run_store
+            # is consistent even when the backend finished synchronously.
+            live_status = self._harness.get_live_status(run_id)  # type: ignore[attr-defined]
+            if live_status.state != "queued":
+                _status_sink(run_id, live_status)
+
         return handle
 
     # Delegate all other HarnessPort methods to the wrapped harness.

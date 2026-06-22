@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Coroutine
 from datetime import UTC, datetime  # noqa: TC003
 
 import aiosqlite
 
 from src.db import configure_sqlite_connection
 from src.domain.types import RepoRef, RunDetail, RunEvent, RunSummary
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -159,8 +162,8 @@ class SQLiteRunStore:
 
     The record() / set_status() / append_event() methods are synchronous
     (matching FakeRunStore's interface) and schedule their async writes via
-    asyncio.create_task so they are safe to call from fire-and-forget dispatch
-    paths.
+    _spawn(), which keeps a strong reference to each task (so it can't be GC'd
+    mid-write) and logs failures — safe to call from fire-and-forget dispatch.
 
     Callers must call init() before use and close() on shutdown.
     """
@@ -168,6 +171,22 @@ class SQLiteRunStore:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        # Keep strong refs to fire-and-forget write tasks: an unreferenced
+        # asyncio task can be garbage-collected mid-flight, silently dropping
+        # the DB write (run record / status update). Discard on completion and
+        # log any exception rather than swallowing it.
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def _spawn(self, coro: Coroutine[object, object, None]) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+
+        def _done(t: asyncio.Task[None]) -> None:
+            self._tasks.discard(t)
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                _log.error("SQLiteRunStore async write failed: %r", exc)
+
+        task.add_done_callback(_done)
 
     async def init(self) -> None:
         if self._db is not None:
@@ -195,7 +214,7 @@ class SQLiteRunStore:
         started_at: datetime,
     ) -> None:
         """Schedule async INSERT for the new run."""
-        asyncio.create_task(
+        self._spawn(
             self._record_async(
                 run_id=run_id,
                 repo=repo,
@@ -226,7 +245,7 @@ class SQLiteRunStore:
 
     def set_status(self, run_id: str, status: str, completed_at: datetime | None = None) -> None:
         """Schedule async UPDATE for the run status."""
-        asyncio.create_task(self._set_status_async(run_id, status, completed_at))
+        self._spawn(self._set_status_async(run_id, status, completed_at))
 
     async def _set_status_async(
         self,
@@ -243,7 +262,7 @@ class SQLiteRunStore:
 
     def append_event(self, run_id: str, event: RunEvent) -> None:
         """Schedule async INSERT for the event."""
-        asyncio.create_task(
+        self._spawn(
             self._append_event_async(
                 run_id=run_id,
                 event_type=event.event_type,
