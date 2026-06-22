@@ -90,7 +90,7 @@ or trigger workflows. Two-layer enforcement:
 
 **I6 — Every admit/queue decision and every human promotion is audit-logged.**
 `Engine.intake` writes an audit record for every `decide_intake` call (author, decision,
-allowlist state at decision time) — see `SPEC.md §10.4` step 2 for the required DB write.
+allowlist state at decision time) — see `SPEC.md §10.4` step 5 for the required DB write.
 `OrchestratorService.promote` writes an audit record for every human promotion
 (`LABEL_AWAITING_PROMOTION` → `LABEL_AGENT_WORK`) — see `SPEC.md §11.3` promote note.
 
