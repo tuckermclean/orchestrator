@@ -6,7 +6,11 @@ import aiosqlite
 
 # Busy timeout applied to every file-backed SQLite connection (ms).
 # Allows writers to wait instead of failing immediately on lock contention.
-SQLITE_BUSY_TIMEOUT_MS = 5000
+# Each store opens its own connection to the shared DB file, so several short
+# writes (intake counter/audit/run-store status sinks + converge round state)
+# can contend under load. 15s gives ample headroom for WAL writers to serialise
+# rather than surfacing "database is locked" to the caller (mitigates #109).
+SQLITE_BUSY_TIMEOUT_MS = 15000
 
 
 async def configure_sqlite_connection(db: aiosqlite.Connection) -> None:

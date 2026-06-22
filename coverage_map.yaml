@@ -467,3 +467,7 @@
     tests: ["test_handle_event_labeled_non_converge_label_no_converge_run"]
   "idempotent-duplicate-delivery":
     tests: ["test_handle_event_converge_duplicate_delivery_id_deduped"]
+  "converge-runs-in-background":
+    tests:
+      - "test_handle_event_converge_runs_in_background_not_inline"
+      - "test_spawn_converge_dedupes_concurrent_same_pr"

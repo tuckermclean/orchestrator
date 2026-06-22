@@ -88,6 +88,20 @@ def _make_service(
     )
 
 
+async def _drain_converge(service: OrchestratorService) -> None:
+    """Await all in-flight background converge tasks.
+
+    handle_event spawns converge as a background task (it is a minutes-long
+    sub-machine that must not block the webhook response), so tests that assert on
+    converge side effects must drain it first.
+    """
+    import asyncio
+
+    tasks = list(service._converge_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # §11.1-converge-trigger / ready_for_review-eligible
 # ---------------------------------------------------------------------------
@@ -110,6 +124,7 @@ async def test_handle_event_ready_for_review_drives_converge_pr() -> None:
     result = await service.handle_event(
         "pull_request", _pr_payload("ready_for_review")
     )
+    await _drain_converge(service)
 
     assert result == {"handled": True}
     # Reviewer was dispatched — converge actually ran.
@@ -143,6 +158,7 @@ async def test_handle_event_labeled_converge_drives_converge_pr() -> None:
     result = await service.handle_event(
         "pull_request", _pr_payload("labeled", label_name=LABEL_CONVERGE)
     )
+    await _drain_converge(service)
 
     assert result == {"handled": True}
     assert len(harness.dispatch_calls) == 1
@@ -174,6 +190,7 @@ async def test_handle_event_synchronize_drives_converge_pr() -> None:
     result = await service.handle_event(
         "pull_request", _pr_payload("synchronize")
     )
+    await _drain_converge(service)
 
     assert result == {"handled": True}
     assert len(harness.dispatch_calls) == 1
@@ -241,6 +258,7 @@ async def test_handle_event_ready_for_review_routes_converge_regardless_of_label
     result = await service.handle_event(
         "pull_request", _pr_payload("ready_for_review")
     )
+    await _drain_converge(service)
 
     # Routing reached converge_pr — reviewer was dispatched.
     assert result == {"handled": True}
@@ -378,8 +396,75 @@ async def test_handle_event_converge_duplicate_delivery_id_deduped() -> None:
         _pr_payload("ready_for_review"),
         delivery_id="evt-xyz-001",
     )
+    await _drain_converge(service)
 
     assert result1 == {"handled": True}
     assert result2 == {"handled": False, "reason": "duplicate_delivery_id"}
     # Only one reviewer was dispatched (first call) — second was deduped before converge_pr.
+    assert len(harness.dispatch_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# §11.1-converge-trigger / converge-runs-in-background
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.covers("§11.1-converge-trigger", "converge-runs-in-background")
+async def test_handle_event_converge_runs_in_background_not_inline() -> None:
+    """handle_event must NOT run the converge sub-machine inline.
+
+    Converge is minutes-long (review dispatch + multi-round CI polling). Running it
+    inside the webhook request blows GitHub's ~10s delivery timeout → redelivery →
+    duplicate dispatch, and holds DB write locks long enough to starve other writers
+    ("database is locked"). It must be spawned as a background task so the webhook
+    returns immediately.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    _green_pr(forge)
+    harness.script_reviewer_verdicts(
+        Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
+    )
+    service = _make_service(forge, harness)
+
+    result = await service.handle_event(
+        "pull_request", _pr_payload("ready_for_review")
+    )
+
+    # Webhook returned, but converge has NOT yet dispatched a reviewer — it was
+    # scheduled as a background task, not awaited inline.
+    assert result == {"handled": True}
+    assert harness.dispatch_calls == []
+    assert len(service._converge_tasks) == 1
+
+    # Once drained, the background converge completes and the reviewer is dispatched.
+    await _drain_converge(service)
+    assert len(harness.dispatch_calls) == 1
+
+
+@pytest.mark.covers("§11.1-converge-trigger", "converge-runs-in-background")
+async def test_spawn_converge_dedupes_concurrent_same_pr() -> None:
+    """Two converge triggers for the same PR while one is in flight → one task.
+
+    A burst of synchronize/labeled events (or a redelivery) must not stack
+    concurrent converge runs on the same PR.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    _green_pr(forge)
+    harness.script_reviewer_verdicts(
+        Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
+    )
+    service = _make_service(forge, harness)
+
+    # Two distinct deliveries (different IDs so the delivery-ID cache does not
+    # dedup) for the SAME PR, before draining — the per-PR in-flight guard dedups.
+    await service.handle_event(
+        "pull_request", _pr_payload("synchronize"), delivery_id="d-1"
+    )
+    assert service._spawn_converge(_PR) is False  # already in flight → no-op
+    assert len(service._converge_tasks) == 1
+
+    await _drain_converge(service)
+    # Exactly one converge ran → exactly one reviewer dispatched.
     assert len(harness.dispatch_calls) == 1
