@@ -29,7 +29,7 @@ from src.ports.fakes import (
     FakeSessionPort,
 )
 from src.service.orchestrator import OrchestratorService
-from src.service.registry import FakeRepoRegistry, RepoConfig
+from src.service.registry import EnvRepoRegistry, FakeRepoRegistry, RepoConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -421,3 +421,180 @@ async def test_run_intake_fallback_without_registry() -> None:
 
     issue = await forge.get_issue(issue_ref)
     assert LABEL_AGENT_WORK in issue.labels
+
+
+# ---------------------------------------------------------------------------
+# Reconciler + registry — regression tests for the demo/repo leak (fix/reconciler-registry-repos)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_now_env_registry_uses_configured_repo() -> None:
+    """Prod-style EnvRepoRegistry: reconcile_now() reconciles the configured repo, not demo/repo.
+
+    Regression guard: before the fix, reconcile_now() fell back to RepoRef(owner='demo',
+    name='repo') when no registry was wired.  This test uses EnvRepoRegistry (prod path)
+    and asserts the reconciler acts on the registry-configured repo only.
+    """
+    forge = FakeForgePort()
+    prod_repo = RepoRef(owner="tuckermclean", name="sandbox-derp")
+
+    # Seed a stale implementing PR in the prod repo so reconcile has something to act on.
+    pr_ref = PRRef(repo=prod_repo, number=1)
+    from datetime import UTC, datetime, timedelta
+
+    from src.domain.types import STALE_DRAFT_THRESHOLD_S
+
+    stale_ago = datetime.now(tz=UTC) - timedelta(seconds=STALE_DRAFT_THRESHOLD_S + 60)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, changed_files=0)
+    forge.seed_dispatch_run_at(pr_ref, stale_ago)
+
+    # Build a prod-style EnvRepoRegistry from GITHUB_OWNER/GITHUB_REPO env vars.
+    registry = EnvRepoRegistry.from_env(
+        github_owner="tuckermclean",
+        github_repo="sandbox-derp",
+    )
+
+    service = OrchestratorService(
+        forge=forge,
+        harness=FakeHarnessPort(),
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+        allowlist=[],
+        owner="tuckermclean",
+        registry=registry,
+    )
+
+    reports = await service.reconcile_now()
+
+    # Exactly one report (for sandbox-derp), not demo/repo.
+    assert len(reports) == 1
+    # Reconciler acted on the stale PR in sandbox-derp.
+    assert reports[0].stale_acted == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_now_dev_fake_registry_reconciles_seeded_repo() -> None:
+    """Dev FakeRepoRegistry seeded with demo/repo: reconcile_now() reconciles demo/repo.
+
+    Confirms the dev path is unaffected: a FakeRepoRegistry seeded with demo/repo
+    produces exactly one report, reconciling the dev repo.
+    """
+    forge = FakeForgePort()
+    dev_repo = RepoRef(owner="demo", name="repo")
+
+    pr_ref = PRRef(repo=dev_repo, number=1)
+    from datetime import UTC, datetime, timedelta
+
+    from src.domain.types import STALE_DRAFT_THRESHOLD_S
+
+    stale_ago = datetime.now(tz=UTC) - timedelta(seconds=STALE_DRAFT_THRESHOLD_S + 60)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, changed_files=0)
+    forge.seed_dispatch_run_at(pr_ref, stale_ago)
+
+    dev_registry = FakeRepoRegistry([RepoConfig(repo=dev_repo)])
+
+    service = OrchestratorService(
+        forge=forge,
+        harness=FakeHarnessPort(),
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+        allowlist=[],
+        owner="demo",
+        registry=dev_registry,
+    )
+
+    reports = await service.reconcile_now()
+
+    # Exactly one report for demo/repo.
+    assert len(reports) == 1
+    assert reports[0].stale_acted == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_now_never_hits_demo_repo_with_prod_registry() -> None:
+    """Prod registry (tuckermclean/sandbox-derp): reconcile_now() does NOT touch demo/repo.
+
+    The core regression guard: asserts that a prod service with a real registry
+    never falls through to the demo/repo default path.
+    """
+    forge = FakeForgePort()
+    demo_repo = RepoRef(owner="demo", name="repo")
+
+    # Seed a PR only in demo/repo — if reconcile touches it, the count will be > 0.
+    pr_ref = PRRef(repo=demo_repo, number=1)
+    from datetime import UTC, datetime, timedelta
+
+    from src.domain.types import STALE_DRAFT_THRESHOLD_S
+
+    stale_ago = datetime.now(tz=UTC) - timedelta(seconds=STALE_DRAFT_THRESHOLD_S + 60)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, changed_files=0)
+    forge.seed_dispatch_run_at(pr_ref, stale_ago)
+
+    registry = EnvRepoRegistry.from_env(
+        github_owner="tuckermclean",
+        github_repo="sandbox-derp",
+    )
+
+    service = OrchestratorService(
+        forge=forge,
+        harness=FakeHarnessPort(),
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+        allowlist=[],
+        owner="tuckermclean",
+        registry=registry,
+    )
+
+    reports = await service.reconcile_now()
+
+    # sandbox-derp has no stale PRs → zero actions.
+    assert len(reports) == 1
+    assert reports[0].stale_acted == 0  # demo/repo PR was NOT reconciled
+
+
+@pytest.mark.asyncio
+async def test_start_stop_reconciler_lifecycle() -> None:
+    """start_reconciler() creates a background task; stop_reconciler() cancels it cleanly."""
+    service = OrchestratorService(
+        forge=FakeForgePort(),
+        harness=FakeHarnessPort(),
+        session=FakeSessionPort(),
+        counter=FakeCounterStore(),
+        converge_state=FakeConvergeStateStore(),
+        allowlist=[],
+        owner="acme",
+        registry=FakeRepoRegistry([RepoConfig(repo=_REPO_A)]),
+    )
+
+    # Before start: no task
+    assert service._reconcile_task is None
+
+    await service.start_reconciler(repo=None)
+
+    # After start: task is present and running
+    assert service._reconcile_task is not None
+    assert not service._reconcile_task.done()
+
+    await service.stop_reconciler()
+
+    # After stop: task is cleared
+    assert service._reconcile_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_reconciler_idempotent() -> None:
+    """stop_reconciler() is a no-op when no reconciler is running."""
+    service = OrchestratorService(
+        forge=FakeForgePort(),
+        harness=FakeHarnessPort(),
+        session=FakeSessionPort(),
+        allowlist=[],
+        owner="acme",
+        registry=FakeRepoRegistry(),
+    )
+    # Should not raise even when _reconcile_task is None
+    await service.stop_reconciler()
