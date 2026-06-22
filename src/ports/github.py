@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime
 from typing import Any
 
@@ -547,6 +548,34 @@ class GitHubForgePort:
 # ---------------------------------------------------------------------------
 
 
+class _InstallationTokenAuth(httpx.Auth):
+    """httpx auth flow that mints/refreshes a GitHub App installation token and
+    sets it on every outgoing request.
+
+    This guarantees authentication for ALL requests issued through the client —
+    including base-class helpers (e.g. ``_get_paginated``) that call the client
+    directly rather than through the overridden ``_get``/``_post`` methods. The
+    supplied ``get_token`` coroutine caches the token, so this does not re-mint
+    on every call.
+    """
+
+    def __init__(self, get_token: Callable[[], Awaitable[str]]) -> None:
+        self._get_token = get_token
+
+    async def async_auth_flow(
+        self, request: httpx.Request
+    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        # The installation-token mint request (POST /app/installations/{id}/access_tokens)
+        # authenticates with the App JWT it already carries — it must NOT go through this
+        # flow, or it would recurse (mint → auth flow → mint → …). Pass it through untouched.
+        if request.url.path.endswith("/access_tokens"):
+            yield request
+            return
+        token = await self._get_token()
+        request.headers["Authorization"] = f"Bearer {token}"
+        yield request
+
+
 class GitHubAppForgePort(GitHubForgePort):
     """ForgePort that authenticates via a GitHub App installation token.
 
@@ -574,6 +603,12 @@ class GitHubAppForgePort(GitHubForgePort):
         self._installation_id = installation_id
         self._cached_token: str = ""
         self._token_expires_at: float = 0.0  # Unix timestamp
+        # Attach an auth flow so EVERY request through this client — including the
+        # base-class paginated GETs that call self._client directly (not via the
+        # overridden _get/_post helpers) — mints + attaches the installation token.
+        # Without this, _get_paginated sent an empty `Bearer ` header (App mode has
+        # no static token). The flow caches via _get_token, so it does not re-mint.
+        self._client.auth = _InstallationTokenAuth(self._get_token)
 
     def _mint_app_jwt(self) -> str:
         """Return a short-lived GitHub App JWT (10 min) signed with the private key."""
