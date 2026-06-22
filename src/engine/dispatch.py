@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from src.decisions.route_entry import route_entry
@@ -10,6 +11,7 @@ from src.domain.types import (
     CI_WAIT_S,
     LABEL_AGENT_WORK,
     LABEL_IMPLEMENTING,
+    POLL_INTERVAL_S,
     DispatchContext,
     IssueRef,
     PRRef,
@@ -138,3 +140,4 @@ class Engine:
             if time.monotonic() >= deadline:
                 await self.harness.cancel(handle)
                 return False
+            await asyncio.sleep(POLL_INTERVAL_S)
