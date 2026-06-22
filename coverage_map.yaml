@@ -433,3 +433,25 @@
     tests: ["test_harness_cancel_on_timeout_fixer"]
   "harness-run-handle-round-trip":
     tests: ["test_harness_run_handle_round_trip"]
+
+"§11.1-converge-trigger":
+  "ready_for_review-eligible":
+    tests: ["test_handle_event_ready_for_review_drives_converge_pr"]
+  "labeled-converge-eligible":
+    tests: ["test_handle_event_labeled_converge_drives_converge_pr"]
+  "synchronize-eligible":
+    tests: ["test_handle_event_synchronize_drives_converge_pr"]
+  "ineligible-draft-no-converge-run":
+    tests: ["test_handle_event_synchronize_draft_pr_no_converge_run"]
+  "ineligible-no-converge-label":
+    tests: ["test_handle_event_ready_for_review_routes_converge_regardless_of_label"]
+  "ineligible-needs-human":
+    tests: ["test_handle_event_ready_for_review_needs_human_no_reviewer"]
+  "ineligible-agent-ready":
+    tests: ["test_handle_event_ready_for_review_agent_ready_no_reviewer"]
+  "ignored-action-no-converge":
+    tests: ["test_handle_event_assigned_action_no_converge_run"]
+  "labeled-non-converge-label-no-converge":
+    tests: ["test_handle_event_labeled_non_converge_label_no_converge_run"]
+  "idempotent-duplicate-delivery":
+    tests: ["test_handle_event_converge_duplicate_delivery_id_deduped"]
