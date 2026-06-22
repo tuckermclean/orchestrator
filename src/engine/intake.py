@@ -45,10 +45,9 @@ class IntakeEngine:
         Steps (SPEC §10.4):
           1. Fetch the issue.
           2. decide_intake(issue, allowlist) → 'admit' | 'queue'  [pure, sync — I4]
-          3. Write audit record to DB (I6).
-          4. Dispatch triager (forge_token_scope='repo-comment' — I5).
-          5a. admit → set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK])  (atomic — I7)
-          5b. queue → set_labels([LABEL_TRIAGE, LABEL_AWAITING_PROMOTION]) (atomic — I7)
+          3. Dispatch triager (forge_token_scope='repo-comment' — I5).
+          4. set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK | LABEL_AWAITING_PROMOTION])  (atomic — I7)
+          5. Write audit record to DB (I6) — after observable state is committed.
 
         Returns the triager RunHandle, or None if dispatch fails.
         """
