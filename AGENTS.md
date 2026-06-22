@@ -370,6 +370,10 @@ Hard-won lessons from driving issues through the **implement → review-swarm �
 adjudicate** pipeline in this repo. None are derivable from the specs or the code — a
 freshly-spawned agent will not have them. Read these before orchestrating multi-PR work.
 
+Throughout, *the adjudicator* is the orchestrating agent acting as the terminal converge
+gate — the role the converge reviewer plays at R3 with the `ADJUDICATION_MODEL` (Opus)
+verdict (`SPEC.md §5`). It runs the final review and stamps approve or escalate.
+
 **Rebase every PR branch onto current `main` before the final review and before merge.**
 This repo squash-merges PRs, which creates two traps. (1) *Stranded content*: a PR stacked
 on another branch can be merged into that branch while the base is *separately*
