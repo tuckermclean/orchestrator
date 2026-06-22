@@ -41,6 +41,38 @@
   "runtime-validation":  # SPEC §8.3 — Literal[1,2,3]/bool/int|"unknown" enforced at runtime
     tests: ["test_decide_round_invalid_round_zero", "test_decide_round_invalid_round_four", "test_decide_round_invalid_ci_green", "test_decide_round_invalid_blockers", "test_decide_round_invalid_blockers_mixed"]
 
+"§8.4":  # decide_cap_action
+  "row-1-always-escalate":
+    tests: ["test_decide_cap_action_redispatch_zero_with_issue", "test_decide_cap_action_redispatch_zero_no_issue", "test_decide_cap_action_at_max_with_issue", "test_decide_cap_action_at_max_no_issue", "test_decide_cap_action_below_max_with_issue", "test_decide_cap_action_below_max_no_issue", "test_decide_cap_action_above_max_with_issue", "test_decide_cap_action_above_max_no_issue", "test_decide_cap_action_large_count", "test_decide_cap_action_all_counts_escalate"]
+  "max-redispatches-constant":
+    tests: ["test_max_redispatches_is_named_constant"]
+
+"§8.3-integration":  # decide_round engine wiring (§8.3 rows exercised in integration tests)
+  "row-2-fix-r1-engine-wired":
+    tests: ["test_converge_r1_blocker_fix_r2_approve", "test_converge_r1_fixer_allowed_refs_match_specialists"]
+  "row-4-fix-r2-engine-wired":
+    tests: ["test_converge_r1_blocker_fix_r2_approve", "test_converge_r3_adjudication_model"]
+  "row-3-no-progress-engine-wired":
+    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap"]
+  "row-5-no-verdict-engine-wired":
+    tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
+  "row-6-ci-red-engine-wired":
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks"]
+  "row-7-cap-reached-engine-wired":
+    tests: ["test_converge_cap_reached_e5"]
+
+"§6-escalations":  # Escalation taxonomy (§6) — engine wiring
+  "E2-no-progress":
+    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap"]
+  "E3-no-verdict":
+    tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
+  "E4-ci-red":
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks"]
+  "E5-cap-reached":
+    tests: ["test_converge_cap_reached_e5"]
+  "E11-fixer-timeout":
+    tests: ["test_converge_fixer_timeout_e11", "test_converge_fixer_timeout_r2_e11"]
+
 "§8.12":  # decide_specialists
   "base-set-only":
     tests: ["test_decide_specialists_base_set_only", "test_decide_specialists_empty_paths_returns_base"]

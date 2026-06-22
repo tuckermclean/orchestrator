@@ -448,6 +448,13 @@ class FakeHarnessPort:
         # When True, dispatched runs stay "in_progress" (never auto-complete) so the
         # Engine's _await_run hits its CI_WAIT_S timeout — exercises the cancel path.
         self.never_completes: bool = False
+        # Number of next dispatches that will time out (never complete).  Useful for
+        # tests that need the Nth dispatch (e.g. a fixer run) to time out while earlier
+        # reviewer runs complete normally.  Each dispatched run decrements this by 1.
+        self._timeout_next_n: int = 0
+        # Post-trigger CI check overrides: when trigger_ci is called and this is non-empty,
+        # the checks at the given index (call count) replace the forge's current check runs.
+        self._trigger_ci_check_scripts: list[list[CheckRun]] = []
 
         # Call logs
         self.dispatch_calls: list[DispatchContext] = []
@@ -464,6 +471,28 @@ class FakeHarnessPort:
         if self._forge is None:
             raise ValueError("script_reviewer_verdicts requires a wired FakeForgePort")
         self._verdict_script = list(verdicts)
+
+    def script_fixer_timeout(self, *, after_n_dispatches: int = 0) -> None:
+        """Make the next dispatch (after `after_n_dispatches` normal completions) time out.
+
+        Use this to inject a fixer timeout while earlier reviewer dispatches complete
+        normally.  `after_n_dispatches=0` makes the very next dispatch time out;
+        `after_n_dispatches=1` lets one dispatch complete normally then times out the next.
+        """
+        # We implement this as: after the next `after_n_dispatches` dispatches, the
+        # following dispatch stays in_progress.  We track via _timeout_next_n.
+        self._timeout_next_n = after_n_dispatches + 1
+
+    def script_trigger_ci_checks(self, *check_lists: list[CheckRun]) -> None:
+        """Script the check runs returned by the forge after each trigger_ci call.
+
+        Each call to trigger_ci consumes one list from this script and overwrites the
+        forge's check_runs for the PR.  If the script is exhausted the check runs remain
+        unchanged.  Requires a wired FakeForgePort.
+        """
+        if self._forge is None:
+            raise ValueError("script_trigger_ci_checks requires a wired FakeForgePort")
+        self._trigger_ci_check_scripts = list(check_lists)
 
     def _emit_verdict(self, context: DispatchContext) -> None:
         """If this is a reviewer dispatch and a verdict is queued, write it to the forge."""
@@ -511,9 +540,17 @@ class FakeHarnessPort:
         # Reviewer dispatches write their queued verdict to the forge branch.
         self._emit_verdict(context)
 
+        # Determine whether this dispatch should time out (stay in_progress).
+        # `never_completes` is a global flag; `_timeout_next_n` is a countdown: once
+        # it reaches 1, this dispatch times out and the counter is reset.
+        should_timeout = self.never_completes
+        if not should_timeout and self._timeout_next_n > 0:
+            self._timeout_next_n -= 1
+            should_timeout = self._timeout_next_n == 0
+
         # Default: immediately completed/success (overridable via seed_run). When
-        # never_completes is set, the run stays in_progress to force a timeout/cancel.
-        if self.never_completes:
+        # timeout flag is set, the run stays in_progress to force a timeout/cancel.
+        if should_timeout:
             self._runs[run_id] = RunStatus(state="in_progress")
         else:
             self._runs[run_id] = RunStatus(state="completed", conclusion="success")
@@ -569,6 +606,11 @@ class FakeHarnessPort:
 
     async def trigger_ci(self, pr_ref: PRRef) -> None:
         self.trigger_ci_calls.append(pr_ref)
+        # Apply next scripted check list (if any) to the wired forge.
+        if self._forge is not None and self._trigger_ci_check_scripts:
+            checks = self._trigger_ci_check_scripts.pop(0)
+            key = self._forge._pr_key(pr_ref)
+            self._forge._check_runs[key] = list(checks)
 
     async def get_run_status(self, handle: RunHandle) -> RunStatus:
         return self._runs.get(

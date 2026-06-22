@@ -1,14 +1,14 @@
-"""Engine.converge — converge sub-machine, round-1 approve happy path (SPEC §10.2).
+"""Engine.converge — full 3-round converge sub-machine (SPEC §5, §6, §8.3, §8.4, §10.2).
 
-This module implements the converge entry point. The full 3-round loop is specified in
-SPEC §10.2; this build covers the happy path: idempotency gate → protected-path check (E1)
-→ empty-diff check (E6) → seed sentinel → reviewer dispatch → poll CI → resolve_blockers →
-decide_round → on `approve` finalize. The `fix`/escalation branches are stubbed to escalate
-or no-op pending their dedicated issues.
+Implements the complete converge loop: happy-path approve, fix (R1/R2), and all escalation
+paths: no-progress (E2), no-verdict (E3), ci-red (E4), cap-reached (E5), fixer-timeout (E11).
+Protected-path (E1) and empty-diff (E6) gates are also implemented.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -21,11 +21,13 @@ from src.domain.types import (
     _CI_GREEN_CONCLUSIONS,
     ADJUDICATION_MODEL,
     BLOCKING_CI_CHECKS,
+    CI_WAIT_S,
     CONVERGE_ROUNDS,
     DEFAULT_SWARM_MODEL,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
     LABEL_READY,
+    NO_VERDICT_RETRY_CAP,
     PROTECTED_PATHS,
     SENTINEL_SIGNATURE,
     SENTINEL_VERDICT,
@@ -41,7 +43,10 @@ if TYPE_CHECKING:
 
 _VERDICT_PATH = ".converge-verdict.json"
 _CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
+_CONVERGE_FIXER_CONTRACT = "agents/converge-fixer.md"
 _REVIEWER_MAX_TURNS = 60
+_FIXER_MAX_TURNS = 60
+_NO_VERDICT_RETRY_MARKER = "<!-- orchestrator:converge-retry -->"
 
 
 def _touches_protected_path(changed_paths: list[str]) -> bool:
@@ -77,6 +82,35 @@ async def _read_verdict(engine: Engine, pr_ref: PRRef) -> Verdict:
         return Verdict.model_validate_json(raw)
     except ValueError:
         return SENTINEL_VERDICT
+
+
+async def _poll_ci_until_green(engine: Engine, pr_ref: PRRef) -> bool:
+    """Poll all BLOCKING_CI_CHECKS up to CI_WAIT_S after a trigger_ci.
+
+    Returns True if all checks become green within the deadline, False otherwise.
+    Yields to the event loop between polls so async tasks are not starved.
+    """
+    deadline = time.monotonic() + CI_WAIT_S
+    while True:
+        checks = await engine.forge.get_check_runs(pr_ref)
+        if _ci_green(checks):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0)
+
+
+async def _terminal_escalate(engine: Engine, pr_ref: PRRef) -> PRState:
+    """Add LABEL_NEEDS_HUMAN, reset counter, clear converge state → ESCALATED.
+
+    Write order is normative (SPEC §10.2): label write MUST precede DB mutations.
+    """
+    await engine.forge.add_label(pr_ref, LABEL_NEEDS_HUMAN)
+    if engine.counter is not None:
+        await engine.counter.reset(pr_ref, "converge-retry")
+    assert engine.converge_state is not None
+    await engine.converge_state.clear_converge_state(pr_ref)
+    return "ESCALATED"
 
 
 async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
@@ -163,19 +197,68 @@ async def converge(engine: Engine, pr_ref: PRRef) -> PRState:
 
         token = decide_round(round_literal, blockers, ci_green, prev_sigs, curr_sigs)
 
-        await converge_state.set_converge_round(pr_ref, r)
+        # Conditionally persist round (only for advancing decisions — NOT P11 re-arm).
+        # P11: escalate:no-verdict when retry_count < NO_VERDICT_RETRY_CAP does NOT advance.
+        is_no_verdict_retry = False
+        if token == "escalate:no-verdict" and engine.counter is not None:
+            retry_count = await engine.counter.get_count(pr_ref, "converge-retry")
+            is_no_verdict_retry = retry_count < NO_VERDICT_RETRY_CAP
+
+        if not is_no_verdict_retry:
+            await converge_state.set_converge_round(pr_ref, r)
+
         await forge.copy_file_on_branch(
             pr_ref, _VERDICT_PATH, f".converge-verdict-r{r}.json"
         )
 
+        # Act on token.
         if token == "approve":
             return await _finalize_approve(engine, pr_ref, accumulated_nits)
 
-        # fix / escalation branches are out of scope for the happy-path build; a
-        # non-approve outcome escalates to a human (placeholder pending their issues).
-        await forge.add_label(pr_ref, LABEL_NEEDS_HUMAN)
-        await converge_state.clear_converge_state(pr_ref)
-        return "ESCALATED"
+        if token == "fix":
+            # R1/R2: dispatch the fixer, await it; on timeout → E11.
+            fixer_context = DispatchContext(
+                pr_ref=pr_ref,
+                contract=_CONVERGE_FIXER_CONTRACT,
+                model=DEFAULT_SWARM_MODEL,
+                max_turns=_FIXER_MAX_TURNS,
+                forge_token_scope="repo-branch",
+                allowed_agent_refs=specialist_refs,
+            )
+            fixer_handle = await engine.harness.dispatch(fixer_context)
+            completed = await engine._await_run(fixer_handle)
+            if not completed:
+                # Fixer timed out — cancel already happened inside _await_run.
+                return await _terminal_escalate(engine, pr_ref)
+            # Fixer completed; advance to next round (continue loop).
+            continue
+
+        if token == "escalate:no-progress":
+            return await _terminal_escalate(engine, pr_ref)
+
+        if token == "escalate:no-verdict":
+            # is_no_verdict_retry was computed above.
+            if is_no_verdict_retry:
+                # Post re-arm comment and increment the retry counter (P11).
+                await forge.post_comment(pr_ref, _NO_VERDICT_RETRY_MARKER)
+                if engine.counter is not None:
+                    await engine.counter.increment(pr_ref, "converge-retry")
+                # Do NOT persist round; RC-3 or direct trigger resumes at this round.
+                return "CONVERGING"
+            return await _terminal_escalate(engine, pr_ref)
+
+        if token == "escalate:ci-red":
+            # OQ-1: trigger CI, then re-poll ALL BLOCKING_CI_CHECKS up to CI_WAIT_S.
+            await engine.harness.trigger_ci(pr_ref)
+            recovered = await _poll_ci_until_green(engine, pr_ref)
+            if recovered:
+                # P9: full approve actions.
+                return await _finalize_approve(engine, pr_ref, accumulated_nits)
+            return await _terminal_escalate(engine, pr_ref)
+
+        if token == "escalate:cap-reached":
+            # D3: work never discarded — always a human problem.
+            return await _terminal_escalate(engine, pr_ref)
 
     # Loop exhausted without a decision (start > CONVERGE_ROUNDS): no further action.
     return "CONVERGING"

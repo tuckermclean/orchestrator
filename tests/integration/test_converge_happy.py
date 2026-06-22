@@ -176,23 +176,28 @@ async def test_converge_reviewer_timeout_cancels_handle(
     """On reviewer CI_WAIT_S timeout, the engine cancels the reviewer handle (SPEC §10.2 4b).
 
     A ghost reviewer must not complete later and overwrite the next round's sentinel/verdict.
+    With never_completes=True the fixer also times out (R1 sentinel → fix → fixer timeout
+    → E11) so there are 2 dispatches and 2 cancels; the final state is ESCALATED (E11).
     """
     # Force an immediate timeout in _await_run (deadline = now + 0).
     monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 0)
 
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
-    harness.never_completes = True  # reviewer run stays in_progress → _await_run times out
+    harness.never_completes = True  # all runs stay in_progress → _await_run times out
     _green_pr(forge, changed_files=["src/foo.py"])
     engine = _engine(forge, harness)
 
     state = await engine.converge(_PR)
 
-    # The reviewer was dispatched, timed out, and was cancelled with its own handle.
-    assert len(harness.dispatch_calls) == 1
-    assert len(harness.cancel_calls) == 1
+    # Reviewer dispatched + timed out; sentinel verdict (1 blocker) → fix → fixer dispatched
+    # + timed out (E11).
+    assert len(harness.dispatch_calls) == 2
+    assert len(harness.cancel_calls) == 2
     reviewer_run_id = "fake-run-1"
+    fixer_run_id = "fake-run-2"
     assert harness.cancel_calls[0].run_id == reviewer_run_id
-    # Sentinel verdict survives (reviewer never wrote one) → non-approve → escalates.
+    assert harness.cancel_calls[1].run_id == fixer_run_id
+    # Fixer timeout → terminal_escalate(E11).
     assert state == "ESCALATED"
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls

@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, type ConvergeDetail as ConvergeDetailType, type ConvergeRound } from "../api";
+import {
+  api,
+  type ConvergeDetail as ConvergeDetailType,
+  type ConvergeFixerRun,
+  type ConvergeRound,
+} from "../api";
 
 const card: React.CSSProperties = {
   background: "#161b22",
@@ -18,6 +23,51 @@ const tokenColor = (token: string): string => {
 
 const ciGreen = (conclusion: string | null): boolean =>
   conclusion === "success" || conclusion === "skipped" || conclusion === "neutral";
+
+function FixerRunBadge({ fixer }: { fixer: ConvergeFixerRun }) {
+  const color = fixer.timed_out ? "#f85149" : "#58a6ff";
+  const label = fixer.timed_out ? "fixer: timed out (E11)" : "fixer: completed";
+  return (
+    <div
+      style={{
+        marginTop: "12px",
+        padding: "8px 12px",
+        borderRadius: "6px",
+        background: "#0d1117",
+        border: `1px solid ${color}`,
+        fontSize: "13px",
+        color,
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+      }}
+    >
+      <span
+        role="img"
+        aria-label={fixer.timed_out ? "fixer timed out" : "fixer completed"}
+      >
+        {fixer.timed_out ? "⏱" : "🔧"}
+      </span>
+      <span>{label}</span>
+      {fixer.run_id && (
+        <code
+          style={{
+            background: "#161b22",
+            borderRadius: "4px",
+            padding: "1px 5px",
+            fontSize: "11px",
+            color: "#8b949e",
+          }}
+        >
+          {fixer.run_id}
+        </code>
+      )}
+      <span style={{ marginLeft: "auto", color: "#8b949e", fontSize: "12px" }}>
+        model: {fixer.model}
+      </span>
+    </div>
+  );
+}
 
 function RoundAccordion({ round }: { round: ConvergeRound }) {
   const [open, setOpen] = useState(round.round === 1);
@@ -168,6 +218,9 @@ function RoundAccordion({ round }: { round: ConvergeRound }) {
               ))}
             </div>
           </div>
+
+          {/* Fixer run — present when the token was "fix" and a fixer was dispatched */}
+          {round.fixer_run && <FixerRunBadge fixer={round.fixer_run} />}
         </div>
       )}
     </div>
@@ -211,18 +264,36 @@ export default function ConvergeDetail() {
             <div style={{ fontSize: "16px", fontWeight: 600, marginBottom: "8px" }}>
               {detail.pr_title}
             </div>
-            <span
-              style={{
-                padding: "2px 10px",
-                borderRadius: "12px",
-                fontSize: "12px",
-                fontWeight: 600,
-                background: "#21262d",
-                color: "#58a6ff",
-              }}
-            >
-              {detail.state}
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+              <span
+                style={{
+                  padding: "2px 10px",
+                  borderRadius: "12px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  background: "#21262d",
+                  color: "#58a6ff",
+                }}
+              >
+                {detail.state}
+              </span>
+              {detail.escalation_cause && (
+                <span
+                  aria-label={`Escalation cause: ${detail.escalation_cause}`}
+                  style={{
+                    padding: "2px 10px",
+                    borderRadius: "12px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    background: "#3d1a1a",
+                    color: "#f85149",
+                    border: "1px solid #f8514944",
+                  }}
+                >
+                  {detail.escalation_cause}
+                </span>
+              )}
+            </div>
           </div>
 
           {detail.rounds.length === 0 && (

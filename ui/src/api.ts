@@ -49,6 +49,13 @@ export interface ConvergeCiCheck {
   conclusion: string | null;
 }
 
+export interface ConvergeFixerRun {
+  /** run_id of the harness fixer dispatch for this round, null if fixer timed out */
+  run_id: string | null;
+  model: string;
+  timed_out: boolean;
+}
+
 export interface ConvergeRound {
   round: 1 | 2 | 3;
   model: string;
@@ -56,12 +63,16 @@ export interface ConvergeRound {
   specialists: string[];
   verdict: ConvergeVerdict;
   ci_checks: ConvergeCiCheck[];
+  /** Fixer run details — present for rounds where a fixer was dispatched (R1, R2 with fix token) */
+  fixer_run: ConvergeFixerRun | null;
 }
 
 export interface ConvergeDetail {
   pr_ref: { repo: { owner: string; name: string }; number: number };
   pr_title: string;
   state: string;
+  /** SPEC §6 escalation code (E2–E11) when the PR is ESCALATED, null otherwise */
+  escalation_cause: string | null;
   rounds: ConvergeRound[];
 }
 
