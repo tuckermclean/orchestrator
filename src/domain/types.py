@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 # ---------------------------------------------------------------------------
 # GitHub auto-closing keyword regex — https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue
@@ -24,9 +24,14 @@ _CLOSING_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 
+# Safe repo component pattern: GitHub owner/repo names are alphanumeric, hyphens, underscores, dots.
+# Reject anything else to block path-traversal in URL construction (e.g. "../.." in owner/name).
+_REPO_COMPONENT_PATTERN = r"^[A-Za-z0-9_.\-]+$"
+
+
 class RepoRef(BaseModel):
-    owner: str
-    name: str
+    owner: Annotated[str, Field(pattern=_REPO_COMPONENT_PATTERN)]
+    name: Annotated[str, Field(pattern=_REPO_COMPONENT_PATTERN)]
 
 
 class IssueRef(BaseModel):

@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import _make_router
+from src.api.webhook import _make_webhook_router
 from src.db.audit import AuditLog
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
@@ -23,8 +24,17 @@ from src.service.orchestrator import OrchestratorService
 def create_app(
     service: OrchestratorService,
     lifespan: Callable[[FastAPI], AbstractAsyncContextManager[None]] | None = None,
+    webhook_secret: str | None = None,
 ) -> FastAPI:
-    """Create the FastAPI application, mounting static UI if built."""
+    """Create the FastAPI application, mounting static UI if built.
+
+    Args:
+        service: The OrchestratorService instance.
+        lifespan: Optional ASGI lifespan context manager.
+        webhook_secret: HMAC-SHA256 secret for validating GitHub webhook payloads.
+            When provided, mounts POST /api/webhook.  When absent (dev mode),
+            the webhook endpoint is not registered.
+    """
     app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
 
     # CORS for dev (Vite dev server at :5173)
@@ -38,6 +48,10 @@ def create_app(
 
     # Register API routes
     app.include_router(_make_router(service))
+
+    # Register webhook ingress when a secret is configured
+    if webhook_secret:
+        app.include_router(_make_webhook_router(service, webhook_secret))
 
     # Serve Vite build if it exists
     ui_dist = Path(__file__).parent.parent.parent / "ui" / "dist"
@@ -115,18 +129,55 @@ async def _seed_demo_data(service: OrchestratorService) -> None:
 
 
 
+def _build_prod_service() -> tuple[OrchestratorService, str | None]:
+    """Wire real ports when FORGE_TOKEN is set; fall back to dev mode otherwise."""
+    from src.ports.provider import PortProvider
+
+    forge_token = os.environ.get("FORGE_TOKEN", "")
+    if not forge_token:
+        return _build_dev_service(), None
+
+    webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
+
+    # For the production singleton we default to a placeholder repo; the service
+    # routes per-event to the repo extracted from each payload.
+    default_repo = RepoRef(
+        owner=os.environ.get("GITHUB_OWNER", "demo"),
+        name=os.environ.get("GITHUB_REPO", "repo"),
+    )
+    provider = PortProvider.from_env()
+    forge, harness, session = provider.ports(default_repo)
+    audit = AuditLog()
+
+    # I1: parse ALLOWLIST from env (comma-separated GitHub logins).
+    # An empty/unset ALLOWLIST disables the gate (appropriate for private repos).
+    allowlist_raw = os.environ.get("ALLOWLIST", "")
+    allowlist = [u.strip() for u in allowlist_raw.split(",") if u.strip()]
+
+    service = OrchestratorService(
+        forge=forge,
+        harness=harness,
+        session=session,
+        audit=audit,
+        allowlist=allowlist,
+    )
+    return service, webhook_secret
+
+
 # Singleton for ASGI app (used by uvicorn)
-_service = _build_dev_service()
+_service, _webhook_secret = _build_prod_service()
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _service.startup()
-    await _seed_demo_data(_service)
+    # Only seed demo data in dev mode (no real forge token)
+    if not os.environ.get("FORGE_TOKEN"):
+        await _seed_demo_data(_service)
     yield
 
 
-app = create_app(_service, lifespan=_lifespan)
+app = create_app(_service, lifespan=_lifespan, webhook_secret=_webhook_secret)
 
 
 if __name__ == "__main__":
