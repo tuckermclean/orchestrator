@@ -2,6 +2,7 @@ import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import Runs from "./pages/Runs";
 import RunDetail from "./pages/RunDetail";
+import ConvergeDetail from "./pages/ConvergeDetail";
 import Triage from "./pages/Triage";
 
 const styles = {
@@ -53,6 +54,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:run_id" element={<RunDetail />} />
+          <Route path="/prs/:owner/:repo/:number/converge" element={<ConvergeDetail />} />
           <Route path="/triage" element={<Triage />} />
         </Routes>
       </main>

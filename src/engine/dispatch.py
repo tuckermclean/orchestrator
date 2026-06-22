@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import time
+
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
     _CLOSING_RE,
+    CI_WAIT_S,
     LABEL_AGENT_WORK,
     LABEL_IMPLEMENTING,
     DispatchContext,
     IssueRef,
     PRRef,
+    PRState,
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
@@ -110,3 +114,27 @@ class Engine:
             return handle
 
         return None
+
+    async def converge(self, pr_ref: PRRef) -> PRState:
+        """Run the converge sub-machine for one PR (SPEC §10.2)."""
+        from src.engine.converge import converge as _converge
+
+        return await _converge(self, pr_ref)
+
+    async def _await_run(self, handle: RunHandle) -> bool:
+        """Poll a dispatched run until completed or CI_WAIT_S elapses.
+
+        Returns True if the run completed. On `CI_WAIT_S` timeout, cancels the run
+        (`harness.cancel`) before returning False so a ghost agent cannot complete later
+        and overwrite the next round's init sentinel or verdict file (SPEC §9.2, §10.2
+        step 4b). Idempotent cancel — safe for both reviewer and fixer handles. The fake
+        harness completes synchronously; the real adapter honours the wall-clock budget.
+        """
+        deadline = time.monotonic() + CI_WAIT_S
+        while True:
+            status = await self.harness.get_run_status(handle)
+            if status.state == "completed":
+                return True
+            if time.monotonic() >= deadline:
+                await self.harness.cancel(handle)
+                return False

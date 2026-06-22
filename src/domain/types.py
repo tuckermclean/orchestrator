@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
@@ -237,6 +238,70 @@ CONVERGE_REVIEW_BASE = [
     "engineering-security-engineer.md",
     "engineering-code-reviewer.md",
 ]
+
+
+@dataclass(frozen=True)
+class SpecialistRoute:
+    """One row of SPECIALIST_ROUTING (SPEC §8.12): glob patterns → agent refs."""
+
+    patterns: tuple[str, ...]
+    agent_refs: tuple[str, ...]
+
+
+# SPECIALIST_ROUTING — iterated in definition order (NOT a set); SPEC §8.12.
+SPECIALIST_ROUTING: tuple[SpecialistRoute, ...] = (
+    SpecialistRoute(
+        patterns=("**/migrations/**", "**/*.sql", "**/schema*"),
+        agent_refs=("engineering-database-optimizer.md",),
+    ),
+    SpecialistRoute(
+        patterns=("**/*.tsx", "**/*.css", "**/components/**", "**/ui/**"),
+        agent_refs=("testing-accessibility-auditor.md",),
+    ),
+    SpecialistRoute(
+        patterns=("**/api/**", "**/routes/**", "**/handlers/**"),
+        agent_refs=("testing-api-tester.md",),
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# BLOCKING_CI_CHECKS — ordered; all must be green before approve (SPEC §7)
+# ---------------------------------------------------------------------------
+
+BLOCKING_CI_CHECKS: tuple[str, ...] = (
+    "Type Check",
+    "Lint",
+    "Integration Tests",
+    "Docker Build & Scan",
+    "Helm Lint",
+    "Helm Kubeconform",
+)
+
+# A CI check counts as green when its conclusion is one of these (SPEC §7).
+_CI_GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
+
+# ---------------------------------------------------------------------------
+# Verdict — converge-round result, written to .converge-verdict.json (SPEC §5, §7)
+# ---------------------------------------------------------------------------
+
+# Reserved sentinel signature; never a real blocker slug (SPEC §5, §7).
+SENTINEL_SIGNATURE = "verdict-file-not-written"
+
+
+class Verdict(BaseModel):
+    blockers: int
+    suggestions: int
+    nits: list[str]
+    blocker_signatures: list[str]
+
+
+# Init sentinel seeded before each reviewer run (SPEC §5).
+SENTINEL_VERDICT = Verdict(
+    blockers=1,
+    suggestions=0,
+    nits=[],
+    blocker_signatures=[SENTINEL_SIGNATURE],
+)
 
 
 # ---------------------------------------------------------------------------
