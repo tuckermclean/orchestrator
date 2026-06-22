@@ -96,19 +96,26 @@ async def test_await_run_polls_sleep_between_checks(
 async def test_await_run_timeout_sleeps_then_cancels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On timeout, _await_run still sleeps between polls and cancels the run.
+    """On the timeout path, _await_run sleeps between polls *before* cancelling.
 
-    CI_WAIT_S is patched to 0 so the deadline triggers after the first not-complete
-    poll without a real wall-clock wait. The fake sleep is also patched so no real
-    I/O delay occurs.
+    A fake monotonic clock is advanced by fake_sleep, so the run stays in-flight
+    across two poll/sleep cycles and then crosses a small (patched) CI_WAIT_S
+    deadline. This exercises both the sleep-on-not-complete branch and the
+    cancel-on-timeout branch — unlike a CI_WAIT_S=0 setup, where the deadline
+    would fire before any sleep and the sleep assertion would be vacuous.
     """
-    # Zero-out the timeout so the deadline fires immediately after the first poll.
-    monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 0)
+    # Small positive budget so the deadline is reached after a couple of sleeps.
+    monkeypatch.setattr(dispatch_mod, "CI_WAIT_S", 10)
+
+    # Fake clock advanced only by fake_sleep — deterministic, no wall-clock wait.
+    clock = [0.0]
+    monkeypatch.setattr(dispatch_mod.time, "monotonic", lambda: clock[0])
 
     sleep_calls: list[Any] = []
 
     async def fake_sleep(seconds: Any) -> None:
         sleep_calls.append(seconds)
+        clock[0] += seconds  # advance toward the deadline
 
     monkeypatch.setattr(dispatch_mod.asyncio, "sleep", fake_sleep)
 
@@ -120,13 +127,13 @@ async def test_await_run_timeout_sleeps_then_cancels(
     engine = _engine(harness)
     result = await engine._await_run(handle)
 
-    # Timed out → False; handle was cancelled
+    # Timed out → False; handle cancelled exactly once.
     assert result is False
     assert len(harness.cancel_calls) == 1
     assert harness.cancel_calls[0].run_id == "run-timeout"
-    # With CI_WAIT_S=0 the deadline fires immediately after the first poll, so the
-    # cancel branch is taken before the sleep — sleep count may be 0 here.
-    # The important assertion is that no real sleep delay occurred (fake_sleep was used).
+    # The sleep-on-not-complete branch ran at least once before the deadline fired,
+    # and every sleep used POLL_INTERVAL_S spacing (here: [5, 5] → deadline at 10).
+    assert len(sleep_calls) >= 1
     assert all(s == POLL_INTERVAL_S for s in sleep_calls)
 
 
