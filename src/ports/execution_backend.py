@@ -570,6 +570,9 @@ class K8sJobBackend:
         )
         script = (
             "set -e\n"
+            # HOME must be writable: the agent-runner user has no home dir
+            # (useradd --no-create-home); claude's tools write under HOME (#95).
+            "export HOME=/workspace\n"
             # Step 1: clone the repo (GH_TOKEN via env — not in argv).
             f"{gh_insteadof} "
             f"clone --depth 1{branch_flag} {shlex.quote(clone_url)} /workspace/repo\n"
