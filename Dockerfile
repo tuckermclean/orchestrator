@@ -41,10 +41,12 @@ COPY pyproject.toml ./
 # Stub src/__init__.py so hatchling can resolve the package at install time
 RUN mkdir -p src && touch src/__init__.py
 
-# Install runtime dependencies into an isolated venv
+# Install runtime dependencies into an isolated venv.
+# Include the [k8s] extra: the control-plane builds K8sJobBackend at boot when
+# HARNESS_EXECUTION_BACKEND=k8s, which imports the kubernetes client (#51).
 RUN python -m venv /app/venv \
  && /app/venv/bin/pip install --no-cache-dir --upgrade pip \
- && /app/venv/bin/pip install --no-cache-dir .
+ && /app/venv/bin/pip install --no-cache-dir ".[k8s]"
 
 # Copy full source and install (no-deps: deps already installed above)
 COPY . .
