@@ -62,12 +62,14 @@ LABEL org.opencontainers.image.agent-pack.ref="${AGENT_PACK_PINNED_REF}"
 
 # --filter=blob:none: blobless clone works reliably at any pinned SHA (AGENTS.md §8)
 # rev-parse assertion: fails the build if checkout landed on the wrong commit
-# basename-collision guard: fails loudly if pack ever has duplicate .md names
+# Bake specialist agent files flat (basename = AgentRef, AGENTS.md §7). Per-directory
+# README.md files are NOT agents and are the one duplicate basename in the pack — exclude
+# them. The collision guard then still fails loudly on genuine duplicate AgentRefs.
 RUN git clone --no-tags --filter=blob:none "${AGENT_PACK_REPO_URL}" /tmp/agency-agents \
  && git -C /tmp/agency-agents checkout "${AGENT_PACK_PINNED_REF}" \
  && [ "$(git -C /tmp/agency-agents rev-parse HEAD)" = "${AGENT_PACK_PINNED_REF}" ] \
  && mkdir -p "/app/${AGENT_PACK_DEST_DIR}" \
- && find /tmp/agency-agents -mindepth 2 -name "*.md" | while IFS= read -r f; do \
+ && find /tmp/agency-agents -mindepth 2 -name "*.md" ! -iname "README.md" | while IFS= read -r f; do \
       target="/app/${AGENT_PACK_DEST_DIR}/$(basename "$f")"; \
       [ -e "$target" ] && { echo "ERROR: basename collision: $f" >&2; exit 1; }; \
       cp "$f" "$target"; \
