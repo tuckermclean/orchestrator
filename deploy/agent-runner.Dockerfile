@@ -61,6 +61,11 @@ ARG AGENT_PACK_REPO_URL="https://github.com/msitarzewski/agency-agents"
 ARG AGENT_PACK_PINNED_REF="d6553e261e595c651064f899a6c33dd5aa71c9e3"
 ARG AGENT_PACK_DEST_DIR=".agents"
 
+# Re-declare in this stage so the version/revision LABELs below resolve (the
+# ARGs before the first FROM are global but not in-scope inside a stage) (#97).
+ARG VERSION=0.0.0-dev
+ARG GIT_SHA=unknown
+
 LABEL org.opencontainers.image.source="https://github.com/tuckermclean/orchestrator"
 LABEL org.opencontainers.image.description="Orchestrator agent-runner (K8s Job executor)"
 LABEL org.opencontainers.image.licenses="MIT"
