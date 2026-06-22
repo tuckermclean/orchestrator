@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "orchestrator.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orchestrator.labels" . | nindent 4 }}
+data:
+  # GitHub owner/repo for the default repo reference
+  GITHUB_OWNER: {{ .Values.config.GITHUB_OWNER | quote }}
+  GITHUB_REPO: {{ .Values.config.GITHUB_REPO | quote }}
+  # Comma-separated GitHub login allowlist (empty = all admitted)
+  ALLOWLIST: {{ .Values.config.ALLOWLIST | quote }}
+  # Reconciler schedule (must match RECONCILER_CRON constant in SPEC §7)
+  RECONCILE_CRON: {{ .Values.config.RECONCILE_CRON | quote }}
+  # delivery-ID dedup LRU window size
+  DEDUP_WINDOW: {{ .Values.config.DEDUP_WINDOW | quote }}
+  # SwarmLimits (SPEC §11.2)
+  SWARM_LIMITS_GLOBAL: {{ .Values.config.SWARM_LIMITS_GLOBAL | quote }}
+  SWARM_LIMITS_PER_REPO: {{ .Values.config.SWARM_LIMITS_PER_REPO | quote }}
+  SWARM_LIMITS_RECONCILES: {{ .Values.config.SWARM_LIMITS_RECONCILES | quote }}
+  # Backing store (SQLite single-instance or Postgres for multi-replica)
+  DB_URL: {{ .Values.config.DB_URL | quote }}
+  # Reconcile mode: internal (cadence loop) or external (CronJob)
+  RECONCILE_MODE: {{ .Values.config.RECONCILE_MODE | quote }}
+  # Non-sensitive VAPID public key
+  PUSH_VAPID_PUBLIC_KEY: {{ .Values.config.PUSH_VAPID_PUBLIC_KEY | quote }}
+  # Optional OpenTelemetry exporter
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.OTEL_EXPORTER_OTLP_ENDPOINT | quote }}

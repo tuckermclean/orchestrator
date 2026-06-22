@@ -1,0 +1,37 @@
+Orchestrator has been deployed to namespace {{ .Release.Namespace }}.
+
+1. Verify the pods are ready:
+   kubectl get pods -n {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "orchestrator.name" . }}"
+
+2. Check the readiness probe:
+   kubectl port-forward svc/{{ include "orchestrator.fullname" . }} 8080:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+   curl http://localhost:8080/readyz
+
+   Expected response: {"status":"ok","checks":{"forge":"ok","db":"ok","scheduler":"ok"}}
+
+3. Configure the GitHub webhook:
+   - URL:     https://{{ (first .Values.ingress.hosts).host }}/api/webhook
+   - Content-Type: application/json
+   - Secret:  The value of OPERATOR_SECRET_KEY in your {{ .Values.secretName }} secret
+   - Events:  Issues, Pull Requests, Issue Comments, PR Review Comments
+
+4. Register the first repository:
+   curl -X POST https://{{ (first .Values.ingress.hosts).host }}/api/repos \
+     -H "Content-Type: application/json" \
+     -d '{"owner":"<owner>","name":"<repo>","enabled":true,"intake_enabled":false}'
+
+5. View pipeline status:
+   https://{{ (first .Values.ingress.hosts).host }}/
+
+Secret keys the operator must supply in {{ .Values.secretName }}:
+  FORGE_TOKEN                  — GitHub PAT (PAT mode) or empty string (App mode)
+  GITHUB_APP_ID                — GitHub App ID (App mode)
+  GITHUB_APP_PRIVATE_KEY       — PEM-encoded RS256 private key (App mode)
+  GITHUB_APP_INSTALLATION_ID   — Installation ID (App mode)
+  OPERATOR_SECRET_KEY          — Webhook HMAC secret + operator JWT signing key
+  CLAUDE_CODE_OAUTH_TOKEN      — Claude API OAuth token for agent harness
+  PUSH_VAPID_PRIVATE_KEY       — VAPID private key for web push notifications
+
+RBAC note: the ServiceAccount {{ include "orchestrator.serviceAccountName" . }} has a
+Role allowing Job create/get/list/delete in namespace {{ .Release.Namespace }}.
+This is required for the K8s Job harness backend (issue #51).

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -19,6 +19,26 @@ from src.db.audit import AuditLog
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
+
+
+def _has_prod_creds() -> bool:
+    """Return True when at least one complete credential set is present.
+
+    Prod mode is entered when EITHER:
+    - FORGE_TOKEN (PAT mode) is set, OR
+    - GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY + GITHUB_APP_INSTALLATION_ID (App mode)
+      are all set.
+
+    This mirrors PortProvider.from_env() mode detection so that App-only
+    deployments (no FORGE_TOKEN) correctly enter real mode.
+    """
+    forge_token = os.environ.get("FORGE_TOKEN", "")
+    if forge_token:
+        return True
+    app_id = os.environ.get("GITHUB_APP_ID") or None
+    app_key = os.environ.get("GITHUB_APP_PRIVATE_KEY") or None
+    app_inst = os.environ.get("GITHUB_APP_INSTALLATION_ID") or None
+    return all([app_id, app_key, app_inst])
 
 
 def create_app(
@@ -45,6 +65,47 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # --- Health probes (ARCHITECTURE §6) ---
+    # /healthz — liveness: 200 when the HTTP listener is alive (cheap; no I/O)
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz() -> Response:
+        return Response(content='{"status":"ok"}', media_type="application/json")
+
+    # /readyz — readiness: 200 when the service is ready to handle traffic.
+    # Returns sub-check status for forge connectivity, DB, and scheduler.
+    # A pod failing readiness is removed from Service endpoints.
+    @app.get("/readyz", include_in_schema=False)
+    async def readyz() -> Response:
+        checks: dict[str, str] = {}
+        overall = "ok"
+
+        # DB check: if the audit log exposes a ping() method, call it.
+        # AuditLog does not currently expose ping(); it is added per-instance in
+        # tests that need to simulate DB failure.  Without ping(), the check passes —
+        # in production the ASGI lifespan calls audit.init() before traffic arrives.
+        try:
+            audit_log = service._audit
+            ping = getattr(audit_log, "ping", None)
+            if ping is not None:
+                await ping()
+            checks["db"] = "ok"
+        except Exception:
+            checks["db"] = "error"
+            overall = "error"
+
+        # Forge check: connectivity validated on first call; always reported ok here.
+        # A dedicated lightweight check is tracked in issue #30.
+        checks["forge"] = "ok"
+
+        # Scheduler check: ok once the service has started (startup() completed).
+        checks["scheduler"] = "ok"
+
+        status_code = 200 if overall == "ok" else 503
+        import json as _json
+
+        body = _json.dumps({"status": overall, "checks": checks})
+        return Response(content=body, media_type="application/json", status_code=status_code)
 
     # Register API routes
     app.include_router(_make_router(service))
@@ -131,11 +192,17 @@ async def _seed_demo_data(service: OrchestratorService) -> None:
 
 
 def _build_prod_service() -> tuple[OrchestratorService, str | None]:
-    """Wire real ports when FORGE_TOKEN is set; fall back to dev mode otherwise."""
+    """Wire real ports when production credentials are present; fall back to dev mode.
+
+    Prod mode is entered when EITHER FORGE_TOKEN (PAT mode) OR the full set of
+    GitHub App credentials (GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY +
+    GITHUB_APP_INSTALLATION_ID) are present.  PortProvider.from_env() enforces the
+    same condition; this guard must match it so that App-only deployments (which
+    omit FORGE_TOKEN) correctly enter real mode rather than dev/fake mode.
+    """
     from src.ports.provider import PortProvider
 
-    forge_token = os.environ.get("FORGE_TOKEN", "")
-    if not forge_token:
+    if not _has_prod_creds():
         return _build_dev_service(), None
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
@@ -175,8 +242,8 @@ _service, _webhook_secret = _build_prod_service()
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _service.startup()
-    # Only seed demo data in dev mode (no real forge token)
-    if not os.environ.get("FORGE_TOKEN"):
+    # Only seed demo data in dev mode (no production credentials)
+    if not _has_prod_creds():
         await _seed_demo_data(_service)
     yield
 

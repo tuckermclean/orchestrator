@@ -1,0 +1,89 @@
+# ---------------------------------------------------------------------------
+# values-prod.yaml — production overrides for orch.dcxxiv.com
+# ---------------------------------------------------------------------------
+# This file contains NO secrets.  All sensitive values are referenced by key
+# name from the Kubernetes Secret `orchestrator-secrets` (see values.yaml).
+#
+# Install command:
+#   helm upgrade --install orchestrator ./charts/orchestrator \
+#     -n orchestrator \
+#     -f charts/orchestrator/values-prod.yaml \
+#     --set image.digest=sha256:<digest_from_release>
+# ---------------------------------------------------------------------------
+
+image:
+  repository: ghcr.io/tuckermclean/orchestrator
+  # Set image.digest at install time to pin by sha256 digest (ARCHITECTURE §5).
+  # Example: --set image.digest=sha256:abc123...
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Secret created by operator before install — see ARCHITECTURE §6 for fields:
+#   kubectl create secret generic orchestrator-secrets -n orchestrator \
+#     --from-literal=FORGE_TOKEN=... \
+#     --from-literal=GITHUB_APP_ID=... \
+#     --from-literal=GITHUB_APP_PRIVATE_KEY=... \
+#     --from-literal=GITHUB_APP_INSTALLATION_ID=... \
+#     --from-literal=OPERATOR_SECRET_KEY=... \
+#     --from-literal=CLAUDE_CODE_OAUTH_TOKEN=... \
+#     --from-literal=PUSH_VAPID_PRIVATE_KEY=...
+secretName: orchestrator-secrets
+
+config:
+  GITHUB_OWNER: "tuckermclean"
+  GITHUB_REPO: "orchestrator"
+  # ALLOWLIST: "" means all authors admitted; set to comma-separated logins to restrict
+  ALLOWLIST: ""
+  RECONCILE_CRON: "*/15 * * * *"
+  DEDUP_WINDOW: "1000"
+  SWARM_LIMITS_GLOBAL: "10"
+  SWARM_LIMITS_PER_REPO: "4"
+  SWARM_LIMITS_RECONCILES: "4"
+  # Use Postgres for multi-replica (supply DSN via a separate secret or configmap)
+  DB_URL: "sqlite:///data/orchestrator.db"
+  RECONCILE_MODE: "internal"
+  PUSH_VAPID_PUBLIC_KEY: ""
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+  hosts:
+    - host: orch.dcxxiv.com
+      paths:
+        - path: /webhook/
+          pathType: Prefix
+        - path: /api/
+          pathType: Prefix
+        - path: /push/
+          pathType: Prefix
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: orchestrator-tls
+      hosts:
+        - orch.dcxxiv.com
+
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 5Gi
+  accessMode: ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
