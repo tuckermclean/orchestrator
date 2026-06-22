@@ -13,3 +13,8 @@ dist/
 build/
 ui/dist/
 ui/node_modules/
+
+# secrets / credentials — never commit
+*.pem
+*.key
+*.p12
