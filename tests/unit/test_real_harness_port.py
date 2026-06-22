@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -921,3 +922,178 @@ def test_dispatch_context_model_pattern_rejects_injection() -> None:
             max_turns=30,
             forge_token_scope="repo-branch",
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #111 — _materialize_contract: contract reaches the agent workspace
+# ---------------------------------------------------------------------------
+
+
+def test_harness_materialize_contract_copies_to_workspace(tmp_path: Any) -> None:
+    """#111: _materialize_contract copies the contract file into repo_dir/agents/."""
+    import pathlib
+
+    # Build a fake repo dir and a fake package agents dir
+    repo_dir = str(tmp_path / "repo")
+    os.makedirs(repo_dir)
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token=_CLAUDE_TOKEN,
+        app_id=_APP_ID,
+        private_key_pem=_PRIVATE_KEY_PEM,
+        installation_id=_INSTALLATION_ID,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+    )
+
+    # Point to the real agents/ dir in the package (relative to harness.py location)
+    import src.ports.harness as _harness_mod
+    real_agents_dir = pathlib.Path(_harness_mod.__file__).parent.parent.parent / "agents"
+    assert real_agents_dir.exists(), (
+        f"Package agents/ dir not found at {real_agents_dir}; "
+        "check the repo structure"
+    )
+    # Pick any real contract file (orchestrator.md is always present)
+    assert (real_agents_dir / "orchestrator.md").exists(), (
+        "agents/orchestrator.md must exist in the package to test materialisation"
+    )
+
+    port._materialize_contract("agents/orchestrator.md", repo_dir)
+
+    dest = pathlib.Path(repo_dir) / "agents" / "orchestrator.md"
+    assert dest.exists(), (
+        f"_materialize_contract must copy the contract to {dest} (#111)"
+    )
+    # The file must be non-empty (not a zero-byte placeholder)
+    assert dest.stat().st_size > 0, "Materialised contract must be non-empty"
+
+    # The contract must be git-ignored so `git add -A` cannot sweep it into the
+    # PR (agents/** is a PROTECTED_PATH → converge E1 escalation otherwise).
+    exclude = pathlib.Path(repo_dir) / ".git" / "info" / "exclude"
+    assert exclude.exists(), "_materialize_contract must write .git/info/exclude (#111)"
+    assert "/agents/orchestrator.md" in exclude.read_text(), (
+        "Materialised contract must be added to .git/info/exclude (#111)"
+    )
+
+
+def test_harness_materialize_contract_raises_if_absent(tmp_path: Any) -> None:
+    """#111: _materialize_contract raises FileNotFoundError for a missing contract.
+
+    Fail-loud: the dispatch must not proceed if the contract cannot be found.
+    The agent must never run without its governing instructions.
+    """
+    repo_dir = str(tmp_path / "repo")
+    os.makedirs(repo_dir)
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token=_CLAUDE_TOKEN,
+        app_id=_APP_ID,
+        private_key_pem=_PRIVATE_KEY_PEM,
+        installation_id=_INSTALLATION_ID,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+    )
+
+    import pytest
+    with pytest.raises(FileNotFoundError) as exc_info:
+        port._materialize_contract("agents/no-such-contract-xyz.md", repo_dir)
+
+    # The error must mention the contract basename so it is diagnosable
+    assert "no-such-contract-xyz.md" in str(exc_info.value), (
+        "FileNotFoundError must mention the missing contract basename (#111)"
+    )
+
+
+def test_harness_materialize_contract_all_five_roles(tmp_path: Any) -> None:
+    """#111: _materialize_contract resolves all five orchestration contracts.
+
+    Confirms every role (orchestrator, implementer, converge-reviewer,
+    converge-fixer, triager) is resolvable from the package agents/ dir.
+    This verifies the baked contracts are present and the path logic is correct
+    for all dispatch roles.
+    """
+    import pathlib
+
+    repo_dir = str(tmp_path / "repo")
+    os.makedirs(repo_dir)
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token=_CLAUDE_TOKEN,
+        app_id=_APP_ID,
+        private_key_pem=_PRIVATE_KEY_PEM,
+        installation_id=_INSTALLATION_ID,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+    )
+
+    roles = [
+        "agents/orchestrator.md",
+        "agents/implementer.md",
+        "agents/converge-reviewer.md",
+        "agents/converge-fixer.md",
+        "agents/triager.md",
+    ]
+    for contract_path in roles:
+        port._materialize_contract(contract_path, repo_dir)
+        basename = contract_path.rsplit("/", 1)[-1]
+        dest = pathlib.Path(repo_dir) / "agents" / basename
+        assert dest.exists(), (
+            f"_materialize_contract must resolve contract '{contract_path}' (#111)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #112 — _configure_git_identity: repo-local git setup
+# ---------------------------------------------------------------------------
+
+
+async def test_harness_configure_git_identity_repo_local(tmp_path: Any) -> None:
+    """#112: _configure_git_identity sets user.name and user.email repo-locally.
+
+    Repo-local scope avoids clobbering the developer's global git config.
+    We initialise a bare git repo in tmp_path and verify the local config
+    is written correctly.
+    """
+    import asyncio
+    import pathlib
+
+    repo_dir = str(tmp_path / "repo")
+    # Init a real git repo so `git config` has somewhere to write
+    proc = await asyncio.create_subprocess_exec(
+        "git", "init", repo_dir,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.wait()
+    assert proc.returncode == 0, "git init must succeed"
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token=_CLAUDE_TOKEN,
+        app_id=_APP_ID,
+        private_key_pem=_PRIVATE_KEY_PEM,
+        installation_id=_INSTALLATION_ID,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+    )
+
+    await port._configure_git_identity(repo_dir, "ghp_test_token_xyz")
+
+    # Read repo-local git config and verify identity was written
+    config_path = pathlib.Path(repo_dir) / ".git" / "config"
+    assert config_path.exists(), "git repo must have a .git/config"
+    config_text = config_path.read_text()
+
+    assert "Orchestrator Agent" in config_text, (
+        "Repo-local git config must contain user.name = Orchestrator Agent (#112)"
+    )
+    assert "agent@orchestrator" in config_text, (
+        "Repo-local git config must contain user.email = agent@orchestrator (#112)"
+    )
+    # Push credential via insteadOf must be repo-local (in .git/config, not ~/.gitconfig)
+    assert "insteadOf" in config_text, (
+        "Repo-local git config must contain url.insteadOf for push auth (#112)"
+    )
+    # Token must be present in .git/config (repo-local credential helper)
+    assert "ghp_test_token_xyz" in config_text, (
+        "Push credential (GH_TOKEN) must be in repo-local .git/config (#112)"
+    )

@@ -112,14 +112,21 @@ def _run_id() -> str:
 def _make_fake_harness(
     *,
     clone_raises: Exception | None = None,
+    contract_raises: Exception | None = None,
 ) -> MagicMock:
-    """Return a fake harness with _clone_repo and _write_spawn_hook mocked."""
+    """Return a fake harness with _clone_repo, _write_spawn_hook,
+    _materialize_contract, and _configure_git_identity mocked."""
     harness = MagicMock()
     if clone_raises is not None:
         harness._clone_repo = AsyncMock(side_effect=clone_raises)
     else:
         harness._clone_repo = AsyncMock(return_value=None)
     harness._write_spawn_hook = MagicMock(return_value=None)
+    if contract_raises is not None:
+        harness._materialize_contract = MagicMock(side_effect=contract_raises)
+    else:
+        harness._materialize_contract = MagicMock(return_value=None)
+    harness._configure_git_identity = AsyncMock(return_value=None)
     harness._repo_owner = "acme"
     harness._repo_name = "myrepo"
     return harness
@@ -148,6 +155,7 @@ async def test_subprocess_backend_dispatch_calls_runner() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -174,6 +182,7 @@ async def test_subprocess_backend_clones_repo_before_running() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -201,6 +210,7 @@ async def test_subprocess_backend_writes_hook_when_refs_set() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=["engineering-code-reviewer.md"],
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -225,6 +235,7 @@ async def test_subprocess_backend_no_hook_when_refs_none() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -249,6 +260,7 @@ async def test_subprocess_backend_clone_failure_marks_failed() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -279,6 +291,7 @@ async def test_subprocess_backend_sets_in_progress() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -306,6 +319,7 @@ async def test_subprocess_backend_success_on_zero_exit() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -333,6 +347,7 @@ async def test_subprocess_backend_failure_on_nonzero_exit() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -360,6 +375,7 @@ async def test_subprocess_backend_captures_json_events() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -388,6 +404,7 @@ async def test_subprocess_backend_cancel_marks_cancelled() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -419,6 +436,7 @@ async def test_subprocess_backend_queue_sentinel_on_completion() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -736,6 +754,7 @@ async def test_k8s_backend_dispatch_creates_job() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -773,6 +792,7 @@ async def test_k8s_dispatch_does_not_clone_in_control_plane() -> None:
         claude_args=["claude", "-p", "hello"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -805,6 +825,7 @@ async def test_k8s_backend_watch_success() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -839,6 +860,7 @@ async def test_k8s_backend_watch_failure() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -871,6 +893,7 @@ async def test_k8s_backend_watch_timeout() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -917,6 +940,7 @@ async def test_k8s_backend_watch_read_error_retries() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -952,6 +976,7 @@ async def test_k8s_backend_cancel_deletes_job() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -994,6 +1019,7 @@ async def test_k8s_backend_dispatch_emits_job_created_event() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -1029,6 +1055,7 @@ async def test_k8s_backend_cleanup_job_on_success() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -1208,6 +1235,7 @@ async def test_fake_backend_dispatch_records_call() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -1233,6 +1261,7 @@ async def test_fake_backend_configure_fail() -> None:
         claude_args=["claude", "-p", "x"],
         child_env={},
         allowed_agent_refs=None,
+        contract="agents/implementer.md",
         event_store=store,
         harness=harness,
     )
@@ -1249,3 +1278,296 @@ async def test_fake_backend_cancel_records_call() -> None:
     await fake.cancel(run_id=run_id, event_store=store)
     assert run_id in fake.cancelled
     assert store.get_status(run_id).conclusion == "cancelled"
+
+
+# ===========================================================================
+# Issue #111 — contract materialisation
+# ===========================================================================
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_materialises_contract() -> None:
+    """#111: K8s entry script copies the baked contract into the clone (#111).
+
+    When a contract is provided, the script must:
+      - Check the baked contract exists at /app/agents/<basename> and exit 1 if absent.
+      - Copy it into /workspace/repo/agents/<basename>.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/orchestrator.md",
+    )
+    # Must reference the baked contract dir
+    assert "/app/agents/orchestrator.md" in script, (
+        "Entry script must reference the baked contract at /app/agents/"
+    )
+    # Must create the agents/ dir and copy the contract
+    assert "mkdir -p /workspace/repo/agents" in script
+    assert "cp" in script and "orchestrator.md" in script
+    # Must fail loudly if the baked contract is absent
+    assert "FATAL" in script or "exit 1" in script, (
+        "Entry script must fail loudly if the contract file is absent (#111)"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_gitignores_contract() -> None:
+    """#111: entry script git-ignores the materialised contract.
+
+    agents/** is a PROTECTED_PATH; if the agent's `git add -A` swept the copied
+    contract into the PR, the converge protected-path check (E1) would escalate
+    and stall a greenfield run. The script must append the repo-relative contract
+    path to .git/info/exclude so untracked copies are never staged.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/orchestrator.md",
+    )
+    assert ".git/info/exclude" in script, (
+        "Entry script must add the contract to .git/info/exclude (#111)"
+    )
+    assert "/agents/orchestrator.md" in script
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_no_contract_step_when_empty() -> None:
+    """#111: when no contract provided, entry script has no contract materialisation."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="",
+    )
+    # No /app/agents reference when contract is empty
+    assert "/app/agents/" not in script, (
+        "Entry script must not reference /app/agents/ when contract is empty"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_contract_path_is_basename_only() -> None:
+    """#111: the contract step uses only the basename, not the full path."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/converge-reviewer.md",
+    )
+    # The baked path must use the basename
+    assert "/app/agents/converge-reviewer.md" in script
+    # The destination must be agents/<basename> (not agents/agents/)
+    assert "/workspace/repo/agents/converge-reviewer.md" in script or (
+        "converge-reviewer.md" in script and "/workspace/repo/agents" in script
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-contract-materialisation")
+async def test_subprocess_backend_materialises_contract() -> None:
+    """#111: SubprocessBackend calls harness._materialize_contract when contract is set."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/orchestrator.md",
+        event_store=store,
+        harness=harness,
+    )
+    harness._materialize_contract.assert_called_once()
+    call_args = harness._materialize_contract.call_args[0]
+    assert call_args[0] == "agents/orchestrator.md", (
+        "_materialize_contract must receive the full contract path"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-contract-materialisation")
+async def test_subprocess_backend_no_materialise_when_contract_empty() -> None:
+    """#111: SubprocessBackend skips contract materialisation when contract is empty."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="",
+        event_store=store,
+        harness=harness,
+    )
+    harness._materialize_contract.assert_not_called()
+
+
+@pytest.mark.covers("§9.2", "subprocess-contract-materialisation")
+async def test_subprocess_backend_contract_failure_marks_failed() -> None:
+    """#111: SubprocessBackend marks run failed and emits error when contract absent.
+
+    Fail-loud: a missing contract is a hard error — never silently let the agent
+    run without its governing instructions.
+    """
+    runner, calls, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness(
+        contract_raises=FileNotFoundError("contract not found: /repo/agents/missing.md")
+    )
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/missing.md",
+        event_store=store,
+        harness=harness,
+    )
+    # Process must NOT be spawned — error must surface before running the agent
+    assert not calls, "ProcessRunner must not be called when contract is absent (#111)"
+    status = store.get_status(run_id)
+    assert status.state == "completed"
+    assert status.conclusion == "failure"
+    error_events = [e for e in store.get_events(run_id) if e.event_type == "error"]
+    assert error_events, "No error event recorded for missing contract (#111)"
+    assert "contract" in error_events[0].data["message"].lower(), (
+        "Error message must mention 'contract'"
+    )
+
+
+# ===========================================================================
+# Issue #112 — git identity and push auth
+# ===========================================================================
+
+
+@pytest.mark.covers("§9.2", "k8s-git-identity")
+def test_k8s_entry_script_sets_git_identity() -> None:
+    """#112: K8s entry script configures git user.name and user.email globally."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    assert "git config --global user.name" in script, (
+        "Entry script must set git user.name globally (#112)"
+    )
+    assert "git config --global user.email" in script, (
+        "Entry script must set git user.email globally (#112)"
+    )
+    # Must use a recognisable identity (not an empty string)
+    assert "Orchestrator Agent" in script or "orchestrator" in script.lower(), (
+        "Entry script must set a non-empty git identity (#112)"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-git-push-auth")
+def test_k8s_entry_script_configures_push_auth() -> None:
+    """#112: K8s entry script configures push auth via url.insteadOf using ${GH_TOKEN}."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    # Must configure push auth — insteadOf for the token
+    assert "insteadOf" in script, (
+        "Entry script must configure git url.insteadOf for push auth (#112)"
+    )
+    # I3: token must be referenced via shell variable, not literal
+    assert "${GH_TOKEN}" in script or "$GH_TOKEN" in script, (
+        "Push auth must use ${GH_TOKEN} shell variable, not a literal token (#112 / I3)"
+    )
+    # The push-auth insteadOf must cover github.com (not just the clone step)
+    assert "git config" in script and "url." in script, (
+        "Entry script must use git config for push url.insteadOf (#112)"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-git-identity")
+async def test_subprocess_backend_calls_configure_git_identity() -> None:
+    """#112: SubprocessBackend calls harness._configure_git_identity after clone."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh-token"},
+        allowed_agent_refs=None,
+        contract="agents/orchestrator.md",
+        event_store=store,
+        harness=harness,
+    )
+    harness._configure_git_identity.assert_called_once()
+    call_kwargs = harness._configure_git_identity.call_args[0]
+    # Must pass the GH_TOKEN for the push credential
+    assert "gh-token" in call_kwargs, (
+        "_configure_git_identity must receive the GH_TOKEN (#112)"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-git-identity")
+async def test_subprocess_backend_git_identity_called_before_hook() -> None:
+    """#112: _configure_git_identity is called before the I9 hook is written.
+
+    Order matters: identity must be set before the agent runs, and the hook
+    is written last so its installation order doesn't affect identity setup.
+    """
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    call_order: list[str] = []
+
+    harness = _make_fake_harness()
+
+    async def _record_git_identity(*args: Any) -> None:
+        call_order.append("git_identity")
+
+    def _record_spawn_hook(*args: Any) -> None:
+        call_order.append("spawn_hook")
+
+    harness._configure_git_identity = AsyncMock(side_effect=_record_git_identity)
+    harness._write_spawn_hook = MagicMock(side_effect=_record_spawn_hook)
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=["engineering-code-reviewer.md"],
+        contract="agents/orchestrator.md",
+        event_store=store,
+        harness=harness,
+    )
+    # git identity must be configured before the spawn hook is written
+    assert call_order.index("git_identity") < call_order.index("spawn_hook"), (
+        "_configure_git_identity must be called before _write_spawn_hook (#112)"
+    )

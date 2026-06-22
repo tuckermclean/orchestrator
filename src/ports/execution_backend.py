@@ -91,6 +91,7 @@ class ExecutionBackend(Protocol):
         claude_args: list[str],
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
+        contract: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -107,9 +108,13 @@ class ExecutionBackend(Protocol):
           claude_args:        the full claude CLI invocation to run.
           child_env:          environment for the child (I3: only scoped creds).
           allowed_agent_refs: allow-set for I9 spawn gate, or None to skip.
+          contract:           DispatchContext.contract path (e.g. "agents/orchestrator.md").
+                              Passed to the backend so it can materialise the contract
+                              into the workspace before running the agent (#111).
           event_store:        receives run events and status updates.
-          harness:            ClaudeCodeHarnessPort instance (provides _clone_repo
-                              and _write_spawn_hook helpers for SubprocessBackend).
+          harness:            ClaudeCodeHarnessPort instance (provides _clone_repo,
+                              _write_spawn_hook, and _materialize_contract helpers
+                              for SubprocessBackend).
         """
         ...
 
@@ -153,6 +158,7 @@ class FakeExecutionBackend:
         claude_args: list[str],
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
+        contract: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -165,6 +171,7 @@ class FakeExecutionBackend:
                 "claude_args": claude_args,
                 "child_env": child_env,
                 "allowed_agent_refs": allowed_agent_refs,
+                "contract": contract,
             }
         )
         if self._fail_dispatch:
@@ -223,10 +230,11 @@ class SubprocessBackend:
         claude_args: list[str],
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
+        contract: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
-        """Clone repo, write I9 hook, spawn the claude CLI subprocess and watch it."""
+        """Clone repo, materialise contract + git identity, write I9 hook, spawn claude."""
         # 1. Clone the repo into a fresh temp dir.
         work_dir = tempfile.mkdtemp(prefix=f"orch-run-{run_id[:8]}-")
         repo_dir = os.path.join(work_dir, "repo")
@@ -251,12 +259,39 @@ class SubprocessBackend:
             )
             return
 
-        # 2. Materialise the I9 PreToolUse hook when an allow-set is specified.
+        # 2. Materialise the agent contract into the clone (#111).
+        #    The contract path (e.g. "agents/orchestrator.md") is repo-relative.
+        #    Copy the file from the orchestrator package's own agents/ dir into
+        #    the cloned workspace so the agent can read it at the expected path.
+        if contract:
+            try:
+                harness._materialize_contract(contract, repo_dir)
+            except Exception as exc:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                event_store.set_status(
+                    run_id,
+                    RunStatus(state="completed", conclusion="failure"),
+                )
+                event_store.append(
+                    run_id,
+                    RunEvent(
+                        event_type="error",
+                        data={"message": f"Contract materialisation failed: {exc}"},
+                        timestamp=datetime.now(tz=UTC),
+                    ),
+                )
+                return
+
+        # 3. Configure repo-local git identity and push credentials (#112).
+        #    Repo-local scope avoids clobbering the developer's global git config.
+        await harness._configure_git_identity(repo_dir, gh_token)
+
+        # 4. Materialise the I9 PreToolUse hook when an allow-set is specified.
         #    The hook denies via EXIT CODE 2 — not 1 — per the Claude Code contract.
         if allowed_agent_refs is not None:
             harness._write_spawn_hook(repo_dir)
 
-        # 3. Spawn claude in the cloned working tree.
+        # 5. Spawn claude in the cloned working tree.
         process = await self._process_runner(claude_args, repo_dir, child_env)
         self._processes[run_id] = (process, work_dir)
 
@@ -439,6 +474,12 @@ class FakeKubeClient:
 # This MUST match the COPY destination in deploy/agent-runner.Dockerfile.
 _BAKED_HOOK_PATH = "/opt/orchestrator/i9_spawn_hook.py"
 
+# Baked directory for the orchestration agent contracts in the agent-runner image.
+# The Dockerfile does: COPY agents/ /app/agents/
+# This MUST match that COPY destination (deploy/agent-runner.Dockerfile).
+# Used by _build_entry_script to materialise the contract into the clone.
+_BAKED_CONTRACT_DIR = "/app/agents"
+
 # Default poll interval and timeout (seconds) — module-level so tests can override.
 _K8S_POLL_INTERVAL_S: float = 5.0
 _K8S_JOB_TIMEOUT_S: float = 1800.0  # 30 minutes
@@ -529,15 +570,24 @@ class K8sJobBackend:
         repo_name: str,
         branch: str | None,
         claude_args: list[str],
+        contract: str = "",
     ) -> str:
         """Build the shell script that runs inside the agent-runner pod.
 
         The script:
           1. Clones the repo using the GH_TOKEN env var (I3: token in env,
              not in argv or manifest).
-          2. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
+          2. Configures git identity (user.name / user.email) globally so
+             the agent can commit without "Author identity unknown" (#112).
+          3. Configures push authentication via url.insteadOf using ${GH_TOKEN}
+             so git push succeeds without terminal prompts (#112).
+          4. Materialises the orchestration agent contract from the baked
+             path (_BAKED_CONTRACT_DIR/<basename>) into /workspace/repo/agents/
+             so the agent can read it at its expected relative path (#111).
+             Fails loudly with a clear error if the contract file is absent.
+          5. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
              hook (baked at _BAKED_HOOK_PATH) into /workspace/repo/.claude/.
-          3. cd into /workspace/repo and exec the claude invocation.
+          6. cd into /workspace/repo and exec the claude invocation.
 
         I3 security: GH_TOKEN is referenced as ${GH_TOKEN} in the shell
         command — it is NEVER interpolated as a literal string here.  The
@@ -545,6 +595,10 @@ class K8sJobBackend:
 
         Shell quoting: claude_args elements are individually shell-quoted via
         shlex.quote so argument injection from model or prompt is impossible.
+
+        contract: the DispatchContext.contract value (e.g. "agents/orchestrator.md").
+          When non-empty, the basename is used to copy the baked contract file from
+          _BAKED_CONTRACT_DIR into the cloned workspace so the agent can read it.
         """
         import shlex
 
@@ -568,6 +622,32 @@ class K8sJobBackend:
             'git -c "url.https://x-access-token:${GH_TOKEN}'
             '@github.com/.insteadOf=https://github.com/"'
         )
+
+        # Contract materialisation step (#111).
+        # The contract path is repo-relative (e.g. "agents/orchestrator.md").
+        # The baked file is at /app/agents/<basename>.
+        # Copy it into the clone so the agent can read it at the expected path.
+        contract_basename = contract.rsplit("/", 1)[-1] if contract else ""
+        if contract_basename:
+            baked_contract = shlex.quote(f"{_BAKED_CONTRACT_DIR}/{contract_basename}")
+            contract_step = (
+                # Fail loudly if the baked contract is absent — never silently
+                # allow the agent to run without its governing contract (#111).
+                f"[ -f {baked_contract} ] || "
+                f'{{ echo "FATAL: contract not found: {baked_contract}" >&2; exit 1; }}\n'
+                "mkdir -p /workspace/repo/agents\n"
+                f"cp {baked_contract} /workspace/repo/agents/{shlex.quote(contract_basename)}\n"
+                # Git-ignore the materialised contract so `git add -A` cannot sweep
+                # it into the PR.  agents/** is a PROTECTED_PATH; a committed contract
+                # would trip the converge protected-path check (E1) and stall a
+                # greenfield run.  .git/info/exclude is repo-local and only affects
+                # untracked files (#111).
+                "mkdir -p /workspace/repo/.git/info\n"
+                f"echo {shlex.quote('/' + contract)} >> /workspace/repo/.git/info/exclude\n"
+            )
+        else:
+            contract_step = ""
+
         script = (
             "set -e\n"
             # HOME must be writable: the agent-runner user has no home dir
@@ -576,8 +656,20 @@ class K8sJobBackend:
             # Step 1: clone the repo (GH_TOKEN via env — not in argv).
             f"{gh_insteadof} "
             f"clone --depth 1{branch_flag} {shlex.quote(clone_url)} /workspace/repo\n"
-            # Step 2: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
-            "if [ -n \"${ORCHESTRATOR_ALLOWED_AGENT_REFS}\" ]; then\n"
+            # Step 2: configure git identity globally so the agent can commit (#112).
+            # Global config is safe here because this pod is single-use.
+            'git config --global user.name "Orchestrator Agent"\n'
+            'git config --global user.email "agent@orchestrator"\n'
+            # Step 3: configure push auth via url.insteadOf using ${GH_TOKEN} (#112).
+            # This ensures both git fetch and git push use the scoped token.
+            # The token is expanded at runtime from the pod env — never a literal.
+            'git config --global '
+            '"url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf" '
+            '"https://github.com/"\n'
+            # Step 4: materialise the agent contract into the clone (#111).
+            + contract_step
+            # Step 5: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
+            + "if [ -n \"${ORCHESTRATOR_ALLOWED_AGENT_REFS}\" ]; then\n"
             "  mkdir -p /workspace/repo/.claude\n"
             f"  cp {shlex.quote(hook_src)} /workspace/repo/.claude/i9_spawn_hook.py\n"
             "  python3 -c \"\n"
@@ -589,7 +681,7 @@ class K8sJobBackend:
             "p.write_text(json.dumps(s, indent=2))\n"
             "\"\n"
             "fi\n"
-            # Step 3: run claude in the cloned working tree.
+            # Step 6: run claude in the cloned working tree.
             f"cd /workspace/repo\n"
             f"exec {quoted_claude}\n"
         )
@@ -681,6 +773,7 @@ class K8sJobBackend:
         claude_args: list[str],
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
+        contract: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -688,8 +781,12 @@ class K8sJobBackend:
 
         The control-plane does NOT clone the repo here — the entry script
         (built by _build_entry_script) does the clone inside the pod.
+        The entry script also materialises the agent contract (#111) and
+        configures git identity / push auth (#112) inside the pod.
         """
-        entry_script = self._build_entry_script(repo_owner, repo_name, branch, claude_args)
+        entry_script = self._build_entry_script(
+            repo_owner, repo_name, branch, claude_args, contract
+        )
         job_spec = self._build_job_spec(run_id, entry_script, child_env)
         job_name: str = job_spec["metadata"]["name"]
         self._job_names[run_id] = job_name

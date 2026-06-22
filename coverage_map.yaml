@@ -293,6 +293,18 @@
     tests: ["test_backend_factory_returns_k8s_when_env_set"]
   "backend-factory-subprocess-explicit":
     tests: ["test_backend_factory_subprocess_explicit"]
+  # Contract materialisation (#111) — agent can always read its governing contract
+  "k8s-contract-materialisation":
+    tests: ["test_k8s_entry_script_materialises_contract", "test_k8s_entry_script_no_contract_step_when_empty", "test_k8s_entry_script_contract_path_is_basename_only"]
+  "subprocess-contract-materialisation":
+    tests: ["test_subprocess_backend_materialises_contract", "test_subprocess_backend_no_materialise_when_contract_empty", "test_subprocess_backend_contract_failure_marks_failed", "test_harness_materialize_contract_copies_to_workspace", "test_harness_materialize_contract_raises_if_absent", "test_harness_materialize_contract_all_five_roles"]
+  # Git identity and push auth (#112) — agent can commit/push without self-configuring
+  "k8s-git-identity":
+    tests: ["test_k8s_entry_script_sets_git_identity"]
+  "k8s-git-push-auth":
+    tests: ["test_k8s_entry_script_configures_push_auth"]
+  "subprocess-git-identity":
+    tests: ["test_subprocess_backend_calls_configure_git_identity", "test_subprocess_backend_git_identity_called_before_hook", "test_harness_configure_git_identity_repo_local"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":
