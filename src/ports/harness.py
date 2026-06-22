@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import time
@@ -71,6 +72,8 @@ from src.domain.types import (
     RunHandle,
     RunStatus,
 )
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # GitHub API constants (shared with github.py — keep in sync)
@@ -169,11 +172,21 @@ async def _default_process_runner(
 # Run-event store — in-process; Step 9 wires SSE on top of this
 # ---------------------------------------------------------------------------
 
+StatusSink = Callable[[str, RunStatus], None]
+
+
 class RunEventStore:
     """Per-run event accumulator.  Thread-safe (asyncio single-threaded).
 
     Holds events in memory.  Step 9 (issue #31) will expose these via SSE;
     for #45 they are captured and queryable here.
+
+    Status propagation (issue #101 — write-through):
+      Callers may register a per-run status sink via register_status_sink().
+      Whenever set_status() records a new status for that run, the sink is
+      invoked synchronously (the sink must not block the event loop).
+      RunRecordingHarness uses this to propagate live status into the run_store
+      so list_runs/get_run always reflect the real run state.
     """
 
     def __init__(self) -> None:
@@ -181,12 +194,27 @@ class RunEventStore:
         self._statuses: dict[str, RunStatus] = {}
         # Per-run asyncio.Queue for live streaming; None signals completion.
         self._queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
+        # Per-run status sinks registered by RunRecordingHarness (issue #101).
+        self._status_sinks: dict[str, StatusSink] = {}
 
     def register(self, run_id: str) -> None:
         """Initialise storage for a new run."""
         self._events[run_id] = []
         self._statuses[run_id] = RunStatus(state="queued")
         self._queues[run_id] = asyncio.Queue()
+
+    def register_status_sink(self, run_id: str, sink: StatusSink) -> None:
+        """Register a callback that is invoked synchronously on every set_status call.
+
+        Used by RunRecordingHarness to propagate live status into the run_store
+        (write-through, issue #101).  Only one sink per run_id is supported;
+        a second registration replaces the first.
+
+        The sink must be non-blocking (no awaits).  SQLiteRunStore.set_status
+        satisfies this — it schedules the DB write via asyncio.create_task.
+        FakeRunStore.set_status is also sync.
+        """
+        self._status_sinks[run_id] = sink
 
     def append(self, run_id: str, event: RunEvent) -> None:
         """Record an event and push it to the live queue."""
@@ -203,6 +231,18 @@ class RunEventStore:
         if status.state == "completed" and run_id in self._queues:
             # Signal end-of-stream
             self._queues[run_id].put_nowait(None)
+        # Notify the write-through sink (issue #101) — invoked after state is
+        # committed so the sink always sees the new status.
+        sink = self._status_sinks.get(run_id)
+        if sink is not None:
+            try:
+                sink(run_id, status)
+            except Exception:
+                _log.exception(
+                    "RunEventStore status sink raised for run_id=%s status=%s",
+                    run_id,
+                    status,
+                )
 
     def get_status(self, run_id: str) -> RunStatus:
         return self._statuses.get(run_id, RunStatus(state="queued"))
@@ -619,6 +659,29 @@ class ClaudeCodeHarnessPort:
         )
 
         return RunHandle(run_id=run_id)
+
+    def register_run_status_sink(self, run_id: str, sink: StatusSink) -> None:
+        """Wire a write-through sink for a single run's status changes (issue #101).
+
+        Delegates to the underlying RunEventStore.  Called by RunRecordingHarness
+        immediately after dispatch() returns so every subsequent set_status call
+        (queued → in_progress → completed/failure) is propagated into the run_store.
+
+        Exposed on the port so RunRecordingHarness can reach the event_store without
+        coupling to ClaudeCodeHarnessPort's internals — the protocol surface is minimal
+        (one method, one run_id, one sync callback).
+        """
+        self._event_store.register_status_sink(run_id, sink)
+
+    def get_live_status(self, run_id: str) -> RunStatus:
+        """Return the current live status from the RunEventStore (issue #101).
+
+        Used by RunRecordingHarness after registering the sink to catch any
+        status transitions that occurred synchronously during dispatch() before
+        the sink was installed.  This closes the race between backend.dispatch()
+        setting status and RunRecordingHarness registering the sink.
+        """
+        return self._event_store.get_status(run_id)
 
     async def get_run_status(self, handle: RunHandle) -> RunStatus:
         """Return the live status of the run.
