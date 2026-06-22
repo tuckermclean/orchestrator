@@ -18,7 +18,10 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-replicaCount: 2
+# 1 replica: the default DB_URL is SQLite on a ReadWriteOnce PVC (single writer).
+# For 2-replica HA (ARCHITECTURE §5) switch DB_URL to a Postgres DSN, set
+# persistence.enabled=false, then raise this. 2 replicas on SQLite is unsupported.
+replicaCount: 1
 
 # Secret created by operator before install — see ARCHITECTURE §6 for fields:
 #   kubectl create secret generic orchestrator-secrets -n orchestrator \
@@ -34,7 +37,8 @@ secretName: orchestrator-secrets
 config:
   GITHUB_OWNER: "tuckermclean"
   GITHUB_REPO: "orchestrator"
-  # ALLOWLIST: "" means all authors admitted; set to comma-separated logins to restrict
+  # Default-deny (issue #48): ALLOWLIST: "" admits ONLY the repo owner (GITHUB_OWNER);
+  # set comma-separated logins to widen. The owner is always admitted.
   ALLOWLIST: ""
   RECONCILE_CRON: "*/15 * * * *"
   DEDUP_WINDOW: "1000"
