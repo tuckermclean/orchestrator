@@ -456,9 +456,22 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Only seed demo data in dev mode (no production credentials)
     if not _has_prod_creds():
         await _seed_demo_data(_service)
+
+    # Start the internal reconciler loop when RECONCILE_MODE=internal (chart default).
+    # repo=None → reconcile_now() iterates registry.enabled_repos() every tick, so the
+    # loop always reconciles the configured registry (EnvRepoRegistry in prod, the dev
+    # FakeRepoRegistry seeded with demo/repo in dev mode).  Never passes a hardcoded repo.
+    # RECONCILE_MODE=external disables the loop; a CronJob calls POST /api/dev/reconcile.
+    _reconcile_mode = os.environ.get("RECONCILE_MODE", "internal")
+    if _reconcile_mode == "internal":
+        await _service.start_reconciler(repo=None)
+
     try:
         yield
     finally:
+        # Stop the reconciler loop before closing DB connections.
+        if _reconcile_mode == "internal":
+            await _service.stop_reconciler()
         # Close DB connections on shutdown to avoid aiosqlite event-loop teardown warnings.
         if _db_converge is not None:
             await _db_converge.close()
