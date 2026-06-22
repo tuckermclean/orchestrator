@@ -53,21 +53,21 @@
   "row-4-fix-r2-engine-wired":
     tests: ["test_converge_r1_blocker_fix_r2_approve", "test_converge_r3_adjudication_model"]
   "row-3-no-progress-engine-wired":
-    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap"]
+    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap_reached"]
   "row-5-no-verdict-engine-wired":
     tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
   "row-6-ci-red-engine-wired":
-    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks"]
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks", "test_converge_ci_red_docker_still_red_escalates"]
   "row-7-cap-reached-engine-wired":
     tests: ["test_converge_cap_reached_e5"]
 
 "§6-escalations":  # Escalation taxonomy (§6) — engine wiring
   "E2-no-progress":
-    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap"]
+    tests: ["test_converge_no_progress_e2", "test_converge_no_progress_e2_r3_fires_before_cap_reached"]
   "E3-no-verdict":
     tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
   "E4-ci-red":
-    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks"]
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks", "test_converge_ci_red_docker_still_red_escalates"]
   "E5-cap-reached":
     tests: ["test_converge_cap_reached_e5"]
   "E11-fixer-timeout":

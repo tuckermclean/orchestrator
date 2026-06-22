@@ -227,39 +227,7 @@ async def test_converge_no_verdict_retry_then_cap_e3(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """R3 unknown blockers: retry < cap → CONVERGING (P11); at cap → ESCALATED (E3)."""
-    # We need to run the converge 3 times: first 2 as retry (< cap), 3rd as cap.
     # Simplification: test the final escalation path only (counter already at cap).
-    forge = FakeForgePort()
-    harness = FakeHarnessPort(forge=forge)
-    _green_pr(forge)
-
-    # R1 fix, R2 fix, R3 unknown (sentinel verdict — reviewer never writes, so unknown)
-    harness.script_reviewer_verdicts(
-        _blocker_verdict(["sig-a"]),   # R1
-        _blocker_verdict(["sig-b"]),   # R2
-        # R3 gets no verdict written — resolve_blockers returns "unknown" when
-        # both file and footer are absent. But we have the footer from the fake.
-        # Use a fresh forge for R3 with no footer comment seeded: script an empty verdict
-        # list so the fake doesn't overwrite the sentinel (leaving 1 blocker, not "unknown").
-        # Instead: use blockers="unknown" by not calling script_reviewer_verdicts for R3.
-    )
-    # After R2 fixer, R3 reviewer times out → sentinel remains → unknown
-    # To force "unknown" at R3: make R3 reviewer time out (no footer comment).
-    # Use script_fixer_timeout to let R1/R2 fixers complete but R3 reviewer time out.
-    # Actually "unknown" comes from resolve_blockers when no footer AND no file verdict.
-    # The sentinel has blockers=1 (int), NOT "unknown".
-    # "unknown" only comes from resolve_blockers row 4 (no footer, no non-sentinel file).
-    # The sentinel IS the file for row 1. So to get "unknown" at R3, reviewer must timeout
-    # (no footer posted) AND sentinel must be written (it is). Sentinel → row 1 → blockers=1.
-    # To get "unknown": need sentinel file AND no footer. Sentinel → row 1 → int 1, not unknown.
-    # Actually row 2 fires when sentinel present + footer posted. Row 4 fires when no footer
-    # AND sentinel present → "unknown"? Let me re-check resolve_blockers.
-    # From SPEC §8.2 / resolve_blockers.py: if verdict file IS the sentinel AND no footer → unknown.
-    # If verdict file is non-sentinel → use file blockers (row 1).
-    # So: if reviewer times out → sentinel written → no footer → resolve_blockers → "unknown".
-    # OK so we can get "unknown" by making the R3 reviewer time out.
-    #
-    # Reset and redo with proper setup.
     forge2 = FakeForgePort()
     harness2 = FakeHarnessPort(forge=forge2)
     counter2 = FakeCounterStore()
@@ -411,6 +379,49 @@ async def test_converge_ci_red_polls_all_six_blocking_checks(
     # 5/6 green is not enough → ESCALATED (E4).
     assert state == "ESCALATED"
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
+
+
+async def test_converge_ci_red_docker_still_red_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OQ-1 regression guard: code checks recover but Docker/Helm tier stays RED → E4.
+
+    At R3 with 0 blockers, CI re-trigger recovers indices 0-2 (Type Check, Lint,
+    Integration Tests) to green, but indices 3-5 (Docker Build & Scan, Helm Lint,
+    Helm Kubeconform) stay red.  _poll_ci_until_green must return False because all
+    6 BLOCKING_CI_CHECKS are required → ESCALATED (E4), not APPROVED (P9).
+
+    SPEC §13 (OQ-1), TESTING.md §4.3.
+    """
+    monkeypatch.setattr(converge_mod, "CI_WAIT_S", 0)
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    _red_pr(forge)
+
+    harness.script_reviewer_verdicts(
+        _blocker_verdict(["sig-a"]),  # R1
+        _blocker_verdict(["sig-b"]),  # R2
+        _zero_verdict(),              # R3 → ci-red (CI still not green at decide_round)
+    )
+    # After trigger_ci: code-check tier (indices 0-2) recovers; Docker/Helm tier stays red.
+    partial_recovery_checks = [
+        CheckRun(name=BLOCKING_CI_CHECKS[i], state="completed", conclusion="success")
+        for i in range(3)  # Type Check, Lint, Integration Tests → green
+    ] + [
+        CheckRun(name=BLOCKING_CI_CHECKS[i], state="completed", conclusion="failure")
+        for i in range(3, 6)  # Docker Build & Scan, Helm Lint, Helm Kubeconform → red
+    ]
+    harness.script_trigger_ci_checks(partial_recovery_checks)
+    engine = _engine(forge, harness)
+
+    state = await engine.converge(_PR)
+
+    # Docker/Helm checks still red → _poll_ci_until_green returns False → ESCALATED (E4).
+    assert state == "ESCALATED"
+    assert len(harness.trigger_ci_calls) == 1
+    assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
+    assert (_PR, LABEL_READY) not in forge.add_label_calls
 
 
 # ---------------------------------------------------------------------------

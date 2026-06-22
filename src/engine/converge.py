@@ -28,6 +28,7 @@ from src.domain.types import (
     LABEL_NEEDS_HUMAN,
     LABEL_READY,
     NO_VERDICT_RETRY_CAP,
+    POLL_INTERVAL_S,
     PROTECTED_PATHS,
     SENTINEL_SIGNATURE,
     SENTINEL_VERDICT,
@@ -97,7 +98,7 @@ async def _poll_ci_until_green(engine: Engine, pr_ref: PRRef) -> bool:
             return True
         if time.monotonic() >= deadline:
             return False
-        await asyncio.sleep(0)
+        await asyncio.sleep(POLL_INTERVAL_S)
 
 
 async def _terminal_escalate(engine: Engine, pr_ref: PRRef) -> PRState:

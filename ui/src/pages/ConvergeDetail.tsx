@@ -7,6 +7,27 @@ import {
   type ConvergeRound,
 } from "../api";
 
+const ESCALATION_DESCRIPTIONS: Record<string, string> = {
+  E1: "protected-path",
+  E2: "no-progress",
+  E3: "no-verdict",
+  E4: "ci-red",
+  E5: "cap-reached",
+  E6: "empty-PR",
+  E7: "merge-conflict",
+  E8: "stale build-cap",
+  E9: "stale no-issue",
+  E10: "issue redispatch-cap",
+  E11: "fixer timed out",
+};
+
+function escalationAriaLabel(cause: string): string {
+  const desc = ESCALATION_DESCRIPTIONS[cause];
+  return desc
+    ? `Escalation cause: ${cause} — ${desc}`
+    : `Escalation cause: ${cause}`;
+}
+
 const card: React.CSSProperties = {
   background: "#161b22",
   border: "1px solid #30363d",
@@ -279,7 +300,7 @@ export default function ConvergeDetail() {
               </span>
               {detail.escalation_cause && (
                 <span
-                  aria-label={`Escalation cause: ${detail.escalation_cause}`}
+                  aria-label={escalationAriaLabel(detail.escalation_cause)}
                   style={{
                     padding: "2px 10px",
                     borderRadius: "12px",

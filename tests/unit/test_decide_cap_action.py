@@ -77,3 +77,14 @@ def test_decide_cap_action_all_counts_escalate(count: int) -> None:
     """All integer redispatch_count values from 0 to MAX_REDISPATCHES+1 → escalate."""
     assert decide_cap_action(count, True) == "escalate"
     assert decide_cap_action(count, False) == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# Usage-error validation (TESTING.md §2.5)
+# ---------------------------------------------------------------------------
+
+
+def test_cap_action_usage_error() -> None:
+    """Missing required argument has_issue → TypeError (TESTING.md §2.5)."""
+    with pytest.raises(TypeError):
+        decide_cap_action(0)  # type: ignore[call-arg]
