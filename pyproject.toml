@@ -25,6 +25,12 @@ dev = [
     "coverage>=7",
     "pyyaml>=6",
 ]
+# Required only by the K8s-Job harness backend (HARNESS_EXECUTION_BACKEND=k8s, #51).
+# Kept optional so the subprocess/dev path acquires no extra deps; the control-plane
+# image installs ".[k8s]" so it can schedule agent Jobs.
+k8s = [
+    "kubernetes>=29",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

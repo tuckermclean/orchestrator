@@ -641,7 +641,7 @@ def _make_real_kube_client() -> KubeClientPort:
     except ImportError as exc:
         raise ImportError(
             "The 'kubernetes' package is required for K8sJobBackend. "
-            "Install it with: pip install kubernetes"
+            "Install the k8s extra: pip install '.[k8s]' (baked into the control-plane image)."
         ) from exc
 
     k8s_client = _kube_pkg.client
