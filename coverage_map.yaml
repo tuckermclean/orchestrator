@@ -228,3 +228,15 @@
     tests: ["test_redispatch_not_skip_recent_exactly_cooldown", "test_issue_redispatch_cap_is_named_constant", "test_issue_cooldown_is_named_constant"]
   "enum-exhaustiveness":
     tests: ["test_redispatch_arity"]
+
+"§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
+  "lock-promote-serializes":
+    tests: ["test_promote_concurrent_same_issue_serializes", "test_promote_lock_acquired_before_mutation"]
+  "lock-deescalate-serializes":
+    tests: ["test_deescalate_pr_concurrent_same_pr_serializes", "test_deescalate_pr_lock_acquired_before_mutation"]
+  "lock-entity-isolation":
+    tests: ["test_different_issues_do_not_serialize", "test_different_prs_do_not_serialize"]
+  "lock-fake-contract":
+    tests: ["test_fake_lock_provider_records_acquire_release", "test_fake_lock_provider_releases_on_exception"]
+  "lock-asyncio-serializes":
+    tests: ["test_asyncio_lock_provider_serializes_same_entity", "test_asyncio_lock_provider_different_entities_parallel"]

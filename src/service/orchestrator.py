@@ -28,7 +28,15 @@ from src.domain.types import (
 from src.engine.dispatch import Engine
 from src.engine.intake import IntakeEngine
 from src.engine.reconcile import ReconcileReport
-from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
+from src.ports.advisory_lock import AsyncioLockProvider
+from src.ports.base import (
+    ConvergeStateStore,
+    CounterStore,
+    ForgePort,
+    HarnessPort,
+    LockProvider,
+    SessionPort,
+)
 
 # Default LRU dedup window (number of delivery IDs to remember)
 _DEFAULT_DEDUP_WINDOW = 1000
@@ -40,8 +48,7 @@ def _extract_repo(payload: dict[str, object]) -> RepoRef | None:
         return None
     owner_data = repo_data.get("owner")
     owner = (
-        str(owner_data.get("login", "")) if isinstance(owner_data, dict)
-        else str(owner_data or "")
+        str(owner_data.get("login", "")) if isinstance(owner_data, dict) else str(owner_data or "")
     )
     return RepoRef(owner=owner, name=str(repo_data.get("name", "")))
 
@@ -57,6 +64,7 @@ class OrchestratorService:
         owner: str = "",
         counter: CounterStore | None = None,
         converge_state: ConvergeStateStore | None = None,
+        lock_provider: LockProvider | None = None,
         dedup_window: int = _DEFAULT_DEDUP_WINDOW,
     ) -> None:
         self.engine = Engine(
@@ -71,6 +79,13 @@ class OrchestratorService:
         self.session = session
         self._counter = counter
         self._converge_state = converge_state
+
+        # Per-entity advisory lock (SPEC §11.3 step 1).
+        # Default: single-process asyncio.Lock per entity key.
+        # Swap for a Postgres pg_advisory_xact_lock provider in multi-replica deployments.
+        self._lock_provider: LockProvider = (
+            lock_provider if lock_provider is not None else AsyncioLockProvider()
+        )
 
         # Audit log — default to in-memory if none provided
         self._audit = audit if audit is not None else AuditLog()
@@ -107,6 +122,7 @@ class OrchestratorService:
         Runs ``Engine.reconcile`` every ``RECONCILER_CRON`` cadence (15 min) in the
         background.  Call ``stop_reconciler()`` to cancel the task cleanly.
         """
+
         async def _loop() -> None:
             while True:
                 await asyncio.sleep(_cron_to_seconds(RECONCILER_CRON))
@@ -276,51 +292,57 @@ class OrchestratorService:
         """Remove LABEL_NEEDS_HUMAN from a PR, reset counters, clear converge state.
 
         P16/P17 recovery path (SPEC §11.3):
-          1. Read current labels for audit record.
-          2. Remove LABEL_NEEDS_HUMAN from the PR.
-          3. Reset ``stale-pr`` counter (SPEC §11.3 + §8.2a).
-          4. Clear converge state so next converge starts at R1 (H3 fix).
-          5. Write audit record — after all mutations (observer pattern, I6).
+          1. Acquire per-entity advisory lock on pr_ref (TOCTOU guard).
+          2. Read current labels for audit record.
+          3. Remove LABEL_NEEDS_HUMAN from the PR.
+          4. Reset ``stale-pr`` and ``converge-retry`` counters (SPEC §11.3 + §8.2a).
+          5. Clear converge state so next converge starts at R1 (H3 fix).
+          6. Write audit record — after all mutations (observer pattern, I6).
+          7. Release lock.
         """
-        # Step 1 — read pre-mutation labels for the audit record
-        pr = await self.forge.get_pr(pr_ref)
-        pr_labels_at_deescalation = list(pr.labels)
+        # Step 1 — per-entity advisory lock — serializes concurrent de-escalation calls
+        # (operator double-click, two API replicas, reconciler racing a human clear).
+        async with self._lock_provider.lock(pr_ref):
+            # Step 2 — read pre-mutation labels for the audit record
+            pr = await self.forge.get_pr(pr_ref)
+            pr_labels_at_deescalation = list(pr.labels)
 
-        # Step 2 — remove the escalation label
-        await self.forge.remove_label(pr_ref, LABEL_NEEDS_HUMAN)
+            # Step 3 — remove the escalation label
+            await self.forge.remove_label(pr_ref, LABEL_NEEDS_HUMAN)
 
-        # Step 3 — reset stale-pr counter so RC-1 starts fresh.
-        # A None counter store would let RC-1 immediately re-escalate (redispatch_count
-        # stays at cap); raise so the operator knows the store is mis-wired.
-        if self._counter is None:
-            raise RuntimeError(
-                "deescalate_pr: counter store is None — "
-                "cannot reset stale-pr/converge-retry counters; RC-1 would re-escalate immediately"
+            # Step 4 — reset stale-pr counter so RC-1 starts fresh.
+            # A None counter store would let RC-1 immediately re-escalate (redispatch_count
+            # stays at cap); raise so the operator knows the store is mis-wired.
+            if self._counter is None:
+                raise RuntimeError(
+                    "deescalate_pr: counter store is None — "
+                    "cannot reset stale-pr/converge-retry counters; "
+                    "RC-1 would re-escalate immediately"
+                )
+            await self._counter.reset(pr_ref, "stale-pr")
+            await self._counter.reset(pr_ref, "converge-retry")
+
+            # Step 5 — clear converge loop state so next Engine.converge starts at R1.
+            # A None converge_state store would leave stale round data; raise so the
+            # operator knows the store is mis-wired.
+            if self._converge_state is None:
+                raise RuntimeError(
+                    "deescalate_pr: converge_state store is None — "
+                    "cannot clear converge round; stale ConvergeState may cause incorrect re-entry"
+                )
+            await self._converge_state.clear_converge_state(pr_ref)
+
+            # Step 6 — single complete §11.3 audit record (I6, observer pattern: written
+            # after all state changes so the trail records only committed state).
+            escalation_cause = _infer_escalation_cause(pr_labels_at_deescalation)
+            await self._audit.record(
+                repo=pr_ref.repo,
+                entity_ref=pr_ref,
+                action="deescalate_pr",
+                operator=operator,
+                escalation_cause=escalation_cause if escalation_cause else None,
+                pr_labels=pr_labels_at_deescalation,
             )
-        await self._counter.reset(pr_ref, "stale-pr")
-        await self._counter.reset(pr_ref, "converge-retry")
-
-        # Step 4 — clear converge loop state so next Engine.converge starts at R1.
-        # A None converge_state store would leave stale round data; raise so the
-        # operator knows the store is mis-wired.
-        if self._converge_state is None:
-            raise RuntimeError(
-                "deescalate_pr: converge_state store is None — "
-                "cannot clear converge round; stale ConvergeState may cause incorrect re-entry"
-            )
-        await self._converge_state.clear_converge_state(pr_ref)
-
-        # Step 5 — single complete §11.3 audit record (I6, observer pattern: written
-        # after all state changes so the trail records only committed state).
-        escalation_cause = _infer_escalation_cause(pr_labels_at_deescalation)
-        await self._audit.record(
-            repo=pr_ref.repo,
-            entity_ref=pr_ref,
-            action="deescalate_pr",
-            operator=operator,
-            escalation_cause=escalation_cause if escalation_cause else None,
-            pr_labels=pr_labels_at_deescalation,
-        )
 
     # -----------------------------------------------------------------------
     # Triage (human intake gate) — SPEC §11.3
@@ -364,38 +386,43 @@ class OrchestratorService:
         """Promote an issue from AWAITING_PROMOTION to AGENT_WORK.
 
         Steps (SPEC §11.3, I7):
-          1. Atomic label swap: set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK]).
-          2. Dispatch agent — bypasses dedup guard (explicit human promotion always dispatches).
-          3. Write audit record (I6 + I7) — after observable state is changed.
+          1. Acquire per-entity advisory lock on issue_ref (TOCTOU guard).
+          2. Atomic label swap: set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK]).
+          3. Dispatch agent — bypasses dedup guard (explicit human promotion always dispatches).
+          4. Write audit record (I6 + I7) — after observable state is changed.
+          5. Release lock.
 
         # operator is a placeholder; Phase 9 auth will derive it from an authenticated session.
         """
         from src.decisions.route_entry import route_entry as _route_entry
         from src.domain.types import DispatchContext
 
-        # Step 1: atomic label swap (PUT semantics — I7, no TOCTOU)
-        await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])
+        # Step 1: per-entity advisory lock — serializes concurrent promote calls on the
+        # same issue (operator double-click, two API replicas racing).
+        async with self._lock_provider.lock(issue_ref):
+            # Step 2: atomic label swap (PUT semantics — I7)
+            await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])
 
-        # Step 2: dispatch directly via harness — bypasses dedup guard so an explicit
-        # human promotion always results in a real agent run, never a silent no-op.
-        result = _route_entry("issues")
-        context = DispatchContext(
-            issue_ref=issue_ref,
-            contract=result.contract,
-            model=result.model,
-            max_turns=result.max_turns,
-            forge_token_scope="repo-branch",
-            allowed_agent_refs=None,
-        )
-        handle = await self.harness.dispatch(context)
+            # Step 3: dispatch directly via harness — bypasses dedup guard so an explicit
+            # human promotion always results in a real agent run, never a silent no-op.
+            result = _route_entry("issues")
+            context = DispatchContext(
+                issue_ref=issue_ref,
+                contract=result.contract,
+                model=result.model,
+                max_turns=result.max_turns,
+                forge_token_scope="repo-branch",
+                allowed_agent_refs=None,
+            )
+            handle = await self.harness.dispatch(context)
 
-        # Step 3: audit the human promotion (I6) — written after observable state is set
-        await self._audit.record(
-            repo=issue_ref.repo,
-            entity_ref=issue_ref,
-            action="promote",
-            operator=operator,
-        )
+            # Step 4: audit the human promotion (I6) — written after observable state is set
+            await self._audit.record(
+                repo=issue_ref.repo,
+                entity_ref=issue_ref,
+                action="promote",
+                operator=operator,
+            )
 
         return handle
 
