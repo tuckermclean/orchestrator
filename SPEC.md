@@ -219,6 +219,7 @@ Single-source home. All implementation code must import from this table; never h
 | `REARM_RECENT_GUARD_S` | `300` | 5 min; RC-3 skip-recent guard (strict `<`) |
 | `ISSUE_COOLDOWN_S` | `900` | 15 min; RC-4 skip-recent guard (strict `<`) |
 | `CI_WAIT_S` | `480` | 8 min; per-round CI poll timeout |
+| `POLL_INTERVAL_S` | `5` | Seconds between `_await_run` status polls; balances event-loop yielding against CI API call rate. 5 s ≈ 1% of `CI_WAIT_S` budget (≤ 96 polls per round), safely below typical CI API rate limits. |
 | `NO_VERDICT_RETRY_CAP` | `2` | Converge no-verdict retry cap |
 | `RECONCILER_CRON` | `"*/15 * * * *"` | Reconciler cadence |
 | `PARALLEL_SPECIALIST_CAP` | `4` | Max concurrent specialist agents per converge round |
