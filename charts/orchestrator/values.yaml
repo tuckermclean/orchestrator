@@ -69,6 +69,13 @@ config:
   PUSH_VAPID_PUBLIC_KEY: ""
   # Optional: OpenTelemetry exporter endpoint
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  # Harness execution backend (issue #51): "subprocess" (dev/default) or "k8s".
+  # k8s runs each agent dispatch as an isolated Job — required in production, since the
+  # control-plane image has no claude CLI. Namespace + ServiceAccount are derived from the
+  # release (see configmap.yaml); only the backend + agent-runner image are configured here.
+  HARNESS_EXECUTION_BACKEND: "subprocess"
+  # Agent-runner image used by the k8s backend. Pin by digest in prod (values-prod.yaml).
+  HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner:latest"
 
 # -- Service --
 service:
