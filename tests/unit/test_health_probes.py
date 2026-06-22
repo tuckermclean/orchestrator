@@ -226,7 +226,7 @@ def test_build_prod_service_enters_prod_mode_with_app_creds_only(
 
         from src.api.main import _build_prod_service
 
-        service, _secret = _build_prod_service()
+        service, _secret, _op_store, _push_store = _build_prod_service()
 
     # PortProvider.from_env() was called — we are in prod mode, not dev mode
     mock_from_env.assert_called_once()
@@ -245,7 +245,7 @@ def test_build_prod_service_uses_dev_mode_without_any_creds(
 
     from src.api.main import _build_prod_service
 
-    service, webhook_secret = _build_prod_service()
+    service, webhook_secret, _op_store, _push_store = _build_prod_service()
 
     # Dev mode: forge is a FakeForgePort and no webhook secret
     assert isinstance(service.forge, FakeForgePort)
