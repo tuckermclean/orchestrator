@@ -21,10 +21,16 @@ or terminal labels (not just drafts — B8a). Non-draft 0-diff PRs → `needs-hu
 crash-draft 0-diff PRs → eligible for re-dispatch. Cap-reached converge always escalates on the
 same PR — work is never discarded by opening a fresh PR (D3).
 
-The engine is forge-agnostic and harness-agnostic. The GitHub integration and
-`anthropics/claude-code-action` harness are today's implementations of abstract port
+The engine is forge-agnostic and harness-agnostic. The GitHub integration and the
+**Claude Code harness** — Claude Code (the CLI) run as a **supervised child process** of
+the orchestrator, not a GitHub Action — are today's implementations of abstract port
 interfaces (`ForgePort`, `HarnessPort`, `SessionPort`) that can be replaced without
-altering the core engine. The full engine spec is in `SPEC.md`.
+altering the core engine. Each dispatch spawns `claude -p <prompt> --output-format
+stream-json` under the orchestrator's watch; **no GitHub Actions workflow is required in
+the target repo**. Auth to Claude is `CLAUDE_CODE_OAUTH_TOKEN` (operator env); auth to the
+repo is a freshly-minted, repository-scoped, permission-limited GitHub App installation
+token injected as `GH_TOKEN` into the child environment only. The full engine spec is in
+`SPEC.md`.
 
 ---
 
@@ -51,7 +57,7 @@ Engine  (stateless per-call — SPEC.md §10)
   |-- ForgePort          (label reads/writes, PR ops, CI checks — SPEC.md §9.1)
   |     --> Forge: GitHub / GitLab / Gitea
   |-- HarnessPort        (single-shot agent dispatch, CI triggers — SPEC.md §9.2)
-  |     --> anthropics/claude-code-action (sandboxed)
+  |     --> Claude Code CLI as a supervised child process (sandboxed; no repo Actions)
   |-- SessionPort        (run observation, cancel, intervene — SPEC.md §9.3)
   |     --> Operator-facing run index
   |-- CounterStore       (atomic entity counters: stale-pr, orphan, converge-retry — SPEC.md §8.2a)
@@ -81,8 +87,14 @@ every state-machine transition in `SPEC.md §3–§6`. Holds no durable in-proce
 **ForgePort** — only component that knows forge-native concepts (GitHub API, labels, CI checks).
 A GitLab or Gitea adapter satisfies the same interface with no engine changes.
 
-**HarnessPort** — single-shot dispatch. Returns `RunHandle` immediately. Operator credentials
-are held by `PortProvider` only and never present in `DispatchContext` (I3, D1, `SPEC.md §9.2`).
+**HarnessPort** — single-shot dispatch of a **supervised Claude Code child process** (not a
+GitHub Action). Returns `RunHandle` immediately (non-blocking) but the run is watched: its
+NDJSON event stream is captured and surfaced via the control-plane API and PWA Runs screen —
+fire-and-watch, never fire-and-forget. The child gets only `CLAUDE_CODE_OAUTH_TOKEN` and a
+scoped `GH_TOKEN`; operator credentials are held by `PortProvider` only and never present in
+`DispatchContext` or the child environment (I3, D1, `SPEC.md §9.2`). Execution backend is
+pluggable: a supervised subprocess (dev) or a Kubernetes Job per dispatch (production
+isolation).
 
 **SessionPort** — observability seam. Does not alter forge label state; cancellation leaves the
 entity in its last-written state for the reconciler to recover.
