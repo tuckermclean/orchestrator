@@ -384,7 +384,12 @@ async def test_subprocess_backend_captures_json_events() -> None:
     events = store.get_events(run_id)
     assert len(events) > 0
     event_types = {e.event_type for e in events}
-    assert event_types & {"system", "assistant", "result"}
+    # After the transcript parser: raw "result" → "agent_result";
+    # "system" lines are dropped; "assistant" → "agent_message" or similar.
+    # The scripted lines include a result line, so agent_result must be present.
+    assert event_types & {"agent_message", "agent_tool_use", "agent_result"}, (
+        f"Expected transcript event types, got: {event_types}"
+    )
 
 
 @pytest.mark.covers("§9.2", "subprocess-backend-cancel")

@@ -375,7 +375,15 @@ async def test_harness_cancel_on_unknown_run_is_noop() -> None:
 
 
 async def test_harness_events_captured_from_stream() -> None:
-    """Stream-JSON events from stdout are parsed and stored."""
+    """Stream-JSON events from stdout are parsed and stored as transcript events.
+
+    After the transcript parser was introduced, raw "system" / "assistant" /
+    "result" type strings are no longer stored verbatim:
+      - "system"    → dropped (noise)
+      - "assistant" → "agent_message" / "agent_tool_use" / "agent_thinking"
+      - "result"    → "agent_result"
+    The scripted fake process emits a result line, so agent_result is expected.
+    """
     fp = _make_fake_process()
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
@@ -386,7 +394,9 @@ async def test_harness_events_captured_from_stream() -> None:
     events = port._event_store.get_events(handle.run_id)
     assert len(events) > 0
     event_types = {e.event_type for e in events}
-    assert "system" in event_types or "assistant" in event_types or "result" in event_types
+    assert event_types & {"agent_message", "agent_tool_use", "agent_result"}, (
+        f"Expected transcript event types, got: {event_types}"
+    )
 
 
 async def test_harness_events_have_timestamps() -> None:
