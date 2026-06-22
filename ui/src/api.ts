@@ -34,6 +34,37 @@ export interface RunDetail extends RunSummary {
   changed_files?: number | null;
 }
 
+// Converge detail (WEBUI.md §5.4) — per-round verdicts, specialists, CI grid.
+
+export interface ConvergeVerdict {
+  blockers: number;
+  suggestions: number;
+  nits: string[];
+  blocker_signatures: string[];
+}
+
+export interface ConvergeCiCheck {
+  name: string;
+  state: string;
+  conclusion: string | null;
+}
+
+export interface ConvergeRound {
+  round: 1 | 2 | 3;
+  model: string;
+  decide_round_token: string;
+  specialists: string[];
+  verdict: ConvergeVerdict;
+  ci_checks: ConvergeCiCheck[];
+}
+
+export interface ConvergeDetail {
+  pr_ref: { repo: { owner: string; name: string }; number: number };
+  pr_title: string;
+  state: string;
+  rounds: ConvergeRound[];
+}
+
 const BASE = "";
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
@@ -49,6 +80,8 @@ export const api = {
   getStatus: () => json<HealthReport>("/api/status"),
   listRuns: () => json<RunSummary[]>("/api/runs"),
   getRun: (runId: string) => json<RunDetail>(`/api/runs/${runId}`),
+  getConverge: (owner: string, repo: string, number: string) =>
+    json<ConvergeDetail>(`/api/prs/${owner}/${repo}/${number}/converge`),
   devDispatch: () =>
     json<{ run_id: string }>("/api/dev/dispatch", { method: "POST" }),
 };
