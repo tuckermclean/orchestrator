@@ -1341,6 +1341,26 @@ def test_k8s_entry_script_materialises_full_contract_set() -> None:
 
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_copies_contracts_without_nesting() -> None:
+    """#111 full-set fix: copy dir CONTENTS, not the dir, to avoid agents/agents/.
+
+    `cp -r /app/agents /workspace/repo/agents` nests into agents/agents/ when the
+    cloned repo already has an agents/ dir. The script must ensure the target dir
+    exists and copy the contents (trailing /.) so the contracts always land at
+    /workspace/repo/agents/<name>.md regardless of a pre-existing agents/ dir.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/orchestrator.md",
+    )
+    assert "mkdir -p /workspace/repo/agents" in script
+    assert f"cp -r {_BAKED_CONTRACT_DIR}/. /workspace/repo/agents/" in script, (
+        "Entry script must copy baked-dir CONTENTS (trailing /.) to avoid nesting"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
 def test_k8s_entry_script_gitignores_entire_agents_dir() -> None:
     """#111 full-set fix: entry script git-ignores the entire agents/ dir.
 

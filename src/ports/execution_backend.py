@@ -641,8 +641,12 @@ class K8sJobBackend:
                 # Fail loudly if the dispatched contract is absent.
                 f"[ -f {baked_contract} ] || "
                 f'{{ echo "FATAL: contract not found: {baked_contract}" >&2; exit 1; }}\n'
-                # Copy the entire baked agents/ dir so sibling-contract references resolve.
-                f"cp -r {shlex.quote(_BAKED_CONTRACT_DIR)} /workspace/repo/agents\n"
+                # Copy the entire baked agents/ dir so sibling-contract references
+                # resolve.  Copy the *contents* (trailing /.) into an ensured target
+                # dir rather than `cp -r src dest`, which would nest into
+                # agents/agents/ if the cloned repo already has an agents/ dir.
+                "mkdir -p /workspace/repo/agents\n"
+                f"cp -r {shlex.quote(_BAKED_CONTRACT_DIR)}/. /workspace/repo/agents/\n"
                 # Git-ignore the entire materialised agents/ dir so `git add -A`
                 # cannot sweep any contract into the PR.  agents/** is a
                 # PROTECTED_PATH; a committed copy trips the converge protected-path
