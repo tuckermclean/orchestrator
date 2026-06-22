@@ -47,6 +47,7 @@ import pytest
 
 from src.domain.types import DispatchContext
 from src.ports.execution_backend import (
+    _BAKED_CONTRACT_DIR,
     FakeExecutionBackend,
     FakeKubeClient,
     K8sJobBackend,
@@ -1287,38 +1288,67 @@ async def test_fake_backend_cancel_records_call() -> None:
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
 def test_k8s_entry_script_materialises_contract() -> None:
-    """#111: K8s entry script copies the baked contract into the clone (#111).
+    """#111 full-set fix: K8s entry script copies the FULL baked agents/ dir.
 
     When a contract is provided, the script must:
       - Check the baked contract exists at /app/agents/<basename> and exit 1 if absent.
-      - Copy it into /workspace/repo/agents/<basename>.
+      - Copy the ENTIRE /app/agents/ dir into /workspace/repo/agents/ (not just one file)
+        so sibling-contract references (e.g. agents/implementer.md referenced from
+        agents/orchestrator.md Step 5) also resolve.
     """
     backend = _make_k8s_backend()
     script = backend._build_entry_script(
         "acme", "myrepo", None, ["claude", "-p", "hello"],
         contract="agents/orchestrator.md",
     )
-    # Must reference the baked contract dir
+    # Must reference the baked contract dir for the fail-loud existence check
     assert "/app/agents/orchestrator.md" in script, (
-        "Entry script must reference the baked contract at /app/agents/"
+        "Entry script must reference the baked contract at /app/agents/ for fail-loud check"
     )
-    # Must create the agents/ dir and copy the contract
-    assert "mkdir -p /workspace/repo/agents" in script
-    assert "cp" in script and "orchestrator.md" in script
-    # Must fail loudly if the baked contract is absent
+    # Must copy the WHOLE baked agents/ dir (cp -r) not just one file
+    assert "cp -r" in script and "/app/agents" in script, (
+        "Entry script must copy the entire /app/agents/ dir (cp -r) so sibling contracts resolve"
+    )
+    # Must fail loudly if the dispatched baked contract is absent
     assert "FATAL" in script or "exit 1" in script, (
         "Entry script must fail loudly if the contract file is absent (#111)"
     )
 
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
-def test_k8s_entry_script_gitignores_contract() -> None:
-    """#111: entry script git-ignores the materialised contract.
+def test_k8s_entry_script_materialises_full_contract_set() -> None:
+    """#111 full-set fix: entry script copies the entire agents/ dir, not a single file.
 
-    agents/** is a PROTECTED_PATH; if the agent's `git add -A` swept the copied
-    contract into the PR, the converge protected-path check (E1) would escalate
-    and stall a greenfield run. The script must append the repo-relative contract
-    path to .git/info/exclude so untracked copies are never staged.
+    The orchestrator contract delegates to sibling contracts by relative path
+    (agents/implementer.md, agents/converge-reviewer.md, agents/converge-fixer.md).
+    Copying only the dispatched contract leaves those paths unresolvable; the agent
+    logs "There's no implementer.md" and improvises a generic subagent that ignores
+    the sibling contract's disciplines (commit hygiene, D4 empty-diff rule, etc.).
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"],
+        contract="agents/orchestrator.md",
+    )
+    # cp -r of the whole dir means ALL contracts are available, not just one
+    assert "cp -r" in script, (
+        "Entry script must use 'cp -r' to copy the full agents/ dir (#111 full-set fix)"
+    )
+    # The whole baked dir must be the source (not individual files)
+    assert _BAKED_CONTRACT_DIR in script and "cp -r" in script, (
+        "Entry script must cp -r the entire baked contract dir"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-contract-materialisation")
+def test_k8s_entry_script_gitignores_entire_agents_dir() -> None:
+    """#111 full-set fix: entry script git-ignores the entire agents/ dir.
+
+    agents/** is a PROTECTED_PATH; if the agent's `git add -A` swept any
+    materialised contract into the PR, the converge protected-path check (E1)
+    would escalate and stall a greenfield run.  The script must append
+    '/agents/**' (not just the single dispatched contract path) to
+    .git/info/exclude so no materialised contract can be staged.
     """
     backend = _make_k8s_backend()
     script = backend._build_entry_script(
@@ -1326,9 +1356,12 @@ def test_k8s_entry_script_gitignores_contract() -> None:
         contract="agents/orchestrator.md",
     )
     assert ".git/info/exclude" in script, (
-        "Entry script must add the contract to .git/info/exclude (#111)"
+        "Entry script must add agents/ to .git/info/exclude (#111)"
     )
-    assert "/agents/orchestrator.md" in script
+    # Must use the glob pattern to cover all materialised contracts
+    assert "/agents/**" in script, (
+        "Entry script must git-ignore '/agents/**' (whole dir) not just a single file"
+    )
 
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
@@ -1347,18 +1380,16 @@ def test_k8s_entry_script_no_contract_step_when_empty() -> None:
 
 @pytest.mark.covers("§9.2", "k8s-contract-materialisation")
 def test_k8s_entry_script_contract_path_is_basename_only() -> None:
-    """#111: the contract step uses only the basename, not the full path."""
+    """#111: the fail-loud check uses only the basename of the dispatched contract."""
     backend = _make_k8s_backend()
     script = backend._build_entry_script(
         "acme", "myrepo", None, ["claude", "-p", "hello"],
         contract="agents/converge-reviewer.md",
     )
-    # The baked path must use the basename
+    # The fail-loud existence check must use the basename
     assert "/app/agents/converge-reviewer.md" in script
-    # The destination must be agents/<basename> (not agents/agents/)
-    assert "/workspace/repo/agents/converge-reviewer.md" in script or (
-        "converge-reviewer.md" in script and "/workspace/repo/agents" in script
-    )
+    # The copy command copies the whole baked dir into /workspace/repo/agents
+    assert "cp -r" in script and "/app/agents" in script
 
 
 @pytest.mark.covers("§9.2", "subprocess-contract-materialisation")

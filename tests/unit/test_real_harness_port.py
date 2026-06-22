@@ -930,10 +930,14 @@ def test_dispatch_context_model_pattern_rejects_injection() -> None:
 
 
 def test_harness_materialize_contract_copies_to_workspace(tmp_path: Any) -> None:
-    """#111: _materialize_contract copies the contract file into repo_dir/agents/."""
+    """#111 full-set fix: _materialize_contract copies ALL contracts into repo_dir/agents/.
+
+    The dispatched contract AND all sibling contracts must land in the workspace
+    so relative-path references between contracts resolve.
+    """
     import pathlib
 
-    # Build a fake repo dir and a fake package agents dir
+    # Build a fake repo dir
     repo_dir = str(tmp_path / "repo")
     os.makedirs(repo_dir)
 
@@ -953,27 +957,76 @@ def test_harness_materialize_contract_copies_to_workspace(tmp_path: Any) -> None
         f"Package agents/ dir not found at {real_agents_dir}; "
         "check the repo structure"
     )
-    # Pick any real contract file (orchestrator.md is always present)
     assert (real_agents_dir / "orchestrator.md").exists(), (
         "agents/orchestrator.md must exist in the package to test materialisation"
     )
 
     port._materialize_contract("agents/orchestrator.md", repo_dir)
 
+    # The dispatched contract must be present
     dest = pathlib.Path(repo_dir) / "agents" / "orchestrator.md"
     assert dest.exists(), (
         f"_materialize_contract must copy the contract to {dest} (#111)"
     )
-    # The file must be non-empty (not a zero-byte placeholder)
     assert dest.stat().st_size > 0, "Materialised contract must be non-empty"
 
-    # The contract must be git-ignored so `git add -A` cannot sweep it into the
-    # PR (agents/** is a PROTECTED_PATH → converge E1 escalation otherwise).
+    # ALL other contracts must also be present so sibling references resolve
+    for sibling in real_agents_dir.glob("*.md"):
+        sibling_dest = pathlib.Path(repo_dir) / "agents" / sibling.name
+        assert sibling_dest.exists(), (
+            f"_materialize_contract must copy sibling contract {sibling.name} "
+            "so relative-path references between contracts resolve (#111 full-set fix)"
+        )
+
+    # The entire agents/ dir must be git-ignored (not just the dispatched contract)
+    # so `git add -A` cannot sweep any contract into the PR.
     exclude = pathlib.Path(repo_dir) / ".git" / "info" / "exclude"
     assert exclude.exists(), "_materialize_contract must write .git/info/exclude (#111)"
-    assert "/agents/orchestrator.md" in exclude.read_text(), (
-        "Materialised contract must be added to .git/info/exclude (#111)"
+    exclude_text = exclude.read_text()
+    assert "/agents/**" in exclude_text, (
+        "_materialize_contract must git-ignore '/agents/**' (whole dir) "
+        "not just the single dispatched contract (#111 full-set fix)"
     )
+
+
+def test_harness_materialize_contract_implementer_present(tmp_path: Any) -> None:
+    """#111 full-set fix: implementer.md is materialised when orchestrator.md is dispatched.
+
+    This is the exact failure mode from the bug report: the orchestrator contract
+    references agents/implementer.md (Step 5) but only agents/orchestrator.md was
+    materialised, causing the agent to log "There's no implementer.md" and improvise
+    a generic subagent that ignored commit hygiene and the D4 empty-diff rule.
+    """
+    import pathlib
+
+    repo_dir = str(tmp_path / "repo")
+    os.makedirs(repo_dir)
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token=_CLAUDE_TOKEN,
+        app_id=_APP_ID,
+        private_key_pem=_PRIVATE_KEY_PEM,
+        installation_id=_INSTALLATION_ID,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+    )
+
+    # Dispatch the orchestrator contract — must also produce implementer.md
+    port._materialize_contract("agents/orchestrator.md", repo_dir)
+
+    implementer = pathlib.Path(repo_dir) / "agents" / "implementer.md"
+    assert implementer.exists(), (
+        "agents/implementer.md must be materialised when orchestrator.md is dispatched "
+        "so orchestrator Step 5 can resolve the sibling contract (#111 full-set fix)"
+    )
+    assert implementer.stat().st_size > 0, "Materialised implementer.md must be non-empty"
+
+    # Confirm the other referenced siblings are also present
+    for basename in ("converge-reviewer.md", "converge-fixer.md"):
+        sibling = pathlib.Path(repo_dir) / "agents" / basename
+        assert sibling.exists(), (
+            f"agents/{basename} must be materialised alongside the dispatched contract"
+        )
 
 
 def test_harness_materialize_contract_raises_if_absent(tmp_path: Any) -> None:
