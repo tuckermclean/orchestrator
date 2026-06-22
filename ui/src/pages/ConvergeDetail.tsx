@@ -22,10 +22,15 @@ const ciGreen = (conclusion: string | null): boolean =>
 function RoundAccordion({ round }: { round: ConvergeRound }) {
   const [open, setOpen] = useState(round.round === 1);
   const v = round.verdict;
+  const panelId = `converge-round-panel-${round.round}`;
   return (
     <div style={card}>
       <button
+        type="button"
+        className="converge-accordion-toggle"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={panelId}
         style={{
           width: "100%",
           background: "transparent",
@@ -40,7 +45,7 @@ function RoundAccordion({ round }: { round: ConvergeRound }) {
         }}
       >
         <span>
-          {open ? "▾" : "▸"} Round {round.round}
+          <span aria-hidden="true">{open ? "▾" : "▸"}</span> Round {round.round}
           <span style={{ color: "#8b949e", fontWeight: 400, marginLeft: "12px", fontSize: "13px" }}>
             model: {round.model}
           </span>
@@ -60,11 +65,22 @@ function RoundAccordion({ round }: { round: ConvergeRound }) {
       </button>
 
       {open && (
-        <div style={{ marginTop: "16px" }}>
+        <div
+          id={panelId}
+          role="region"
+          aria-label={`Round ${round.round} details`}
+          style={{ marginTop: "16px" }}
+        >
           <div style={{ display: "flex", gap: "16px", fontSize: "14px", marginBottom: "12px" }}>
-            <span>🔴 {v.blockers} blockers</span>
-            <span>🟡 {v.suggestions} suggestions</span>
-            <span>💬 {v.nits.length} nits</span>
+            <span>
+              <span aria-hidden="true">🔴</span> {v.blockers} blockers
+            </span>
+            <span>
+              <span aria-hidden="true">🟡</span> {v.suggestions} suggestions
+            </span>
+            <span>
+              <span aria-hidden="true">💬</span> {v.nits.length} nits
+            </span>
           </div>
 
           {v.blocker_signatures.length > 0 && (
@@ -143,7 +159,10 @@ function RoundAccordion({ round }: { round: ConvergeRound }) {
                 >
                   <span>{c.name}</span>
                   <span style={{ color: ciGreen(c.conclusion) ? "#3fb950" : "#f85149" }}>
-                    {ciGreen(c.conclusion) ? "✓" : "✗"} {c.conclusion ?? c.state}
+                    <span role="img" aria-label={ciGreen(c.conclusion) ? "passed" : "failed"}>
+                      {ciGreen(c.conclusion) ? "✓" : "✗"}
+                    </span>{" "}
+                    {c.conclusion ?? c.state}
                   </span>
                 </div>
               ))}
@@ -170,6 +189,14 @@ export default function ConvergeDetail() {
 
   return (
     <div>
+      {/* :focus-visible cannot be expressed inline; scope a class to the accordion toggle. */}
+      <style>{`
+        .converge-accordion-toggle:focus-visible {
+          outline: 2px solid #58a6ff;
+          outline-offset: 2px;
+          border-radius: 4px;
+        }
+      `}</style>
       <h1 style={{ fontSize: "24px", marginBottom: "20px" }}>
         Converge: {owner}/{repo} #{number}
       </h1>
