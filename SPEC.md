@@ -114,7 +114,7 @@ idempotent and re-entrant.
 
 | Channel | Scopes to | Decision function | Outcomes |
 |---|---|---|---|
-| **RC-1 Stale implementing recovery** | PRs with `agent:implementing` AND NOT (`converge` ∈ labels OR `needs-human` ∈ labels OR `agent:ready` ∈ labels), last dispatch run >`STALE_DRAFT_THRESHOLD_S` | `decide_stale_action` | `escalate`→P5 · `trigger-ci`→P4 · `mark-ready`→P3 · `mark-ready-and-converge`→P3 · `redispatch`→P4 · `needs-human`→P5 |
+| **RC-1 Stale implementing recovery** | PRs with `agent:implementing` AND NOT `needs-human` ∈ labels AND NOT `agent:ready` ∈ labels AND NOT (`converge` ∈ labels AND NOT `is_draft`), last dispatch run >`STALE_DRAFT_THRESHOLD_S` | `decide_stale_action` | `escalate`→P5 · `trigger-ci`→P4 · `mark-ready`→P3 · `mark-ready-and-converge`→P3 · `redispatch`→P4 · `needs-human`→P5 |
 | **RC-2 Merge-conflict** | All open PRs | `decide_conflict_action` | `escalate`→P12 · `skip` |
 | **RC-3 Converge re-arm** | Non-draft PRs labeled `converge` AND NOT `needs-human` ∈ labels | `decide_rearm_action` | `trigger-ci`/`rearm`→P13 · `skip-*` |
 | **RC-4 Orphan-issue** | Open `agent-work` issues | `decide_redispatch_action` | `redispatch`→I3 · `escalate`→I4 · `skip-*` |
@@ -124,6 +124,16 @@ RC-1 priority order (first match wins): redispatch_count ≥ `RECONCILER_STALE_R
 
 > **B8a.** RC-1 scope includes non-draft PRs with `agent:implementing` but no `converge`
 > or terminal label — a crash-window state invisible to the old draft-only RC-1.
+>
+> **B8b — draft+`converge` carve-out (reconciles RC-1 scope with §8.5 row 3).** A
+> `converge`-labeled PR is excluded from RC-1 **only when it is non-draft** — those belong
+> to RC-3. A **draft** `converge` PR is a distinct crash window (the `converge` label was
+> applied before `set_pr_ready` completed), so it **remains in RC-1** scope. This is what
+> makes `decide_stale_action` row 3 (`has_converge → mark-ready`) reachable: RC-1 finishes
+> the interrupted promotion by marking the draft ready. Were every `converge` PR excluded
+> (the literal old reading), row 3 would be dead and such a PR would fall into neither RC-1
+> (excluded) nor RC-3 (RC-3 is non-draft only). Implemented at `reconcile.py` RC-1 scope
+> filter (`LABEL_CONVERGE in pr.labels and not pr.draft → skip`).
 
 ---
 
