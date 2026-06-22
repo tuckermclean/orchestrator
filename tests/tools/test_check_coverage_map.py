@@ -624,3 +624,128 @@ def test_run_collection_error_exits_2(tmp_path: Path) -> None:
         f"Expected exit 2 (collection error) but got {result}. "
         "The validator must not proceed against a partial node list."
     )
+
+
+# ---------------------------------------------------------------------------
+# Determinism regression tests (issue #50)
+# ---------------------------------------------------------------------------
+
+from tools.check_coverage_map import collect_node_ids  # noqa: E402 (test-only import)
+
+
+def test_collect_node_ids_is_idempotent() -> None:
+    """Two successive collect_node_ids calls on the same tree return identical results.
+
+    Pins the fix from issue #50: name_to_node_ids values are now sorted so
+    collision error messages are filesystem-traversal-order-independent.
+    """
+    repo_root = Path(__file__).parent.parent.parent
+    node_ids_1, names_1 = collect_node_ids(repo_root)
+    node_ids_2, names_2 = collect_node_ids(repo_root)
+    assert node_ids_1 == node_ids_2, "collect_node_ids node_ids set changed between runs"
+    assert names_1 == names_2, "collect_node_ids name_to_node_ids changed between runs"
+    # Verify each value list is sorted (the specific fix for output ordering).
+    for bare, node_id_list in names_1.items():
+        assert node_id_list == sorted(node_id_list), (
+            f"name_to_node_ids[{bare!r}] is not sorted: {node_id_list}"
+        )
+
+
+def test_collect_markers_is_idempotent() -> None:
+    """Two successive collect_markers calls on the same tree return identical results.
+
+    Pins the fix from issue #50: marker value lists are now sorted so error
+    messages are independent of function definition order within a file.
+    """
+    repo_root = Path(__file__).parent.parent.parent
+    markers_1 = collect_markers(repo_root)
+    markers_2 = collect_markers(repo_root)
+    assert markers_1 == markers_2, "collect_markers changed between runs"
+    # Verify each value list is sorted.
+    for key, func_list in markers_1.items():
+        assert func_list == sorted(func_list), (
+            f"markers[{key!r}] value list is not sorted: {func_list}"
+        )
+
+
+def test_collect_markers_excludes_dot_claude_path_component(tmp_path: Path) -> None:
+    """collect_markers ignores test files inside any .claude directory component.
+
+    Regression for issue #50 / PR #47: a worktree at
+    .claude/worktrees/<id>/tests/... must not contaminate the marker set
+    even when the absolute path of the search root itself contains .claude.
+    """
+    # Build: tmp_path/.claude/worktrees/abc/tests/test_rogue.py
+    # collect_markers(tmp_path) scopes to tmp_path/tests/ which DOES exist below,
+    # so it won't traverse .claude/ at all — but place the rogue file there anyway
+    # to confirm the skip_dirs guard works as a safety net too.
+    dot_claude = tmp_path / ".claude" / "worktrees" / "abc" / "tests"
+    dot_claude.mkdir(parents=True)
+    rogue = dot_claude / "test_rogue.py"
+    rogue.write_text(
+        "import pytest\n\n"
+        "@pytest.mark.covers('§8.PHANTOM', 'rogue-row')\n"
+        "def test_rogue() -> None:\n"
+        "    pass\n"
+    )
+    # Place a legitimate test at tmp_path/tests/test_legit.py
+    legit_dir = tmp_path / "tests"
+    legit_dir.mkdir()
+    (legit_dir / "test_legit.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.covers('§8.1', 'row-1')\n"
+        "def test_legit() -> None:\n"
+        "    pass\n"
+    )
+    markers = collect_markers(tmp_path)
+    # Rogue marker must NOT appear — it lives under .claude/
+    assert ("§8.PHANTOM", "rogue-row") not in markers, (
+        "collect_markers wrongly included a test file from inside .claude/"
+    )
+    # Legitimate marker MUST appear
+    assert ("§8.1", "row-1") in markers, (
+        "collect_markers missed the legitimate test file at tests/"
+    )
+
+
+def test_validate_returns_sorted_errors() -> None:
+    """validate() returns dangling and uncovered lists in deterministic sorted order."""
+    # Construct a map where YAML insertion order would produce Z before A without sorting.
+    coverage_map = {
+        "§8.2": {"row-z": ["test_z_missing"], "row-a": ["test_a_missing"]},
+        "§8.1": {"row-m": ["test_m_missing"]},
+    }
+    collected: set[str] = set()  # nothing collected → everything dangling
+    dangling, uncovered = validate(coverage_map, collected)
+    assert dangling == sorted(dangling), f"dangling errors not sorted: {dangling}"
+    assert uncovered == sorted(uncovered), f"uncovered errors not sorted: {uncovered}"
+
+
+def test_check_node_id_collisions_returns_sorted_errors() -> None:
+    """check_node_id_collisions() returns errors and collider lists in sorted order."""
+    coverage_map = {"§8.1": {"r1": ["test_dupe"]}}
+    name_to_node_ids = {
+        "test_dupe": [
+            # Deliberately out of alpha order to prove sorting.
+            "tests/z_module/test_dupe.py::test_dupe",
+            "tests/a_module/test_dupe.py::test_dupe",
+        ]
+    }
+    errors = check_node_id_collisions(coverage_map, name_to_node_ids)
+    assert len(errors) == 1
+    # Colliders in error message must be sorted (a before z).
+    assert "tests/a_module" in errors[0]
+    assert errors[0].index("tests/a_module") < errors[0].index("tests/z_module"), (
+        "Collider paths in error message are not sorted"
+    )
+
+
+def test_check_map_to_markers_returns_sorted_errors() -> None:
+    """check_map_to_markers() returns errors in deterministic sorted order."""
+    coverage_map = {
+        "§8.2": {"row-z": ["test_z_no_marker"], "row-a": ["test_a_no_marker"]},
+        "§8.1": {"row-m": ["test_m_no_marker"]},
+    }
+    markers: dict[tuple[str, str], list[str]] = {}
+    errors = check_map_to_markers(coverage_map, markers)
+    assert errors == sorted(errors), f"check_map_to_markers errors not sorted: {errors}"
