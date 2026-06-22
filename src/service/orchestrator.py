@@ -251,6 +251,15 @@ class OrchestratorService:
         # Reconciler cron task handle
         self._reconcile_task: asyncio.Task[None] | None = None
 
+        # In-flight converge tasks, keyed by PR. The converge sub-machine runs
+        # for minutes (dispatches review agents, polls CI across rounds); it must
+        # NOT run inline in the webhook request or GitHub's ~10s delivery timeout
+        # fires and redelivers, double-dispatching work. We spawn it as a
+        # background task and return the webhook immediately. The dict both keeps
+        # a strong ref (an unreferenced task can be GC'd mid-flight) and dedupes
+        # concurrent converges for the same PR.
+        self._converge_tasks: dict[str, asyncio.Task[PRState]] = {}
+
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -292,6 +301,18 @@ class OrchestratorService:
             except asyncio.CancelledError:
                 pass
             self._reconcile_task = None
+
+        # Drain in-flight background converge tasks. Converge round state is
+        # persisted to ConvergeStateStore, so a cancelled converge resumes at the
+        # correct round on the next trigger / reconcile re-arm (RC-3).
+        for task in list(self._converge_tasks.values()):
+            task.cancel()
+        for task in list(self._converge_tasks.values()):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._converge_tasks.clear()
 
     # -----------------------------------------------------------------------
     # Event routing
@@ -381,9 +402,11 @@ class OrchestratorService:
             #   synchronize       → Engine.converge (P7; idempotency gate returns
             #                       immediately for draft PRs, so this is always safe)
             #   anything else     → no-op (fall through without dispatch)
+            #   Converge runs in the BACKGROUND (see _spawn_converge): it is a
+            #   minutes-long sub-machine and must not block the webhook response.
             action = str(payload.get("action", ""))
             if action == "ready_for_review" or action == "synchronize":
-                await self.converge_pr(pr_ref)
+                self._spawn_converge(pr_ref)
             elif action == "labeled":
                 label_data = payload.get("label", {})
                 label_name = (
@@ -392,7 +415,7 @@ class OrchestratorService:
                     else ""
                 )
                 if label_name == LABEL_CONVERGE:
-                    await self.converge_pr(pr_ref)
+                    self._spawn_converge(pr_ref)
         else:
             await self.engine.dispatch(
                 event_name,
@@ -461,6 +484,40 @@ class OrchestratorService:
             if repo_config is not None:
                 required_checks = repo_config.required_checks
         return await self.engine.converge(pr_ref, required_checks)
+
+    def _spawn_converge(self, pr_ref: PRRef) -> bool:
+        """Run ``converge_pr`` as a background task; return immediately.
+
+        The converge sub-machine is long-running (review dispatches + multi-round
+        CI polling). Awaiting it inline in the webhook handler blows GitHub's
+        webhook delivery timeout, causing redelivery and duplicate dispatches, and
+        holds DB write transactions long enough to starve other writers
+        ("database is locked"). Spawning it decouples the HTTP response from the work.
+
+        De-duplicated per PR: if a converge for this PR is already in flight, this
+        is a no-op (returns False) so a burst of synchronize/labeled events — or a
+        redelivery — does not stack concurrent converge runs on the same PR.
+
+        Returns True if a new task was spawned, False if one was already running.
+        """
+        key = f"{pr_ref.repo.owner}/{pr_ref.repo.name}#{pr_ref.number}"
+        existing = self._converge_tasks.get(key)
+        if existing is not None and not existing.done():
+            return False
+
+        task = asyncio.create_task(self.converge_pr(pr_ref))
+        self._converge_tasks[key] = task
+
+        def _done(t: asyncio.Task[PRState]) -> None:
+            # Drop the ref only if it is still the task we registered (a newer
+            # converge may have replaced it).
+            if self._converge_tasks.get(key) is t:
+                del self._converge_tasks[key]
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                _log.error("Background converge for %s failed: %r", key, exc)
+
+        task.add_done_callback(_done)
+        return True
 
     # -----------------------------------------------------------------------
     # Run observation
