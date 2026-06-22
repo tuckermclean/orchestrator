@@ -154,6 +154,11 @@ def collect_node_ids(rootdir: Path | None = None) -> tuple[set[str], dict[str, l
         if line not in name_to_node_ids[bare]:
             name_to_node_ids[bare].append(line)
 
+    # Sort each per-name list so collision error messages are identical regardless
+    # of the filesystem traversal order used by pytest --collect-only.
+    for bare in name_to_node_ids:
+        name_to_node_ids[bare].sort()
+
     return node_ids, name_to_node_ids
 
 
@@ -247,6 +252,10 @@ def collect_markers(
             markers.setdefault(key, [])
             if func_name not in markers[key]:
                 markers[key].append(func_name)
+    # Sort each per-key list so marker error messages are independent of
+    # function definition order within a file.
+    for key in markers:
+        markers[key].sort()
     return markers
 
 
@@ -308,7 +317,7 @@ def validate(
                         f"{section}/{row_id}: test {name!r} not found in collected suite"
                     )
 
-    return dangling, uncovered
+    return sorted(dangling), sorted(uncovered)
 
 
 def check_node_id_collisions(
@@ -328,12 +337,12 @@ def check_node_id_collisions(
             for name in tests:
                 node_ids = name_to_node_ids.get(name, [])
                 if len(node_ids) > 1:
-                    colliders = ", ".join(node_ids)
+                    colliders = ", ".join(sorted(node_ids))
                     errors.append(
                         f"{section}/{row_id}: test name {name!r} is ambiguous — "
                         f"found in multiple modules: {colliders}"
                     )
-    return errors
+    return sorted(errors)
 
 
 def check_markers_to_map(
@@ -384,7 +393,7 @@ def check_map_to_markers(
                         f"{section}/{row_id}: test {test_name!r} listed in "
                         f"coverage_map but lacks @covers({section!r}, {row_id!r}) marker"
                     )
-    return errors
+    return sorted(errors)
 
 
 # ---------------------------------------------------------------------------
