@@ -471,9 +471,9 @@ class K8sJobBackend:
       The agent-runner image bakes i9_spawn_hook.py at _BAKED_HOOK_PATH
       (deploy/agent-runner.Dockerfile: COPY src/ports/i9_spawn_hook.py /opt/orchestrator/).
       The entry script:
-        1. Creates /work/repo/.claude/
-        2. Copies _BAKED_HOOK_PATH → /work/repo/.claude/i9_spawn_hook.py
-        3. Writes /work/repo/.claude/settings.json with the PreToolUse hook wired.
+        1. Creates /workspace/repo/.claude/
+        2. Copies _BAKED_HOOK_PATH → /workspace/repo/.claude/i9_spawn_hook.py
+        3. Writes /workspace/repo/.claude/settings.json with the PreToolUse hook wired.
       This runs only when ORCHESTRATOR_ALLOWED_AGENT_REFS is set in the pod env.
 
     Per-dispatch behaviour:
@@ -536,8 +536,8 @@ class K8sJobBackend:
           1. Clones the repo using the GH_TOKEN env var (I3: token in env,
              not in argv or manifest).
           2. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
-             hook (baked at _BAKED_HOOK_PATH) into /work/repo/.claude/.
-          3. cd into /work/repo and exec the claude invocation.
+             hook (baked at _BAKED_HOOK_PATH) into /workspace/repo/.claude/.
+          3. cd into /workspace/repo and exec the claude invocation.
 
         I3 security: GH_TOKEN is referenced as ${GH_TOKEN} in the shell
         command — it is NEVER interpolated as a literal string here.  The
@@ -572,21 +572,22 @@ class K8sJobBackend:
             "set -e\n"
             # Step 1: clone the repo (GH_TOKEN via env — not in argv).
             f"{gh_insteadof} "
-            f"clone --depth 1{branch_flag} {shlex.quote(clone_url)} /work/repo\n"
+            f"clone --depth 1{branch_flag} {shlex.quote(clone_url)} /workspace/repo\n"
             # Step 2: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
             "if [ -n \"${ORCHESTRATOR_ALLOWED_AGENT_REFS}\" ]; then\n"
-            "  mkdir -p /work/repo/.claude\n"
-            f"  cp {shlex.quote(hook_src)} /work/repo/.claude/i9_spawn_hook.py\n"
+            "  mkdir -p /workspace/repo/.claude\n"
+            f"  cp {shlex.quote(hook_src)} /workspace/repo/.claude/i9_spawn_hook.py\n"
             "  python3 -c \"\n"
             "import json, pathlib\n"
             "s = {'hooks': {'PreToolUse': [{'matcher': 'Task', 'hooks': [{"
-            "'type': 'command', 'command': 'python3 /work/repo/.claude/i9_spawn_hook.py'"
+            "'type': 'command', 'command': 'python3 /workspace/repo/.claude/i9_spawn_hook.py'"
             "}]}]}}\n"
-            "pathlib.Path('/work/repo/.claude/settings.json').write_text(json.dumps(s, indent=2))\n"
+            "p = pathlib.Path('/workspace/repo/.claude/settings.json')\n"
+            "p.write_text(json.dumps(s, indent=2))\n"
             "\"\n"
             "fi\n"
             # Step 3: run claude in the cloned working tree.
-            f"cd /work/repo\n"
+            f"cd /workspace/repo\n"
             f"exec {quoted_claude}\n"
         )
         return script
