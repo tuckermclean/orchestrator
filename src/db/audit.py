@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
+from src.db import configure_sqlite_connection
 from src.domain.types import IssueRef, PRRef, RepoRef
 
 _CREATE_TABLE = """
@@ -44,6 +45,7 @@ class AuditLog:
         if self._db is not None:
             return
         self._db = await aiosqlite.connect(self._db_path)
+        await configure_sqlite_connection(self._db)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_TABLE)
         # Idempotent column additions for existing schemas (no-op on fresh tables).
