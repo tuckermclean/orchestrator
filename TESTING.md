@@ -724,39 +724,44 @@ All seven are non-negotiable gates.
 ### §7.3 Coverage Enforcement
 
 Every truth-table row in `SPEC.md §8` must be exercised by at least one named test. The
-CI gate enforces this via a **`@covers` marker** convention:
+CI gate enforces this via a **`@pytest.mark.covers` marker** convention. The marker is
+registered in `pyproject.toml` (`[tool.pytest.ini_options] markers`); the section ID is
+the literal `SPEC.md §8` heading, **`§`-prefixed** (e.g. `"§8.3"`):
 
 ```python
 # Python
-@covers("8.3", "row-1")   # decide_round: approve
+@pytest.mark.covers("§8.3", "row-1")   # decide_round: approve
 def test_decide_round_approve_r1(): ...
 
-@covers("8.5", "row-2.5a")   # decide_stale_action: draft+no-diff+issue → redispatch
+@pytest.mark.covers("§8.5", "row-2.5a")   # decide_stale_action: draft+no-diff+issue → redispatch
 def test_stale_draft_empty_redispatch_with_issue(): ...
 ```
 
-```rust
-// Rust
-#[covers("8.3", "row-1")]
-#[tokio::test]
-async fn test_decide_round_approve_r1() { ... }
-```
+One test may carry multiple markers; the bare `@covers("§8.3", "row-1")` form is also
+accepted by the collector if `covers` is imported as a plain decorator.
 
-The CI step (run as part of `pytest tests/` or `cargo test`) collects all `@covers`
-markers and cross-references against a machine-readable coverage manifest
-`coverage_map.yaml` checked in at the repo root:
+The CI step (`python tools/check_coverage_map.py`, also run in the `pytest tests/` gate)
+collects all `covers` markers and cross-references them against the machine-readable
+coverage manifest `coverage_map.yaml` checked in at the repo root. The manifest is a
+mapping of `§`-prefixed section → row ID → `{tests: [...]}`:
 
 ```yaml
 # coverage_map.yaml
-"8.3":
-  row-1: [test_decide_round_approve_r1, test_decide_round_approve_r3]
-  row-2: [test_decide_round_fix_r1_ci_red, test_decide_round_fix_r1_unknown_blockers]
+"§8.3":
+  "row-1":
+    tests: ["test_decide_round_approve_r1", "test_decide_round_approve_r3"]
+  "row-2":
+    tests: ["test_decide_round_fix_r1_ci_red", "test_decide_round_fix_r1_unknown_blockers"]
   # ... one entry per row in every §8 truth table ...
 ```
 
-**Rules:** Every key in `coverage_map.yaml` must have ≥1 named test that exists in the
-suite. A new `SPEC.md §8` row requires a new entry in `coverage_map.yaml` and a
-`@covers`-marked test — uncovered rows fail the CI build. This enforces the §1.3 floor.
+**Rules (enforced bidirectionally):** every `(section, row)` in `coverage_map.yaml` must
+name ≥1 test that exists in the suite *and* is decorated with a matching
+`@pytest.mark.covers(section, row)` (map → marker); and every `covers` marker in the
+suite must reference a `(section, row)` that exists in the manifest (marker → map). Every
+`SPEC.md §8` decision-function section must have a manifest entry. A new `SPEC.md §8` row
+therefore requires a new manifest entry *and* a `covers`-marked test — uncovered rows (or
+orphaned markers) fail the CI build. This enforces the §1.3 floor.
 
 ---
 
