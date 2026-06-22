@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -40,6 +41,8 @@ from src.service.registry import (
     RepoConfig,
     RepoRegistryPort,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _has_prod_creds() -> bool:
@@ -326,12 +329,20 @@ def _build_prod_service() -> _ProdStores:
 
     # --- Engine store selection: SQLite-backed when DB_URL names a file path ---
     #
-    # DB_URL (default "sqlite:///data/orchestrator.db") is parsed by db_path_from_url():
-    #   sqlite:///data/orchestrator.db → "/data/orchestrator.db" (file, survives restarts)
-    #   sqlite:///:memory: / unset     → None (in-memory, not durable)
-    #   postgresql://...               → NotImplementedError (not yet implemented)
-    db_url = os.environ.get("DB_URL", "sqlite:///data/orchestrator.db")
+    # DB_URL is parsed by db_path_from_url(). Default UNSET → in-memory (safe, non-durable)
+    # so the bare image boots without needing a writable DB path; the Helm chart sets DB_URL
+    # to a persistent ABSOLUTE path. SQLite URL convention (slash count matters):
+    #   sqlite:////data/orchestrator.db → "/data/orchestrator.db" (ABSOLUTE, 4 slashes; PVC)
+    #   sqlite:///rel/path.db           → "rel/path.db"           (relative to CWD — avoid)
+    #   sqlite:///:memory: / unset / "" → None (in-memory, not durable)
+    #   postgresql://...                → NotImplementedError (not yet implemented)
+    db_url = os.environ.get("DB_URL", "")
     db_path = db_path_from_url(db_url)
+    if db_path is None:
+        _log.warning(
+            "DB_URL is unset/in-memory — engine stores are NOT durable (lost on restart). "
+            "Set DB_URL to an absolute sqlite:////<path> on a persistent volume for production."
+        )
 
     if db_path is not None:
         # File-backed: all three engine stores use the same SQLite file.
