@@ -6,31 +6,41 @@ child process; in production the K8s Job backend schedules an isolated pod.
 
 Each dispatch:
   1. Mints a scoped GitHub App installation token (forge_token_scope determines perms).
-  2. Clones the target repo into a temp dir with that token.
-  3. Materialises a PreToolUse hook (I9 spawn allow-set gate) into repo_dir/.claude/
-     when DispatchContext.allowed_agent_refs is not None.
-  4. Delegates to ExecutionBackend.dispatch() which spawns the agent and streams
-     JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
-  5. Returns a RunHandle immediately (non-blocking).
+  2. Builds the prompt, child env, and claude argv.
+  3. Delegates to ExecutionBackend.dispatch() which is responsible for cloning the
+     repo, writing the I9 hook (when allowed_agent_refs is set), and running claude.
+  4. Returns a RunHandle immediately (non-blocking).
+
+Design rationale for clone ownership (fixes production architecture bug):
+  The control-plane image ships WITHOUT git (by design — see Dockerfile comment).
+  The K8s Job backend's agent-runner image HAS git + claude + python3.  Therefore,
+  cloning must happen INSIDE the execution environment, not in the control-plane.
+  Each backend now owns its own working-tree preparation:
+    - SubprocessBackend: clones locally (dev/CI, git is on the host).
+    - K8sJobBackend:     clone + hook setup + claude run are a single shell script
+                        executed INSIDE the agent-runner pod.
 
 I3 invariants:
   - Only CLAUDE_CODE_OAUTH_TOKEN and a scoped GH_TOKEN reach the child env.
   - Orchestrator master creds (App private key, FORGE_TOKEN) are NEVER forwarded.
   - No contributor text in env or subprocess args (I9).
+  - I3 token handling for K8s: GH_TOKEN is in the pod env; git authenticates via
+    the runtime env variable — the token NEVER appears as a literal in the Job
+    manifest / argv.
 
 I9 spawn enforcement (SECURITY.md §3 I9, closes #52):
-  When DispatchContext.allowed_agent_refs is a list (not None), the harness:
-    - Writes src/ports/i9_spawn_hook.py into the cloned repo at
-      .claude/i9_spawn_hook.py.
-    - Writes .claude/settings.json with a PreToolUse hook on the Task tool
-      that invokes the hook script via python3.
-    - Injects ORCHESTRATOR_ALLOWED_AGENT_REFS into the child env (comma-
-      separated AgentRef strings).
-  The hook fails closed: missing env var, empty allow-set, or unparseable
-  stdin all result in DENY (exit code 2 — the Claude Code blocking code).
+  When DispatchContext.allowed_agent_refs is a list (not None), the harness
+  communicates this to the backend via the child_env
+  (ORCHESTRATOR_ALLOWED_AGENT_REFS) and the allowed_agent_refs parameter.
+  - SubprocessBackend: writes src/ports/i9_spawn_hook.py into the cloned repo
+    at .claude/i9_spawn_hook.py and writes .claude/settings.json with a
+    PreToolUse hook on the Task tool that invokes the hook script via python3.
+  - K8sJobBackend: the agent-runner image has the hook baked at
+    /opt/orchestrator/i9_spawn_hook.py (deploy/agent-runner.Dockerfile).  The
+    Job's entry script copies it into /work/repo/.claude/ and writes
+    .claude/settings.json — identical setup, done inside the pod.
+  The hook denies via EXIT CODE 2 (Claude Code contract) — do not regress.
   When allowed_agent_refs is None, no hook is written (no harness-level restriction).
-  The hook carry-over applies equally to the K8s backend: both the script in
-  repo_dir/.claude/ and the env var are present in the Job pod.
 
 trigger_workflow / trigger_ci remain for re-running the repo's own CI via GitHub
 Actions.  All agent-dispatch-via-workflow_dispatch code is removed.
@@ -45,14 +55,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import pathlib
-import shutil
 import signal
-import tempfile
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -282,9 +288,10 @@ class ClaudeCodeHarnessPort:
 
     dispatch(context):
       - Mints a scoped GH installation token for the target repo.
-      - Clones the repo into a per-dispatch temp dir.
-      - Materialises the I9 PreToolUse hook when allowed_agent_refs is not None.
-      - Delegates to the ExecutionBackend (subprocess or K8s Job).
+      - Builds the prompt, child env, and claude argv.
+      - Delegates to the ExecutionBackend (subprocess or K8s Job), which is
+        responsible for cloning the repo, materialising the I9 hook, and running
+        claude.  The control-plane never clones for the K8s backend.
       - Returns a RunHandle immediately (non-blocking).
 
     get_run_status / cancel reflect live run state via RunEventStore.
@@ -293,7 +300,10 @@ class ClaudeCodeHarnessPort:
       - Child env contains ONLY CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN (scoped).
       - Operator master creds (App key, FORGE_TOKEN) never reach the child.
       - No contributor text in args or env.
-      - I9 hook (exit-2 deny) carried over to K8s backend identically.
+      - I3 K8s: GH_TOKEN is in the pod env; token NEVER appears as a literal in
+        the Job manifest — git authenticates via the runtime env variable.
+      - I9 hook (exit-2 deny) written by each backend into the working tree when
+        allowed_agent_refs is set.
 
     Backend selection:
       - subprocess (default, dev/CI): HARNESS_EXECUTION_BACKEND unset or 'subprocess'.
@@ -419,6 +429,13 @@ class ClaudeCodeHarnessPort:
     def _write_spawn_hook(self, repo_dir: str) -> None:
         """Materialise the I9 PreToolUse hook into the cloned repo.
 
+        Used by SubprocessBackend (via the harness helper) to write the hook
+        into a locally-cloned working tree.
+
+        For K8sJobBackend, an equivalent setup is performed INSIDE the pod by
+        the Job entry script (which copies the baked hook from
+        /opt/orchestrator/i9_spawn_hook.py).
+
         Writes two files into repo_dir/.claude/:
           - i9_spawn_hook.py  — the hook script (copied from src/ports/).
           - settings.json     — Claude Code settings with PreToolUse hook wired.
@@ -431,6 +448,9 @@ class ClaudeCodeHarnessPort:
         (not the cloned repo) so a compromised repo cannot substitute its own
         hook script.
         """
+        import pathlib
+        import shutil
+
         claude_dir = pathlib.Path(repo_dir) / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
 
@@ -464,6 +484,11 @@ class ClaudeCodeHarnessPort:
 
         Security: the token is passed via GIT_CONFIG_* env vars so it never
         appears in process argv (/proc/PID/cmdline) or in .git/config.
+
+        NOTE: This method is used ONLY by SubprocessBackend (dev/CI path).
+        K8sJobBackend does NOT call this method — the clone happens inside the
+        agent-runner pod.  This is intentional: the control-plane image ships
+        WITHOUT git.
         """
         plain_url = f"https://github.com/{self._repo_owner}/{self._repo_name}.git"
         # Inject the token via git's url.insteadOf mechanism (env-only; not
@@ -518,11 +543,20 @@ class ClaudeCodeHarnessPort:
         Non-blocking: returns immediately.  The backend watches the run in a
         background asyncio task.
 
+        The control-plane does NOT clone the repo — that responsibility belongs
+        to the ExecutionBackend:
+          - SubprocessBackend (dev/CI): clones locally into a temp dir, writes
+            the I9 hook when allowed_agent_refs is set, then runs claude.
+          - K8sJobBackend (prod): the Job entry script clones + sets up the hook
+            + runs claude INSIDE the agent-runner pod.  The control-plane never
+            touches the filesystem for K8s dispatches.
+
         Security:
           - I3: only CLAUDE_CODE_OAUTH_TOKEN + scoped GH_TOKEN in child env.
+            For K8s: token is in the pod env — NEVER a literal in the manifest.
           - I9: prompt built from context.contract path only; no contributor text.
                PreToolUse hook (exit-2 deny) enforces allowed_agent_refs when not
-               None (closes #52), carried over to K8s backend identically.
+               None (closes #52), written by each backend into the working tree.
         """
         run_id = str(uuid.uuid4())
         self._event_store.register(run_id)
@@ -538,46 +572,14 @@ class ClaudeCodeHarnessPort:
             http_client=self._http_client,
         )
 
-        # 2. Clone the repo into a fresh temp dir (branch from context).
-        work_dir = tempfile.mkdtemp(prefix=f"orch-run-{run_id[:8]}-")
-        repo_dir = os.path.join(work_dir, "repo")
-        os.makedirs(repo_dir, exist_ok=True)
-
-        branch = self._target_branch(context)
-        try:
-            await self._clone_repo(gh_token, repo_dir, branch)
-        except Exception as exc:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            self._event_store.set_status(
-                run_id,
-                RunStatus(state="completed", conclusion="failure"),
-            )
-            self._event_store.append(
-                run_id,
-                RunEvent(
-                    event_type="error",
-                    data={"message": f"Clone failed: {exc}"},
-                    timestamp=datetime.now(tz=UTC),
-                ),
-            )
-            return RunHandle(run_id=run_id)
-
-        # 3. Materialise the I9 PreToolUse hook when an allow-set is specified.
-        #    The hook is the technical control; prompt instruction is defence in depth.
-        #    The hook denies via EXIT CODE 2 — not 1 — per the Claude Code contract.
-        #    Both subprocess and K8s backends receive the hook via the working tree
-        #    and the ORCHESTRATOR_ALLOWED_AGENT_REFS env var.
-        if context.allowed_agent_refs is not None:
-            self._write_spawn_hook(repo_dir)
-
-        # 4. Build the prompt (I9: contract path only, no contributor text).
+        # 2. Build the prompt (I9: contract path only, no contributor text).
         prompt = self._build_prompt(context)
 
-        # 5. Build the child env (I3: only CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN).
+        # 3. Build the child env (I3: only CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN).
         #    I9: inject ORCHESTRATOR_ALLOWED_AGENT_REFS when allow-set is specified.
         child_env = self._build_child_env(gh_token, context.allowed_agent_refs)
 
-        # 6. Build the claude CLI invocation.
+        # 4. Build the claude CLI invocation.
         #    -p / --print: headless (non-interactive) mode
         #    --output-format stream-json: NDJSON event stream on stdout
         #    --permission-mode bypassPermissions: autonomous run (no interactive prompts)
@@ -596,14 +598,24 @@ class ClaudeCodeHarnessPort:
             context.model,
         ]
 
-        # 7. Delegate execution to the backend (fire and watch — AGENTS.md §1).
+        # 5. Determine the target branch (P0.4).
+        branch = self._target_branch(context)
+
+        # 6. Delegate execution to the backend (fire and watch — AGENTS.md §1).
+        #    The backend is responsible for:
+        #      a) Cloning the repo (subprocess: locally; k8s: inside the pod).
+        #      b) Materialising the I9 hook when allowed_agent_refs is set.
+        #      c) Running claude in the cloned working tree.
         await self._backend.dispatch(
             run_id=run_id,
+            repo_owner=self._repo_owner,
+            repo_name=self._repo_name,
+            branch=branch,
             claude_args=claude_args,
-            repo_dir=repo_dir,
-            work_dir=work_dir,
             child_env=child_env,
+            allowed_agent_refs=context.allowed_agent_refs,
             event_store=self._event_store,
+            harness=self,
         )
 
         return RunHandle(run_id=run_id)

@@ -82,6 +82,12 @@ RUN git clone --no-tags --filter=blob:none "${AGENT_PACK_REPO_URL}" /tmp/agency-
     done \
  && rm -rf /tmp/agency-agents
 
+# Bake the I9 spawn-allow-set hook script at a fixed path so the K8s Job entry
+# script can install it into /work/repo/.claude/ at runtime.  The path MUST match
+# _BAKED_HOOK_PATH in src/ports/execution_backend.py.
+RUN mkdir -p /opt/orchestrator
+COPY src/ports/i9_spawn_hook.py /opt/orchestrator/i9_spawn_hook.py
+
 # Copy orchestration agent contracts (five *.md files from agents/)
 # These are PROTECTED_PATHS — baked read-only; never modified at runtime
 COPY agents/ /app/agents/

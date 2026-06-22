@@ -3,10 +3,18 @@
 Tests covered:
   - SubprocessBackend parity with original ClaudeCodeHarnessPort subprocess logic
     (all observable behaviours preserved after the ExecutionBackend refactor).
-  - K8sJobBackend Job-spec construction — correct image, env keys, I3 (master
-    creds ABSENT), I9 (ORCHESTRATOR_ALLOWED_AGENT_REFS present when set).
+  - SubprocessBackend now owns the clone: clone is called, hook is written when
+    allowed_agent_refs is set, clone failure marks run failed without spawning.
+  - K8sJobBackend Job-spec construction — shell-script command (clone + hook +
+    claude), correct image, env keys, I3 (master creds ABSENT, token not literal
+    in manifest), I9 (ORCHESTRATOR_ALLOWED_AGENT_REFS present when set).
+  - K8sJobBackend entry-script content: contains clone URL, GH_TOKEN as env ref
+    (not literal), hook setup guarded by ORCHESTRATOR_ALLOWED_AGENT_REFS, exec
+    of claude_args.
   - K8sJobBackend watch/poll loop: success, failure, timeout, read-error paths.
   - K8sJobBackend cancel: Job is deleted from the cluster.
+  - Regression: dispatch() in harness does NOT clone for the k8s backend —
+    all clone activity happens inside the Job pod.
   - Backend factory: HARNESS_EXECUTION_BACKEND env-var selects correct backend.
   - FakeExecutionBackend: completeness smoke-test.
 
@@ -15,11 +23,15 @@ skip when no cluster is available (env-gated, @pytest.mark.integration_real).
 
 Security invariants asserted here:
   I3 — master credentials (App private key, FORGE_TOKEN, OPERATOR_SECRET_KEY)
-       ABSENT from K8s Job pod env (test_k8s_i3_master_creds_absent_from_job_env).
+       ABSENT from K8s Job pod env (test_k8s_i3_master_creds_absent_from_job_env);
+       GH_TOKEN appears only as a pod env var at runtime — NEVER as a literal
+       string in the Job manifest or the entry script (test_k8s_i3_token_not_literal_in_manifest).
   I9 — ORCHESTRATOR_ALLOWED_AGENT_REFS env var present in Job env when
        allowed_agent_refs is set (test_k8s_i9_allowed_refs_in_job_env);
        hook exit-code-2 denies out-of-set spawns (asserted via existing
        test_harness_i9_hook tests — the hook script itself is unchanged).
+  Regression — control-plane never clones for k8s backend
+       (test_k8s_dispatch_does_not_clone_in_control_plane).
 """
 
 from __future__ import annotations
@@ -29,10 +41,11 @@ import json
 import os
 import uuid
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.domain.types import DispatchContext
 from src.ports.execution_backend import (
     FakeExecutionBackend,
     FakeKubeClient,
@@ -40,7 +53,7 @@ from src.ports.execution_backend import (
     SubprocessBackend,
     make_execution_backend,
 )
-from src.ports.harness import ProcessResult, RunEventStore, RunStatus
+from src.ports.harness import ClaudeCodeHarnessPort, ProcessResult, RunEventStore, RunStatus
 
 # ---------------------------------------------------------------------------
 # Helpers — fake process double (mirrors test_real_harness_port.py)
@@ -96,6 +109,22 @@ def _run_id() -> str:
     return str(uuid.uuid4())
 
 
+def _make_fake_harness(
+    *,
+    clone_raises: Exception | None = None,
+) -> MagicMock:
+    """Return a fake harness with _clone_repo and _write_spawn_hook mocked."""
+    harness = MagicMock()
+    if clone_raises is not None:
+        harness._clone_repo = AsyncMock(side_effect=clone_raises)
+    else:
+        harness._clone_repo = AsyncMock(return_value=None)
+    harness._write_spawn_hook = MagicMock(return_value=None)
+    harness._repo_owner = "acme"
+    harness._repo_name = "myrepo"
+    return harness
+
+
 # ===========================================================================
 # SubprocessBackend — parity tests
 # ===========================================================================
@@ -109,19 +138,127 @@ async def test_subprocess_backend_dispatch_calls_runner() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "hello"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     # Runner must have been called
     assert calls, "ProcessRunner was never called"
     assert calls[0]["args"] == ["claude", "-p", "hello"]
-    assert calls[0]["cwd"] == "/tmp/repo"
+
+
+@pytest.mark.covers("§9.2", "subprocess-backend-dispatch")
+async def test_subprocess_backend_clones_repo_before_running() -> None:
+    """SubprocessBackend.dispatch() clones the repo via harness._clone_repo."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch="feature/foo",
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        event_store=store,
+        harness=harness,
+    )
+    # _clone_repo must have been called with the branch
+    harness._clone_repo.assert_called_once()
+    _, _, clone_branch = harness._clone_repo.call_args[0]
+    assert clone_branch == "feature/foo"
+
+
+@pytest.mark.covers("§9.2", "subprocess-backend-dispatch")
+async def test_subprocess_backend_writes_hook_when_refs_set() -> None:
+    """SubprocessBackend writes the I9 hook when allowed_agent_refs is set."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=["engineering-code-reviewer.md"],
+        event_store=store,
+        harness=harness,
+    )
+    harness._write_spawn_hook.assert_called_once()
+
+
+@pytest.mark.covers("§9.2", "subprocess-backend-dispatch")
+async def test_subprocess_backend_no_hook_when_refs_none() -> None:
+    """SubprocessBackend does NOT write the I9 hook when allowed_agent_refs is None."""
+    runner, _, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        event_store=store,
+        harness=harness,
+    )
+    harness._write_spawn_hook.assert_not_called()
+
+
+@pytest.mark.covers("§9.2", "subprocess-backend-dispatch")
+async def test_subprocess_backend_clone_failure_marks_failed() -> None:
+    """SubprocessBackend marks run as failed when clone raises, without spawning."""
+    runner, calls, _ = _make_runner()
+    backend = SubprocessBackend(process_runner=runner)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness(clone_raises=RuntimeError("auth error"))
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        event_store=store,
+        harness=harness,
+    )
+    # ProcessRunner must NOT have been called — process should not spawn on clone failure
+    assert not calls, "ProcessRunner called despite clone failure"
+    status = store.get_status(run_id)
+    assert status.state == "completed"
+    assert status.conclusion == "failure"
+    error_events = [e for e in store.get_events(run_id) if e.event_type == "error"]
+    assert error_events, "No error event recorded on clone failure"
 
 
 @pytest.mark.covers("§9.2", "subprocess-backend-status-in-progress")
@@ -132,14 +269,18 @@ async def test_subprocess_backend_sets_in_progress() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     # Give background watcher time to start and set in_progress
     await asyncio.sleep(0.01)
@@ -155,14 +296,18 @@ async def test_subprocess_backend_success_on_zero_exit() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
     status = store.get_status(run_id)
@@ -178,14 +323,18 @@ async def test_subprocess_backend_failure_on_nonzero_exit() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
     status = store.get_status(run_id)
@@ -201,14 +350,18 @@ async def test_subprocess_backend_captures_json_events() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
     events = store.get_events(run_id)
@@ -225,14 +378,18 @@ async def test_subprocess_backend_cancel_marks_cancelled() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     # Force in_progress so cancel is not a no-op at the harness level
     store.set_status(run_id, RunStatus(state="in_progress"))
@@ -252,14 +409,18 @@ async def test_subprocess_backend_queue_sentinel_on_completion() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
     queue = store.get_queue(run_id)
@@ -271,7 +432,7 @@ async def test_subprocess_backend_queue_sentinel_on_completion() -> None:
 
 
 # ===========================================================================
-# K8sJobBackend — Job-spec construction
+# K8sJobBackend — entry script construction
 # ===========================================================================
 
 
@@ -290,28 +451,100 @@ def _make_k8s_backend(
     )
 
 
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_contains_clone() -> None:
+    """K8sJobBackend entry script contains a git clone for the correct repo."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    assert "git" in script
+    assert "clone" in script
+    assert "acme/myrepo" in script
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_uses_env_token_not_literal() -> None:
+    """I3: entry script uses ${GH_TOKEN} shell variable — not a literal token value."""
+    backend = _make_k8s_backend()
+    literal_token = "ghp_secret_literal_token_xyz"
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    # Script must reference the env var, not a literal value
+    assert "${GH_TOKEN}" in script or "$GH_TOKEN" in script, (
+        "Entry script must reference GH_TOKEN via shell variable"
+    )
+    assert literal_token not in script, (
+        "Literal token must NOT appear in the entry script (I3)"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_contains_branch_when_set() -> None:
+    """K8sJobBackend entry script includes --branch when branch is specified."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", "feature/my-branch", ["claude", "-p", "x"]
+    )
+    assert "--branch" in script
+    assert "feature/my-branch" in script
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_no_branch_flag_when_none() -> None:
+    """K8sJobBackend entry script has no --branch flag when branch is None."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script("acme", "myrepo", None, ["claude", "-p", "x"])
+    assert "--branch" not in script
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_contains_hook_setup_conditional() -> None:
+    """K8sJobBackend entry script has conditional hook setup block."""
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    # Must guard hook setup on ORCHESTRATOR_ALLOWED_AGENT_REFS being set
+    assert "ORCHESTRATOR_ALLOWED_AGENT_REFS" in script
+    assert "i9_spawn_hook.py" in script
+    assert "settings.json" in script
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
+def test_k8s_entry_script_contains_claude_invocation() -> None:
+    """K8sJobBackend entry script contains the claude invocation."""
+    backend = _make_k8s_backend()
+    claude_args = ["claude", "-p", "hello world", "--output-format", "stream-json"]
+    script = backend._build_entry_script("acme", "myrepo", None, claude_args)
+    # All args must appear (shell-quoted)
+    assert "claude" in script
+    assert "stream-json" in script
+
+
 @pytest.mark.covers("§9.2", "k8s-backend-job-spec-image")
 def test_k8s_build_job_spec_has_correct_image() -> None:
     """K8sJobBackend._build_job_spec uses the configured image."""
     backend = _make_k8s_backend()
-    spec = backend._build_job_spec(
-        "run-abc123",
-        ["claude", "-p", "hello"],
-        {"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
-    )
+    script = "set -e\necho hello\n"
+    spec = backend._build_job_spec("run-abc123", script, {"CLAUDE_CODE_OAUTH_TOKEN": "tok"})
     containers = spec["spec"]["template"]["spec"]["containers"]
     assert len(containers) == 1
     assert containers[0]["image"] == "ghcr.io/test/orchestrator-agent-runner:test"
 
 
 @pytest.mark.covers("§9.2", "k8s-backend-job-spec-command")
-def test_k8s_build_job_spec_has_correct_command() -> None:
-    """K8sJobBackend._build_job_spec sets the claude command correctly."""
+def test_k8s_build_job_spec_command_is_sh_c_script() -> None:
+    """K8sJobBackend._build_job_spec command is ['sh', '-c', <script>]."""
     backend = _make_k8s_backend()
-    cmd = ["claude", "-p", "hello", "--output-format", "stream-json"]
-    spec = backend._build_job_spec("run-abc", cmd, {})
+    script = "set -e\necho hello\n"
+    spec = backend._build_job_spec("run-abc", script, {})
     containers = spec["spec"]["template"]["spec"]["containers"]
-    assert containers[0]["command"] == cmd
+    cmd = containers[0]["command"]
+    assert cmd[0] == "sh"
+    assert cmd[1] == "-c"
+    assert cmd[2] == script
 
 
 @pytest.mark.covers("§9.2", "k8s-i3-master-creds-absent")
@@ -336,7 +569,8 @@ def test_k8s_i3_master_creds_absent_from_job_env() -> None:
         "PATH": "/usr/bin:/bin",
         "HOME": "/workspace",
     }
-    spec = backend._build_job_spec("run-i3test", ["claude", "-p", "x"], child_env)
+    script = "set -e\necho hello\n"
+    spec = backend._build_job_spec("run-i3test", script, child_env)
     containers = spec["spec"]["template"]["spec"]["containers"]
     env_list: list[dict[str, str]] = containers[0]["env"]
     env_keys = {e["name"] for e in env_list}
@@ -357,6 +591,41 @@ def test_k8s_i3_master_creds_absent_from_job_env() -> None:
     assert gh_entries[0]["value"] == "ghp_scoped_token_only"
 
 
+@pytest.mark.covers("§9.2", "k8s-i3-master-creds-absent")
+def test_k8s_i3_token_not_literal_in_manifest() -> None:
+    """I3: the scoped GH token value is NOT a literal string in the Job manifest.
+
+    The token is in the pod env (which is correct — it must be there for git to
+    use it).  This test asserts it does NOT appear as a literal in the entry
+    script (the command field).  The entry script references ${GH_TOKEN} as a
+    shell variable expanded at runtime — not interpolated at build time.
+    """
+    backend = _make_k8s_backend()
+    scoped_token = "ghp_scoped_token_must_not_be_literal_in_script"
+    child_env = {
+        "CLAUDE_CODE_OAUTH_TOKEN": "tok",
+        "GH_TOKEN": scoped_token,
+    }
+    # Build the full dispatch to get the actual entry script used in the spec
+    script = backend._build_entry_script(
+        "acme", "myrepo", None, ["claude", "-p", "hello"]
+    )
+    spec = backend._build_job_spec("run-i3lit", script, child_env)
+    containers = spec["spec"]["template"]["spec"]["containers"]
+    command_str = str(containers[0]["command"])
+
+    # The literal token value must NOT appear in the command/script
+    assert scoped_token not in command_str, (
+        f"Literal GH token '{scoped_token}' found in Job command (I3 violation)"
+    )
+
+    # The token must be in the pod env (that's correct — the script reads it via ${GH_TOKEN})
+    env_list: list[dict[str, str]] = containers[0]["env"]
+    gh_entries = [e for e in env_list if e["name"] == "GH_TOKEN"]
+    assert gh_entries, "GH_TOKEN must be in pod env so the script can read it"
+    assert gh_entries[0]["value"] == scoped_token
+
+
 @pytest.mark.covers("§9.2", "k8s-i9-allowed-refs-env-var")
 def test_k8s_i9_allowed_refs_in_job_env() -> None:
     """I9: ORCHESTRATOR_ALLOWED_AGENT_REFS present in Job env when set.
@@ -370,7 +639,8 @@ def test_k8s_i9_allowed_refs_in_job_env() -> None:
         "GH_TOKEN": "gh",
         "ORCHESTRATOR_ALLOWED_AGENT_REFS": "agents/reviewer.md,agents/fixer.md",
     }
-    spec = backend._build_job_spec("run-i9test", ["claude", "-p", "x"], child_env)
+    script = "set -e\necho hello\n"
+    spec = backend._build_job_spec("run-i9test", script, child_env)
     containers = spec["spec"]["template"]["spec"]["containers"]
     env_list: list[dict[str, str]] = containers[0]["env"]
     env_map = {e["name"]: e["value"] for e in env_list}
@@ -395,7 +665,8 @@ def test_k8s_i9_no_allowed_refs_env_var_absent() -> None:
         "GH_TOKEN": "gh",
         # ORCHESTRATOR_ALLOWED_AGENT_REFS deliberately absent
     }
-    spec = backend._build_job_spec("run-no-refs", ["claude", "-p", "x"], child_env)
+    script = "set -e\necho hello\n"
+    spec = backend._build_job_spec("run-no-refs", script, child_env)
     containers = spec["spec"]["template"]["spec"]["containers"]
     env_list: list[dict[str, str]] = containers[0]["env"]
     env_keys = {e["name"] for e in env_list}
@@ -409,9 +680,10 @@ def test_k8s_i9_no_allowed_refs_env_var_absent() -> None:
 def test_k8s_build_job_spec_structure() -> None:
     """K8sJobBackend._build_job_spec produces a valid K8s Job manifest."""
     backend = _make_k8s_backend()
+    script = "set -e\necho hello\n"
     spec = backend._build_job_spec(
         "run-structtest",
-        ["claude", "-p", "hello"],
+        script,
         {"CLAUDE_CODE_OAUTH_TOKEN": "tok"},
     )
     # Top-level keys
@@ -448,6 +720,7 @@ async def test_k8s_backend_dispatch_creates_job() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     # Configure immediate success
     fake_client.configure_job_outcome(
@@ -457,17 +730,55 @@ async def test_k8s_backend_dispatch_creates_job() -> None:
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "hello"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
 
     assert len(fake_client.created_jobs) == 1
     body = fake_client.created_jobs[0]["body"]
     assert body["kind"] == "Job"
     assert fake_client.created_jobs[0]["namespace"] == "test-ns"
+
+
+@pytest.mark.covers("§9.2", "k8s-backend-dispatch-creates-job")
+async def test_k8s_dispatch_does_not_clone_in_control_plane() -> None:
+    """Regression: K8sJobBackend.dispatch() does NOT call harness._clone_repo.
+
+    The clone happens inside the pod (entry script).  The control-plane image
+    has no git and must never attempt a clone for k8s dispatches.
+    """
+    fake_client = FakeKubeClient()
+    backend = _make_k8s_backend(fake_client)
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    fake_client.configure_job_outcome(
+        f"orch-agent-{run_id[:16]}",
+        statuses=[{"metadata": {"name": f"orch-agent-{run_id[:16]}"}, "status": {"succeeded": 1}}],
+    )
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        event_store=store,
+        harness=harness,
+    )
+
+    # _clone_repo must NOT have been called — the Job does the clone inside the pod
+    harness._clone_repo.assert_not_called(), "K8s backend must not clone in control-plane"
 
 
 @pytest.mark.covers("§9.2", "k8s-backend-success")
@@ -478,6 +789,7 @@ async def test_k8s_backend_watch_success() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     job_name = f"orch-agent-{run_id[:16]}"
     fake_client.configure_job_outcome(
@@ -487,11 +799,14 @@ async def test_k8s_backend_watch_success() -> None:
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
 
@@ -508,6 +823,7 @@ async def test_k8s_backend_watch_failure() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     job_name = f"orch-agent-{run_id[:16]}"
     fake_client.configure_job_outcome(
@@ -517,11 +833,14 @@ async def test_k8s_backend_watch_failure() -> None:
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
 
@@ -539,17 +858,21 @@ async def test_k8s_backend_watch_timeout() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     # No success/failure status — job stays pending forever
     # (FakeKubeClient returns empty status by default)
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.2)
 
@@ -584,14 +907,18 @@ async def test_k8s_backend_watch_read_error_retries() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.2)
 
@@ -615,14 +942,18 @@ async def test_k8s_backend_cancel_deletes_job() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
 
     # Force in_progress so cancel doesn't no-op
@@ -647,6 +978,7 @@ async def test_k8s_backend_dispatch_emits_job_created_event() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     job_name = f"orch-agent-{run_id[:16]}"
     fake_client.configure_job_outcome(
@@ -656,11 +988,14 @@ async def test_k8s_backend_dispatch_emits_job_created_event() -> None:
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.05)
 
@@ -678,6 +1013,7 @@ async def test_k8s_backend_cleanup_job_on_success() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     job_name = f"orch-agent-{run_id[:16]}"
     fake_client.configure_job_outcome(
@@ -687,11 +1023,14 @@ async def test_k8s_backend_cleanup_job_on_success() -> None:
 
     await backend.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/repo",
-        work_dir="/tmp/work",
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     await asyncio.sleep(0.1)
 
@@ -706,10 +1045,6 @@ async def test_k8s_backend_cleanup_job_on_success() -> None:
 @pytest.mark.covers("§9.2", "harness-delegates-to-backend")
 async def test_harness_dispatch_delegates_to_backend() -> None:
     """ClaudeCodeHarnessPort.dispatch() delegates to the configured backend."""
-    from unittest.mock import AsyncMock, patch
-
-    from src.ports.harness import ClaudeCodeHarnessPort
-
     fake_backend = FakeExecutionBackend()
 
     port = ClaudeCodeHarnessPort(
@@ -722,8 +1057,6 @@ async def test_harness_dispatch_delegates_to_backend() -> None:
         execution_backend=fake_backend,
     )
 
-    from src.domain.types import DispatchContext
-
     ctx = DispatchContext(
         contract="agents/implementer.md",
         model="claude-sonnet-4-6",
@@ -733,8 +1066,6 @@ async def test_harness_dispatch_delegates_to_backend() -> None:
     with patch(
         "src.ports.harness._mint_scoped_installation_token",
         new=AsyncMock(return_value="scoped-token"),
-    ), patch.object(
-        ClaudeCodeHarnessPort, "_clone_repo", new=AsyncMock(return_value=None)
     ):
         handle = await port.dispatch(ctx)
 
@@ -743,6 +1074,54 @@ async def test_harness_dispatch_delegates_to_backend() -> None:
     dispatched = fake_backend.dispatched[0]
     assert dispatched["run_id"] == handle.run_id
     assert "claude" in dispatched["claude_args"]
+    # Backend receives repo info, not a cloned dir
+    assert dispatched["repo_owner"] == "acme"
+    assert dispatched["repo_name"] == "myrepo"
+
+
+@pytest.mark.covers("§9.2", "harness-delegates-to-backend")
+async def test_harness_dispatch_does_not_clone_for_k8s_backend() -> None:
+    """Regression: harness.dispatch() does NOT call _clone_repo when using K8s backend.
+
+    The K8sJobBackend is responsible for cloning inside the pod.  Cloning in
+    the control-plane is wrong (no git in that image) and would produce a
+    temp dir that the Job pod never sees.
+    """
+    fake_backend = FakeExecutionBackend()
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token="tok",
+        app_id="app",
+        private_key_pem="pem",
+        installation_id="inst",
+        repo_owner="acme",
+        repo_name="myrepo",
+        execution_backend=fake_backend,
+    )
+
+    ctx = DispatchContext(
+        contract="agents/implementer.md",
+        model="claude-sonnet-4-6",
+        max_turns=30,
+        forge_token_scope="repo-branch",
+    )
+
+    clone_called = False
+
+    async def _spy_clone(gh_token: str, work_dir: str, branch: str | None) -> None:
+        nonlocal clone_called
+        clone_called = True
+
+    with patch(
+        "src.ports.harness._mint_scoped_installation_token",
+        new=AsyncMock(return_value="scoped-token"),
+    ), patch.object(ClaudeCodeHarnessPort, "_clone_repo", side_effect=_spy_clone):
+        await port.dispatch(ctx)
+
+    assert not clone_called, (
+        "harness._clone_repo must NOT be called when using a custom (K8s-like) backend — "
+        "the backend owns the clone"
+    )
 
 
 @pytest.mark.covers("§9.2", "harness-cancel-delegates-to-backend")
@@ -752,7 +1131,7 @@ async def test_harness_cancel_delegates_to_backend() -> None:
     We register a run manually (not via dispatch) with in_progress status so
     that the harness's terminal-guard doesn't block the cancel() call.
     """
-    from src.ports.harness import ClaudeCodeHarnessPort, RunHandle
+    from src.ports.harness import RunHandle
 
     fake_backend = FakeExecutionBackend()
 
@@ -819,14 +1198,18 @@ async def test_fake_backend_dispatch_records_call() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await fake.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/r",
-        work_dir="/tmp/w",
         child_env={"GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     assert len(fake.dispatched) == 1
     assert fake.dispatched[0]["run_id"] == run_id
@@ -840,14 +1223,18 @@ async def test_fake_backend_configure_fail() -> None:
     store = RunEventStore()
     run_id = _run_id()
     store.register(run_id)
+    harness = _make_fake_harness()
 
     await fake.dispatch(
         run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
         claude_args=["claude", "-p", "x"],
-        repo_dir="/tmp/r",
-        work_dir="/tmp/w",
         child_env={},
+        allowed_agent_refs=None,
         event_store=store,
+        harness=harness,
     )
     assert store.get_status(run_id).conclusion == "failure"
 
