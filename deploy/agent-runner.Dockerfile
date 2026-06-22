@@ -48,7 +48,7 @@ RUN apt-get update \
 
 # Install the claude CLI globally via npm
 # Pin to a known version; bump intentionally after reviewing changelog
-RUN npm install -g @anthropic-ai/claude-code@latest \
+RUN npm install -g @anthropic-ai/claude-code@2.1.185 \
  && claude --version
 
 # ---------------------------------------------------------------------------
