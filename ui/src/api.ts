@@ -78,6 +78,21 @@ export interface ConvergeDetail {
 
 const BASE = "";
 
+export interface EscalationSummary {
+  pr_number: number;
+  labels: string[];
+  title: string;
+  cause: string;
+}
+
+export interface ReconcileReport {
+  stale_acted: number;
+  conflicts_flagged: number;
+  rearmed: number;
+  redispatched: number;
+  escalated: number;
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
@@ -95,6 +110,21 @@ export const api = {
     json<ConvergeDetail>(`/api/prs/${owner}/${repo}/${number}/converge`),
   devDispatch: () =>
     json<{ run_id: string }>("/api/dev/dispatch", { method: "POST" }),
+  listEscalations: (owner: string, repo: string) =>
+    json<EscalationSummary[]>(`/api/repos/${owner}/${repo}/escalations`),
+  deescalatePr: (
+    owner: string,
+    repo: string,
+    prNumber: number,
+    intent: "resume" | "requeue" | "acknowledge",
+    operator = "operator",
+  ) =>
+    json<{ status: string }>(
+      `/api/repos/${owner}/${repo}/prs/${prNumber}/deescalate?operator=${encodeURIComponent(operator)}&intent=${encodeURIComponent(intent)}`,
+      { method: "POST" },
+    ),
+  devReconcile: () =>
+    json<ReconcileReport[]>("/api/dev/reconcile", { method: "POST" }),
 };
 
 /** Subscribe to SSE stream for a run. Returns an unsubscribe function. */

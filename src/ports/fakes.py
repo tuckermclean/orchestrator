@@ -830,6 +830,7 @@ class FakeConvergeStateStore:
     def _init_state(self) -> None:
         self._rounds: dict[str, int] = {}
         self._round_starts: dict[str, datetime] = {}
+        self._run_handles: dict[str, RunHandle] = {}
 
         # Call logs
         self.get_converge_round_calls: list[PRRef] = []
@@ -837,6 +838,8 @@ class FakeConvergeStateStore:
         self.get_round_started_calls: list[PRRef] = []
         self.set_round_started_calls: list[tuple[PRRef, datetime]] = []
         self.clear_calls: list[PRRef] = []
+        self.get_last_run_handle_calls: list[PRRef] = []
+        self.set_last_run_handle_calls: list[tuple[PRRef, RunHandle]] = []
 
     def __init__(self) -> None:
         self._init_state()
@@ -874,3 +877,12 @@ class FakeConvergeStateStore:
         key = self._key(pr_ref)
         self._rounds.pop(key, None)
         self._round_starts.pop(key, None)
+        self._run_handles.pop(key, None)
+
+    async def get_last_run_handle(self, pr_ref: PRRef) -> RunHandle | None:
+        self.get_last_run_handle_calls.append(pr_ref)
+        return self._run_handles.get(self._key(pr_ref))
+
+    async def set_last_run_handle(self, pr_ref: PRRef, handle: RunHandle) -> None:
+        self.set_last_run_handle_calls.append((pr_ref, handle))
+        self._run_handles[self._key(pr_ref)] = handle

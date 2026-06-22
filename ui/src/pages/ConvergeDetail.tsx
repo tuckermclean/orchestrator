@@ -7,6 +7,134 @@ import {
   type ConvergeRound,
 } from "../api";
 
+// ---------------------------------------------------------------------------
+// Escalation action panel — shown when PR state is ESCALATED
+// ---------------------------------------------------------------------------
+
+function EscalationPanel({
+  owner,
+  repo,
+  prNumber,
+  cause,
+}: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  cause: string | null;
+}) {
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [message, setMessage] = useState<string | null>(null);
+
+  const handleDeescalate = (intent: "resume" | "requeue" | "acknowledge") => {
+    setStatus("loading");
+    // operator is a placeholder until Phase 9 auth — do NOT pass the intent label as operator.
+    api
+      .deescalatePr(owner, repo, prNumber, intent)
+      .then(() => {
+        setStatus("done");
+        setMessage(`${intent} acknowledged — NEEDS_HUMAN removed. PR re-enters the pipeline.`);
+      })
+      .catch((e: Error) => {
+        setStatus("error");
+        setMessage(e.message);
+      });
+  };
+
+  return (
+    <div
+      style={{
+        background: "#1a0a0a",
+        border: "1px solid #f8514944",
+        borderRadius: "8px",
+        padding: "16px",
+        marginBottom: "16px",
+      }}
+    >
+      <div style={{ color: "#f85149", fontWeight: 600, marginBottom: "8px", fontSize: "15px" }}>
+        Escalated — Human action required
+      </div>
+      {cause && (
+        <div style={{ color: "#8b949e", fontSize: "13px", marginBottom: "12px" }}>
+          Cause:{" "}
+          <code
+            style={{
+              background: "#0d1117",
+              borderRadius: "4px",
+              padding: "1px 6px",
+              color: "#f85149",
+            }}
+          >
+            {cause}
+          </code>
+        </div>
+      )}
+
+      {status === "done" && (
+        <div style={{ color: "#3fb950", fontSize: "13px", marginBottom: "8px" }}>{message}</div>
+      )}
+      {status === "error" && (
+        <div style={{ color: "#f85149", fontSize: "13px", marginBottom: "8px" }}>{message}</div>
+      )}
+
+      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={status === "loading" || status === "done"}
+          onClick={() => handleDeescalate("resume")}
+          style={{
+            background: "#238636",
+            border: "1px solid #2ea04388",
+            borderRadius: "6px",
+            color: "#ffffff",
+            cursor: status === "done" ? "default" : "pointer",
+            fontSize: "13px",
+            fontWeight: 600,
+            padding: "6px 16px",
+            opacity: status === "done" ? 0.5 : 1,
+          }}
+        >
+          Resume
+        </button>
+        <button
+          type="button"
+          disabled={status === "loading" || status === "done"}
+          onClick={() => handleDeescalate("requeue")}
+          style={{
+            background: "#1158a7",
+            border: "1px solid #388bfd44",
+            borderRadius: "6px",
+            color: "#ffffff",
+            cursor: status === "done" ? "default" : "pointer",
+            fontSize: "13px",
+            fontWeight: 600,
+            padding: "6px 16px",
+            opacity: status === "done" ? 0.5 : 1,
+          }}
+        >
+          Re-queue
+        </button>
+        <button
+          type="button"
+          disabled={status === "loading" || status === "done"}
+          onClick={() => handleDeescalate("acknowledge")}
+          style={{
+            background: "#21262d",
+            border: "1px solid #30363d",
+            borderRadius: "6px",
+            color: "#8b949e",
+            cursor: status === "done" ? "default" : "pointer",
+            fontSize: "13px",
+            padding: "6px 16px",
+            opacity: status === "done" ? 0.5 : 1,
+          }}
+        >
+          Acknowledge (manual)
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const ESCALATION_DESCRIPTIONS: Record<string, string> = {
   E1: "protected-path",
   E2: "no-progress",
@@ -316,6 +444,16 @@ export default function ConvergeDetail() {
               )}
             </div>
           </div>
+
+          {/* Escalation action panel — shown only when ESCALATED */}
+          {detail.state === "ESCALATED" && owner && repo && (
+            <EscalationPanel
+              owner={owner}
+              repo={repo}
+              prNumber={detail.pr_ref.number}
+              cause={detail.escalation_cause}
+            />
+          )}
 
           {detail.rounds.length === 0 && (
             <div style={card}>

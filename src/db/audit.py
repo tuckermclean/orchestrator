@@ -10,16 +10,26 @@ from src.domain.types import IssueRef, PRRef, RepoRef
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS audit_events (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts            TEXT    NOT NULL,
-    repo_owner    TEXT    NOT NULL,
-    repo_name     TEXT    NOT NULL,
-    entity_type   TEXT    NOT NULL,
-    entity_number INTEGER NOT NULL,
-    action        TEXT    NOT NULL,
-    operator      TEXT
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                      TEXT    NOT NULL,
+    repo_owner              TEXT    NOT NULL,
+    repo_name               TEXT    NOT NULL,
+    entity_type             TEXT    NOT NULL,
+    entity_number           INTEGER NOT NULL,
+    action                  TEXT    NOT NULL,
+    operator                TEXT,
+    escalation_cause        TEXT,
+    pr_labels               TEXT
 )
 """
+
+# Migration: add columns to existing tables created before the schema extension.
+_ALTER_ADD_ESCALATION_CAUSE = (
+    "ALTER TABLE audit_events ADD COLUMN escalation_cause TEXT"
+)
+_ALTER_ADD_PR_LABELS = (
+    "ALTER TABLE audit_events ADD COLUMN pr_labels TEXT"
+)
 
 
 class AuditLog:
@@ -36,6 +46,12 @@ class AuditLog:
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_TABLE)
+        # Idempotent column additions for existing schemas (no-op on fresh tables).
+        for alter in (_ALTER_ADD_ESCALATION_CAUSE, _ALTER_ADD_PR_LABELS):
+            try:
+                await self._db.execute(alter)
+            except Exception:
+                pass  # column already exists
         await self._db.commit()
 
     @property
@@ -50,8 +66,19 @@ class AuditLog:
         entity_ref: IssueRef | PRRef,
         action: str,
         operator: str | None = None,
+        escalation_cause: str | None = None,
+        pr_labels: list[str] | None = None,
     ) -> None:
-        """Append one audit record (I6)."""
+        """Append one audit record (I6, §11.3).
+
+        Optional structured fields:
+          - ``escalation_cause``: §6 E-code or None (for deescalate_pr records).
+          - ``pr_labels``: label snapshot at the time of the audit event (stored as
+            comma-separated string for forensic inspection).
+
+        Callers other than ``deescalate_pr`` (intake, promote, decline) pass neither
+        optional field; the schema extension is backward-compatible.
+        """
         ts = datetime.now(tz=UTC).isoformat()
         if isinstance(entity_ref, IssueRef):
             entity_type = "issue"
@@ -60,13 +87,26 @@ class AuditLog:
             entity_type = "pr"
             entity_number = entity_ref.number
 
+        pr_labels_str = ",".join(pr_labels) if pr_labels is not None else None
+
         await self._conn.execute(
             """
             INSERT INTO audit_events
-                (ts, repo_owner, repo_name, entity_type, entity_number, action, operator)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (ts, repo_owner, repo_name, entity_type, entity_number,
+                 action, operator, escalation_cause, pr_labels)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (ts, repo.owner, repo.name, entity_type, entity_number, action, operator),
+            (
+                ts,
+                repo.owner,
+                repo.name,
+                entity_type,
+                entity_number,
+                action,
+                operator,
+                escalation_cause,
+                pr_labels_str,
+            ),
         )
         await self._conn.commit()
 

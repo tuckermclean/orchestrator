@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -10,7 +12,9 @@ from src.decisions.pipeline_health import pipeline_health
 from src.domain.types import (
     LABEL_AGENT_WORK,
     LABEL_AWAITING_PROMOTION,
+    LABEL_NEEDS_HUMAN,
     LABEL_TRIAGE,
+    RECONCILER_CRON,
     HealthReport,
     IssueRef,
     PRRef,
@@ -23,7 +27,11 @@ from src.domain.types import (
 )
 from src.engine.dispatch import Engine
 from src.engine.intake import IntakeEngine
-from src.ports.base import ForgePort, HarnessPort, SessionPort
+from src.engine.reconcile import ReconcileReport
+from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
+
+# Default LRU dedup window (number of delivery IDs to remember)
+_DEFAULT_DEDUP_WINDOW = 1000
 
 
 def _extract_repo(payload: dict[str, object]) -> RepoRef | None:
@@ -46,11 +54,22 @@ class OrchestratorService:
         session: SessionPort,
         audit: AuditLog | None = None,
         allowlist: list[str] | None = None,
+        counter: CounterStore | None = None,
+        converge_state: ConvergeStateStore | None = None,
+        dedup_window: int = _DEFAULT_DEDUP_WINDOW,
     ) -> None:
-        self.engine = Engine(forge, harness, session)
+        self.engine = Engine(
+            forge=forge,
+            harness=harness,
+            session=session,
+            counter=counter,
+            converge_state=converge_state,
+        )
         self.forge = forge
         self.harness = harness
         self.session = session
+        self._counter = counter
+        self._converge_state = converge_state
 
         # Audit log — default to in-memory if none provided
         self._audit = audit if audit is not None else AuditLog()
@@ -64,12 +83,72 @@ class OrchestratorService:
             allowlist=self._allowlist,
         )
 
+        # Delivery-ID LRU dedup cache (SPEC §11.3) — bounded by dedup_window entries
+        self._dedup_cache: OrderedDict[str, bool] = OrderedDict()
+        self._dedup_window = dedup_window
+
+        # Reconciler cron task handle
+        self._reconcile_task: asyncio.Task[None] | None = None
+
+    # -----------------------------------------------------------------------
+    # Lifecycle
+    # -----------------------------------------------------------------------
+
     async def startup(self) -> None:
         """Initialise async resources (call once from the ASGI lifespan handler)."""
         await self._audit.init()
 
-    async def handle_event(self, event_name: str, payload: dict[str, object]) -> None:
-        """Route forge webhook events to the engine."""
+    async def start_reconciler(self, repo: RepoRef) -> None:
+        """Start the reconciler cron loop for the given repo.
+
+        Runs ``Engine.reconcile`` every ``RECONCILER_CRON`` cadence (15 min) in the
+        background.  Call ``stop_reconciler()`` to cancel the task cleanly.
+        """
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(_cron_to_seconds(RECONCILER_CRON))
+                try:
+                    await self.engine.reconcile(repo)
+                except Exception:
+                    pass  # isolated: reconciler errors never crash the loop
+
+        self._reconcile_task = asyncio.create_task(_loop())
+
+    async def stop_reconciler(self) -> None:
+        """Cancel the reconciler cron loop and drain in-flight tasks."""
+        if self._reconcile_task is not None:
+            self._reconcile_task.cancel()
+            try:
+                await self._reconcile_task
+            except asyncio.CancelledError:
+                pass
+            self._reconcile_task = None
+
+    # -----------------------------------------------------------------------
+    # Event routing
+    # -----------------------------------------------------------------------
+
+    async def handle_event(
+        self,
+        event_name: str,
+        payload: dict[str, object],
+        delivery_id: str | None = None,
+    ) -> dict[str, object]:
+        """Route forge webhook events to the engine.
+
+        Returns ``{"handled": True}`` on normal dispatch or
+        ``{"handled": False, "reason": "duplicate_delivery_id"}`` when the delivery
+        has already been processed (SPEC §11.3 delivery-ID dedup).
+        """
+        # Step 1 — delivery-ID dedup (SPEC §11.3)
+        if delivery_id is not None:
+            if delivery_id in self._dedup_cache:
+                return {"handled": False, "reason": "duplicate_delivery_id"}
+            # Record before processing; evict oldest entry if window is full
+            self._dedup_cache[delivery_id] = True
+            if len(self._dedup_cache) > self._dedup_window:
+                self._dedup_cache.popitem(last=False)
+
         issue_ref: IssueRef | None = None
         pr_ref: PRRef | None = None
         comment_body: str | None = None
@@ -110,6 +189,26 @@ class OrchestratorService:
                 comment_body=comment_body,
             )
 
+        return {"handled": True}
+
+    # -----------------------------------------------------------------------
+    # Reconciler
+    # -----------------------------------------------------------------------
+
+    async def reconcile_now(self, repo: RepoRef | None = None) -> list[ReconcileReport]:
+        """Run reconcile immediately for one repo (or the default repo).
+
+        Idempotent: calling twice produces the same effect as calling once since
+        the reconciler re-reads live forge label state and skips already-acted entities.
+        """
+        target = repo if repo is not None else RepoRef(owner="demo", name="repo")
+        report = await self.engine.reconcile(target)
+        return [report]
+
+    # -----------------------------------------------------------------------
+    # Run observation
+    # -----------------------------------------------------------------------
+
     async def list_runs(self, repo: RepoRef) -> list[RunSummary]:
         return await self.session.list_runs(repo)
 
@@ -141,6 +240,84 @@ class OrchestratorService:
             allowed_agent_refs=None,
         )
         return await self.harness.dispatch(context)
+
+    # -----------------------------------------------------------------------
+    # Escalation management
+    # -----------------------------------------------------------------------
+
+    async def list_escalations(self, repo: RepoRef) -> list[dict[str, object]]:
+        """List PRs currently carrying LABEL_NEEDS_HUMAN (escalated).
+
+        Returns a list of dicts with pr_number, labels, and cause hint derived
+        from labels (E7=merge-conflict, E8=stale build-cap, etc.).
+        """
+        prs = await self.forge.list_prs(repo, state="open", labels=[LABEL_NEEDS_HUMAN])
+        result: list[dict[str, object]] = []
+        for pr in prs:
+            cause = _infer_escalation_cause(pr.labels)
+            result.append(
+                {
+                    "pr_number": pr.ref.number,
+                    "labels": pr.labels,
+                    "title": pr.title,
+                    "cause": cause,
+                }
+            )
+        return result
+
+    async def deescalate_pr(
+        self,
+        pr_ref: PRRef,
+        operator: str,
+    ) -> None:
+        """Remove LABEL_NEEDS_HUMAN from a PR, reset counters, clear converge state.
+
+        P16/P17 recovery path (SPEC §11.3):
+          1. Read current labels for audit record.
+          2. Remove LABEL_NEEDS_HUMAN from the PR.
+          3. Reset ``stale-pr`` counter (SPEC §11.3 + §8.2a).
+          4. Clear converge state so next converge starts at R1 (H3 fix).
+          5. Write audit record — after all mutations (observer pattern, I6).
+        """
+        # Step 1 — read pre-mutation labels for the audit record
+        pr = await self.forge.get_pr(pr_ref)
+        pr_labels_at_deescalation = list(pr.labels)
+
+        # Step 2 — remove the escalation label
+        await self.forge.remove_label(pr_ref, LABEL_NEEDS_HUMAN)
+
+        # Step 3 — reset stale-pr counter so RC-1 starts fresh.
+        # A None counter store would let RC-1 immediately re-escalate (redispatch_count
+        # stays at cap); raise so the operator knows the store is mis-wired.
+        if self._counter is None:
+            raise RuntimeError(
+                "deescalate_pr: counter store is None — "
+                "cannot reset stale-pr/converge-retry counters; RC-1 would re-escalate immediately"
+            )
+        await self._counter.reset(pr_ref, "stale-pr")
+        await self._counter.reset(pr_ref, "converge-retry")
+
+        # Step 4 — clear converge loop state so next Engine.converge starts at R1.
+        # A None converge_state store would leave stale round data; raise so the
+        # operator knows the store is mis-wired.
+        if self._converge_state is None:
+            raise RuntimeError(
+                "deescalate_pr: converge_state store is None — "
+                "cannot clear converge round; stale ConvergeState may cause incorrect re-entry"
+            )
+        await self._converge_state.clear_converge_state(pr_ref)
+
+        # Step 5 — single complete §11.3 audit record (I6, observer pattern: written
+        # after all state changes so the trail records only committed state).
+        escalation_cause = _infer_escalation_cause(pr_labels_at_deescalation)
+        await self._audit.record(
+            repo=pr_ref.repo,
+            entity_ref=pr_ref,
+            action="deescalate_pr",
+            operator=operator,
+            escalation_cause=escalation_cause if escalation_cause else None,
+            pr_labels=pr_labels_at_deescalation,
+        )
 
     # -----------------------------------------------------------------------
     # Triage (human intake gate) — SPEC §11.3
@@ -188,7 +365,7 @@ class OrchestratorService:
           2. Dispatch agent — bypasses dedup guard (explicit human promotion always dispatches).
           3. Write audit record (I6 + I7) — after observable state is changed.
 
-        # TODO: operator must be derived from an authenticated session before production use.
+        # operator is a placeholder; Phase 9 auth will derive it from an authenticated session.
         """
         from src.decisions.route_entry import route_entry as _route_entry
         from src.domain.types import DispatchContext
@@ -236,3 +413,30 @@ class OrchestratorService:
             action="decline",
             operator=operator,
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _cron_to_seconds(cron: str) -> int:
+    """Convert a simple cron expression to seconds between ticks.
+
+    Supports only ``*/N * * * *`` (every N minutes) format — sufficient for
+    the RECONCILER_CRON default ``*/15 * * * *`` (900 seconds).
+    """
+    parts = cron.strip().split()
+    if len(parts) == 5 and parts[0].startswith("*/") and all(p == "*" for p in parts[1:]):
+        minutes = int(parts[0][2:])
+        return minutes * 60
+    return 900  # fallback: 15 minutes
+
+
+def _infer_escalation_cause(labels: list[str]) -> str:
+    """Heuristic escalation cause from PR labels (for the UI escalation section)."""
+    if "converge" in labels:
+        return "E5:cap-reached or E2:no-progress"
+    if "agent:implementing" in labels:
+        return "E8:stale-build-cap or E9:stale-no-issue"
+    return "E7:merge-conflict or manual"

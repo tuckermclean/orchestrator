@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type HealthReport } from "../api";
+import { api, type EscalationSummary, type HealthReport } from "../api";
 
 const verdictColor: Record<string, string> = {
   BLOCKED: "#f85149",
@@ -16,10 +16,15 @@ const card: React.CSSProperties = {
   marginBottom: "16px",
 };
 
+// Default demo owner/repo for escalation listing
+const _DEMO_OWNER = "demo";
+const _DEMO_REPO = "repo";
+
 export default function Dashboard() {
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [escalations, setEscalations] = useState<EscalationSummary[]>([]);
 
   const load = () => {
     api
@@ -30,6 +35,12 @@ export default function Dashboard() {
         setError(null);
       })
       .catch((e: Error) => setError(e.message));
+    api
+      .listEscalations(_DEMO_OWNER, _DEMO_REPO)
+      .then(setEscalations)
+      .catch(() => {
+        // non-fatal: escalation list is best-effort in the dashboard
+      });
   };
 
   useEffect(() => {
@@ -118,6 +129,81 @@ export default function Dashboard() {
           → View all runs
         </Link>
       </div>
+
+      {/* Escalation list — shown only when there are blocked PRs */}
+      {escalations.length > 0 && (
+        <div style={{ ...card, marginTop: "24px", borderLeft: "4px solid #f85149" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              marginBottom: "12px",
+            }}
+          >
+            <span
+              style={{
+                background: "#f85149",
+                color: "#0d1117",
+                fontWeight: 700,
+                padding: "2px 10px",
+                borderRadius: "4px",
+                fontSize: "13px",
+              }}
+            >
+              BLOCKED
+            </span>
+            <span style={{ fontWeight: 600, fontSize: "15px" }}>
+              {escalations.length} escalated PR{escalations.length !== 1 ? "s" : ""}
+            </span>
+            {health?.verdict === "AT_RISK" && (
+              <span
+                style={{
+                  background: "#d29922",
+                  color: "#0d1117",
+                  fontWeight: 700,
+                  padding: "2px 8px",
+                  borderRadius: "4px",
+                  fontSize: "12px",
+                }}
+              >
+                AT_RISK
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            {escalations.map((e) => (
+              <div
+                key={e.pr_number}
+                style={{
+                  background: "#0d1117",
+                  border: "1px solid #30363d",
+                  borderRadius: "6px",
+                  padding: "10px 12px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: "13px",
+                }}
+              >
+                <span>
+                  <span style={{ fontWeight: 600 }}>#{e.pr_number}</span>{" "}
+                  <span style={{ color: "#8b949e" }}>{e.title}</span>
+                </span>
+                <span
+                  style={{
+                    color: "#f85149",
+                    fontFamily: "monospace",
+                    fontSize: "12px",
+                  }}
+                >
+                  {e.cause}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
