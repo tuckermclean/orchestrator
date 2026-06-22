@@ -51,8 +51,8 @@ orch-test.env
 # CI/CD — not needed in image
 .github/
 
-# UI source tree (compiled dist is included via COPY . .)
-# Only ui/dist needs to be present; ui/node_modules should not be.
+# UI: ui/dist is built fresh in the ui-builder stage (see Dockerfile), so any local
+# dist/ (already excluded above) and node_modules are kept out of the build context.
 ui/node_modules/
 
 # Claude worktree directories
