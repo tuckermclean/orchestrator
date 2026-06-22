@@ -19,6 +19,7 @@ from src.db.audit import AuditLog
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
+from src.service.registry import EnvRepoRegistry
 
 
 def _has_prod_creds() -> bool:
@@ -207,21 +208,38 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
-    # For the production singleton we default to a placeholder repo; the service
-    # routes per-event to the repo extracted from each payload.
-    default_repo = RepoRef(
-        owner=os.environ.get("GITHUB_OWNER", "demo"),
-        name=os.environ.get("GITHUB_REPO", "repo"),
+    # Build the repo registry.
+    #
+    # Multi-repo mode: set REPOS_JSON to a JSON array of repo-config objects.
+    # Single-repo backward-compat: GITHUB_OWNER + GITHUB_REPO + ALLOWLIST are
+    # used when REPOS_JSON is absent — produces a one-entry registry so all
+    # existing single-repo deploys (and Helm values from #61/#66) keep working.
+    repos_json = os.environ.get("REPOS_JSON") or None
+    allowlist_raw = os.environ.get("ALLOWLIST", "")
+    registry = EnvRepoRegistry.from_env(
+        repos_json=repos_json,
+        github_owner=os.environ.get("GITHUB_OWNER"),
+        github_repo=os.environ.get("GITHUB_REPO"),
+        allowlist_raw=allowlist_raw,
     )
+
+    # Primary repo for port construction (first enabled repo, or legacy default).
+    # Credentials stay in PortProvider — not in the registry (I3).
+    enabled_repos = [c for c in registry._configs if c.enabled]
+    if enabled_repos:
+        default_repo = enabled_repos[0].repo
+    else:
+        default_repo = RepoRef(
+            owner=os.environ.get("GITHUB_OWNER", "demo"),
+            name=os.environ.get("GITHUB_REPO", "repo"),
+        )
+
     provider = PortProvider.from_env()
     forge, harness, session = provider.ports(default_repo)
     audit = AuditLog()
 
-    # I1: parse ALLOWLIST from env (comma-separated GitHub logins).
-    # DEFAULT-DENY (issue #48): an empty/unset ALLOWLIST is fail-closed — it
-    # admits ONLY the repo owner (GITHUB_OWNER) and queues everyone else.
-    # To allow additional authors, populate ALLOWLIST with their GitHub logins.
-    allowlist_raw = os.environ.get("ALLOWLIST", "")
+    # I1: single-repo backward-compat allowlist (used when no registry or as fallback).
+    # Multi-repo mode reads per-repo allowlist from the registry at event time.
     allowlist = [u.strip() for u in allowlist_raw.split(",") if u.strip()]
 
     service = OrchestratorService(
@@ -231,6 +249,7 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
         audit=audit,
         allowlist=allowlist,
         owner=default_repo.owner,
+        registry=registry,
     )
     return service, webhook_secret
 
