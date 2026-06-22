@@ -54,6 +54,7 @@ class OrchestratorService:
         session: SessionPort,
         audit: AuditLog | None = None,
         allowlist: list[str] | None = None,
+        owner: str = "",
         counter: CounterStore | None = None,
         converge_state: ConvergeStateStore | None = None,
         dedup_window: int = _DEFAULT_DEDUP_WINDOW,
@@ -74,6 +75,7 @@ class OrchestratorService:
         # Audit log — default to in-memory if none provided
         self._audit = audit if audit is not None else AuditLog()
         self._allowlist = allowlist if allowlist is not None else []
+        self._owner = owner
 
         self._intake_engine = IntakeEngine(
             forge=forge,
@@ -81,6 +83,7 @@ class OrchestratorService:
             session=session,
             audit=self._audit,
             allowlist=self._allowlist,
+            owner=self._owner,
         )
 
         # Delivery-ID LRU dedup cache (SPEC §11.3) — bounded by dedup_window entries

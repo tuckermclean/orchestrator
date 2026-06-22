@@ -32,12 +32,14 @@ class IntakeEngine:
         session: SessionPort,
         audit: AuditLog,
         allowlist: list[str],
+        owner: str = "",
     ) -> None:
         self.forge = forge
         self.harness = harness
         self.session = session
         self.audit = audit
         self.allowlist = allowlist
+        self.owner = owner
 
     async def intake(self, issue_ref: IssueRef) -> RunHandle | None:
         """Run the intake gate for one issue.
@@ -54,7 +56,7 @@ class IntakeEngine:
         issue = await self.forge.get_issue(issue_ref)
 
         # Step 2: pure synchronous decision (I4 — never await this)
-        decision = decide_intake(issue, self.allowlist)
+        decision = decide_intake(issue, self.allowlist, self.owner)
 
         # Step 3: dispatch triager (read-only; I5 — must use "repo-comment" scope)
         triager_context = DispatchContext(
