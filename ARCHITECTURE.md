@@ -124,16 +124,18 @@ core machine and ensures a structured triage comment for each.
 
 1. `issues:opened`/`reopened` → `OrchestratorService` checks `repo.intake_enabled`; if true →
    `Engine.intake`.
-2. `decide_intake(author, allowlist)` → `{admit, queue}` (pure synchronous; `SPEC.md §8.11`).
-   Decision runs before the triager so the result can be audit-logged synchronously (I6).
-3. Audit record written to DB: `{event:"intake", actor, decision, timestamp}` (`SPEC.md §10.4`).
-4. `Engine.intake` dispatches the **triager agent** (read-only: reads issue body, posts one
+2. `decide_intake(author, allowlist)` → `{admit, queue}` (pure synchronous, no side effects; I4;
+   `SPEC.md §8.11`).
+3. `Engine.intake` dispatches the **triager agent** (read-only: reads issue body, posts one
    structured comment summarising the triage decision; never writes code or mutates labels).
-5. **admit** → `set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic; I7) → fires
+4. **admit** → `set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic; I7) → fires
    `issues:labeled` → I2 (core machine).
-6. **queue** → `set_labels([LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic; I7) → issue
+5. **queue** → `set_labels([LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic; I7) → issue
    appears in PWA triage queue. Operator either promotes (one-tap: `set_labels` swap) or
    declines (close issue).
+6. Audit record written to DB: `{event:"intake", actor, decision, timestamp}` (I6; `SPEC.md §10.4`).
+   Audit is an observer, not a gate — recorded *after* the committed label swap (step 4/5), so the
+   trail only ever reflects state that was actually applied (a failed `set_labels` writes no record).
 
 **`decide_intake` truth table:**
 
