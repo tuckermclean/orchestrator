@@ -3,8 +3,9 @@
 # Orchestrator control-plane image
 # ---------------------------------------------------------------------------
 # Multi-stage build:
-#   builder  — installs Python deps + fetches the specialist agent pack
-#   runtime  — slim final image, non-root, readOnlyRootFilesystem-safe
+#   builder    — installs Python deps + fetches the specialist agent pack
+#   ui-builder — builds the Vite PWA (ui/dist) served by the control-plane (#31)
+#   runtime    — slim final image, non-root, readOnlyRootFilesystem-safe
 #
 # The claude CLI and git are NOT in this image.  Agent subprocesses run in
 # separate Kubernetes Job pods (see deploy/agent-runner.Dockerfile, issue #51).
@@ -78,6 +79,18 @@ RUN git clone --no-tags --filter=blob:none "${AGENT_PACK_REPO_URL}" /tmp/agency-
     done \
  && rm -rf /tmp/agency-agents
 
+# ---- UI builder stage (Vite PWA, #31) ----
+# The control-plane serves the built SPA at / (main.py mounts ui/dist when present).
+# ui/dist is git-ignored and never committed, so it MUST be built here — a clean
+# checkout has no dist, and there is no node in the python runtime image.
+FROM node:22-slim AS ui-builder
+WORKDIR /ui
+# Lockfile-first for layer caching; package-lock.json is committed so `npm ci` is reproducible.
+COPY ui/package.json ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/ ./
+RUN npm run build   # tsc && vite build → /ui/dist
+
 # ---- runtime stage ----
 FROM base AS runtime
 
@@ -89,6 +102,8 @@ RUN groupadd --gid 1001 orch \
 COPY --from=builder /app/venv /app/venv
 COPY --from=builder /build /app
 COPY --from=builder /app/.agents /app/.agents
+# Built PWA — main.py mounts /app/ui/dist at / when present (#31)
+COPY --from=ui-builder /ui/dist /app/ui/dist
 
 WORKDIR /app
 
