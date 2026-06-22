@@ -177,6 +177,11 @@ class RunDetail(BaseModel):
     started_at: datetime
     completed_at: datetime | None = None
     events: list[RunEvent] = []
+    # Optional forge-enriched fields (populated by OrchestratorService.get_run)
+    pr_ref: PRRef | None = None
+    issue_ref: IssueRef | None = None
+    build_status: str | None = None  # "BUILDING", "CONVERGING", "APPROVED", etc.
+    changed_files: int | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.domain.types import (
+    LABEL_AGENT_WORK,
     LABEL_IMPLEMENTING,
     IssueRef,
     PRRef,
@@ -20,6 +21,8 @@ async def test_dispatch_skeleton_creates_run() -> None:
     session = FakeSessionPort()
     repo = RepoRef(owner="test", name="repo")
     issue_ref = IssueRef(repo=repo, number=42)
+    # Seed issue so add_label(issue_ref, LABEL_IMPLEMENTING) can resolve it
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
 
     engine = Engine(forge=forge, harness=harness, session=session)
     handle = await engine.dispatch("issues", issue_ref=issue_ref)
@@ -74,12 +77,14 @@ async def test_dispatch_skeleton_sse_events_delivered() -> None:
 
 
 async def test_dispatch_comment_event() -> None:
-    """issue_comment events also dispatch successfully."""
+    """issue_comment events dispatch when issue carries LABEL_AGENT_WORK (H5 guard)."""
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
     repo = RepoRef(owner="test", name="repo")
     issue_ref = IssueRef(repo=repo, number=1)
+    # Issue must carry LABEL_AGENT_WORK for H5 guard to pass
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
 
     engine = Engine(forge=forge, harness=harness, session=session)
     handle = await engine.dispatch("issue_comment", issue_ref=issue_ref)
