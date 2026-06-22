@@ -47,7 +47,7 @@ config:
   SWARM_LIMITS_PER_REPO: "4"
   SWARM_LIMITS_RECONCILES: "4"
   # Use Postgres for multi-replica (supply DSN via a separate secret or configmap)
-  DB_URL: "sqlite:///data/orchestrator.db"
+  DB_URL: "sqlite:////data/orchestrator.db"
   RECONCILE_MODE: "internal"
   PUSH_VAPID_PUBLIC_KEY: ""
   # Production runs agents as isolated K8s Jobs (issue #51) — the control-plane image has

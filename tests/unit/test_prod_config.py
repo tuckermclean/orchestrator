@@ -42,7 +42,7 @@ def test_prod_config_parses_allowlist_from_env(monkeypatch: object) -> None:
         # Import here to pick up the patched env
         from src.api.main import _build_prod_service
 
-        service, webhook_secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, webhook_secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert sorted(service._allowlist) == ["alice", "bob", "charlie"]
 
@@ -69,7 +69,7 @@ def test_prod_config_empty_allowlist_when_env_unset(monkeypatch: object) -> None
 
         from src.api.main import _build_prod_service
 
-        service, webhook_secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, webhook_secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert service._allowlist == []
 
@@ -97,7 +97,7 @@ def test_prod_config_webhook_secret_uses_operator_secret_key(monkeypatch: object
 
         from src.api.main import _build_prod_service
 
-        _service, webhook_secret, _op_store, _push_store, _reg = _build_prod_service()
+        _service, webhook_secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert webhook_secret == "my-operator-secret"
 
@@ -123,7 +123,7 @@ def test_prod_config_allowlist_strips_whitespace(monkeypatch: object) -> None:
 
         from src.api.main import _build_prod_service
 
-        service, _secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, _secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert sorted(service._allowlist) == ["alice", "bob"]
 
@@ -161,7 +161,7 @@ def test_prod_config_single_repo_backward_compat_wires_registry(
 
         from src.api.main import _build_prod_service
 
-        service, _secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, _secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert service._registry is not None
     assert len(service._registry._configs) == 1  # type: ignore[union-attr]
@@ -197,7 +197,7 @@ def test_prod_config_repos_json_wires_multi_repo_registry(
 
         from src.api.main import _build_prod_service
 
-        service, _secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, _secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     assert service._registry is not None
     assert len(service._registry._configs) == 2  # type: ignore[union-attr]
@@ -226,7 +226,7 @@ def test_prod_config_no_creds_still_wires_registry(
         from src.api.main import _build_prod_service
         from src.ports.fakes import FakeForgePort
 
-        service, webhook_secret, _op_store, _push_store, _reg = _build_prod_service()
+        service, webhook_secret, _op_store, _push_store, _reg, *_ = _build_prod_service()
 
     # Dev mode: forge is Fake; no crash
     assert isinstance(service.forge, FakeForgePort)

@@ -65,7 +65,7 @@ config:
   SWARM_LIMITS_PER_REPO: "4"
   SWARM_LIMITS_RECONCILES: "4"
   # SQLite (single-instance) or Postgres DSN (multi-replica)
-  DB_URL: "sqlite:///data/orchestrator.db"
+  DB_URL: "sqlite:////data/orchestrator.db"
   # internal = built-in cadence loop; external = k8s CronJob hits /api/reconcile
   RECONCILE_MODE: "internal"
   # Non-sensitive VAPID public key for Web Push
