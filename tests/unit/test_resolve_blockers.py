@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from src.decisions.resolve_blockers import parse_comment_blockers, resolve_blockers
 from src.domain.types import Comment, PRRef, RepoRef, Verdict
 from src.ports.fakes import FakeForgePort
@@ -28,18 +30,21 @@ def _footer(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_row1_from_json() -> None:
     forge = FakeForgePort()
     _seed_verdict(forge, 3, ["a:x", "b:y", "c:z"])
     assert await resolve_blockers(forge, _PR, 1, None) == 3
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_row1_zero() -> None:
     forge = FakeForgePort()
     _seed_verdict(forge, 0, [])
     assert await resolve_blockers(forge, _PR, 1, None) == 0
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_row1_non_numeric_blockers_unknown() -> None:
     """File present, not sentinel, but .blockers missing/non-numeric → unknown."""
     forge = FakeForgePort()
@@ -54,6 +59,7 @@ async def test_resolve_blockers_row1_non_numeric_blockers_unknown() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.2", "row-2-sentinel-round-started")
 async def test_resolve_blockers_row2_footer_in_round() -> None:
     forge = FakeForgePort()
     forge.seed_pr(_PR)
@@ -66,6 +72,7 @@ async def test_resolve_blockers_row2_footer_in_round() -> None:
     assert await resolve_blockers(forge, _PR, 2, round_started) == 2
 
 
+@pytest.mark.covers("§8.2", "row-2-sentinel-round-started")
 async def test_resolve_blockers_row2_filters_stale_footer() -> None:
     """A footer posted before round_started is excluded; only in-round footers count."""
     forge = FakeForgePort()
@@ -85,6 +92,7 @@ async def test_resolve_blockers_row2_filters_stale_footer() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.2", "row-3-sentinel-no-round-started")
 async def test_resolve_blockers_row3_footer_any_age() -> None:
     forge = FakeForgePort()
     forge.seed_pr(_PR)  # no verdict file at all
@@ -97,12 +105,14 @@ async def test_resolve_blockers_row3_footer_any_age() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.2", "row-4-no-footer-unknown")
 async def test_resolve_blockers_row4_no_footer_unknown() -> None:
     forge = FakeForgePort()
     forge.seed_pr(_PR)  # no verdict file, no comments
     assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
 
 
+@pytest.mark.covers("§8.2", "row-4-no-footer-unknown")
 async def test_resolve_blockers_row4_comment_without_footer() -> None:
     forge = FakeForgePort()
     forge.seed_pr(_PR)
@@ -128,6 +138,7 @@ def test_parse_comment_blockers_none_when_absent() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_json_blockers_null() -> None:
     """Non-sentinel verdict with `"blockers": null` → unknown (non-numeric)."""
     forge = FakeForgePort()
@@ -139,6 +150,7 @@ async def test_resolve_blockers_json_blockers_null() -> None:
     assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_json_blockers_string() -> None:
     """Non-sentinel verdict with `"blockers": "bad"` → unknown (non-numeric)."""
     forge = FakeForgePort()
@@ -150,6 +162,7 @@ async def test_resolve_blockers_json_blockers_string() -> None:
     assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
 
 
+@pytest.mark.covers("§8.2", "row-1-file-present-not-sentinel")
 async def test_resolve_blockers_json_blockers_false() -> None:
     """Non-sentinel verdict with `"blockers": false` → unknown (bool is not a real int)."""
     forge = FakeForgePort()
@@ -161,6 +174,7 @@ async def test_resolve_blockers_json_blockers_false() -> None:
     assert await resolve_blockers(forge, _PR, 1, None) == "unknown"
 
 
+@pytest.mark.covers("§8.2", "row-3-sentinel-no-round-started")
 async def test_resolve_blockers_sentinel_unscoped_fallback() -> None:
     """Sentinel + only a stale footer + round_started=None → stale footer count (row 3)."""
     forge = FakeForgePort()

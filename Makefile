@@ -1,4 +1,4 @@
-.PHONY: run-dev stop-dev
+.PHONY: run-dev stop-dev check-coverage
 
 SESSION := orchestrator
 
@@ -14,3 +14,9 @@ run-dev:
 
 stop-dev:
 	tmux kill-session -t $(SESSION) 2>/dev/null || true
+
+# Validate coverage_map.yaml — every listed test must resolve to a collected node.
+# Exits non-zero if any dangling test names or uncovered rows are detected.
+# Mirror of the proposed CI step; run locally before opening a PR.
+check-coverage:
+	python tools/check_coverage_map.py

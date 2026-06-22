@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.decisions.intake import decide_intake
 from src.domain.types import Issue, IssueRef, RepoRef
 
@@ -24,11 +26,13 @@ def _make_issue(author: str, number: int = 1) -> Issue:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.11", "row-empty-allowlist")
 def test_intake_gate_disabled() -> None:
     """Empty allowlist → 'admit' regardless of author."""
     assert decide_intake(_make_issue("anyone"), allowlist=[]) == "admit"
 
 
+@pytest.mark.covers("§8.11", "row-empty-allowlist")
 def test_intake_gate_disabled_empty_string_author() -> None:
     """Empty allowlist + empty-string author → 'admit'."""
     assert decide_intake(_make_issue(""), allowlist=[]) == "admit"
@@ -39,16 +43,19 @@ def test_intake_gate_disabled_empty_string_author() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.11", "row-allowlisted-admit")
 def test_intake_allowlisted_first() -> None:
     """First entry in allowlist → 'admit'."""
     assert decide_intake(_make_issue("alice"), allowlist=["alice", "bob"]) == "admit"
 
 
+@pytest.mark.covers("§8.11", "row-allowlisted-admit")
 def test_intake_allowlisted_second() -> None:
     """Second entry in allowlist → 'admit'."""
     assert decide_intake(_make_issue("bob"), allowlist=["alice", "bob"]) == "admit"
 
 
+@pytest.mark.covers("§8.11", "row-allowlisted-admit")
 def test_intake_single_match() -> None:
     """Single-entry allowlist, author matches → 'admit'."""
     assert decide_intake(_make_issue("solo"), allowlist=["solo"]) == "admit"
@@ -59,11 +66,13 @@ def test_intake_single_match() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.11", "row-unlisted-queue")
 def test_intake_unlisted() -> None:
     """Author not in allowlist → 'queue'."""
     assert decide_intake(_make_issue("eve"), allowlist=["alice", "bob"]) == "queue"
 
 
+@pytest.mark.covers("§8.11", "row-unlisted-queue")
 def test_intake_single_nomatch() -> None:
     """Single-entry allowlist, author doesn't match → 'queue'."""
     assert decide_intake(_make_issue("other"), allowlist=["solo"]) == "queue"
@@ -74,11 +83,13 @@ def test_intake_single_nomatch() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.covers("§8.11", "row-unlisted-queue")
 def test_intake_case_sensitive_upper_in_list() -> None:
     """'Alice' in list but 'alice' submitted → 'queue' (no case-folding)."""
     assert decide_intake(_make_issue("alice"), allowlist=["Alice"]) == "queue"
 
 
+@pytest.mark.covers("§8.11", "row-unlisted-queue")
 def test_intake_case_sensitive_lower_in_list() -> None:
     """'alice' in list but 'Alice' submitted → 'queue' (no case-folding)."""
     assert decide_intake(_make_issue("Alice"), allowlist=["alice"]) == "queue"
