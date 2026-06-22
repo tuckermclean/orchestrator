@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
 from src.domain.types import (
@@ -208,16 +209,12 @@ class FakeForgePort:
             key = self._issue_key(entity_ref)
             issue = self._issues[key]
             if label not in issue.labels:
-                self._issues[key] = issue.model_copy(
-                    update={"labels": [*issue.labels, label]}
-                )
+                self._issues[key] = issue.model_copy(update={"labels": [*issue.labels, label]})
         else:
             key = self._pr_key(entity_ref)
             pr = self._prs[key]
             if label not in pr.labels:
-                self._prs[key] = pr.model_copy(
-                    update={"labels": [*pr.labels, label]}
-                )
+                self._prs[key] = pr.model_copy(update={"labels": [*pr.labels, label]})
 
     async def remove_label(self, entity_ref: IssueRef | PRRef, label: str) -> None:
         self.remove_label_calls.append((entity_ref, label))
@@ -592,9 +589,7 @@ class FakeHarnessPort:
             return
         allowed = self._last_context.allowed_agent_refs
         if allowed is not None and agent_ref not in allowed:
-            raise SpawnDenied(
-                f"Agent {agent_ref!r} not in allowed_agent_refs: {allowed}"
-            )
+            raise SpawnDenied(f"Agent {agent_ref!r} not in allowed_agent_refs: {allowed}")
 
     async def trigger_workflow(
         self,
@@ -642,9 +637,7 @@ class FakeSessionPort:
         self._event_queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
 
         # Call logs
-        self.list_runs_calls: list[
-            tuple[RepoRef, datetime | None, str | None, str | None]
-        ] = []
+        self.list_runs_calls: list[tuple[RepoRef, datetime | None, str | None, str | None]] = []
         self.get_run_calls: list[str] = []
         self.stream_events_calls: list[str] = []
         self.cancel_calls: list[str] = []
@@ -886,3 +879,52 @@ class FakeConvergeStateStore:
     async def set_last_run_handle(self, pr_ref: PRRef, handle: RunHandle) -> None:
         self.set_last_run_handle_calls.append((pr_ref, handle))
         self._run_handles[self._key(pr_ref)] = handle
+
+
+# ---------------------------------------------------------------------------
+# FakeLockProvider
+# ---------------------------------------------------------------------------
+
+
+class FakeLockProvider:
+    """In-memory advisory lock provider for testing (SPEC §11.3).
+
+    Uses ``asyncio.Lock`` per entity key — same semantics as ``AsyncioLockProvider``
+    but records lock acquisition / release counts for assertion in tests.
+    """
+
+    def _entity_key(self, entity_ref: IssueRef | PRRef) -> str:
+        repo = entity_ref.repo
+        base = f"{repo.owner}/{repo.name}"
+        if isinstance(entity_ref, IssueRef):
+            return f"issue:{base}#{entity_ref.number}"
+        return f"pr:{base}!{entity_ref.number}"
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._meta_lock = asyncio.Lock()
+        # Call log: each entry is the entity key at the time of acquisition
+        self.acquired: list[str] = []
+        self.released: list[str] = []
+
+    def reset(self) -> None:
+        self._locks = {}
+        self.acquired = []
+        self.released = []
+
+    def lock(self, entity_ref: IssueRef | PRRef) -> AbstractAsyncContextManager[None]:
+        return self._acquire(entity_ref)
+
+    @asynccontextmanager
+    async def _acquire(self, entity_ref: IssueRef | PRRef) -> AsyncGenerator[None, None]:
+        key = self._entity_key(entity_ref)
+        async with self._meta_lock:
+            if key not in self._locks:
+                self._locks[key] = asyncio.Lock()
+            entity_lock = self._locks[key]
+        async with entity_lock:
+            self.acquired.append(key)
+            try:
+                yield
+            finally:
+                self.released.append(key)

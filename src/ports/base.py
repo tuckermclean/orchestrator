@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -162,3 +163,20 @@ class ConvergeStateStore(Protocol):
     async def get_last_run_handle(self, pr_ref: PRRef) -> RunHandle | None: ...
 
     async def set_last_run_handle(self, pr_ref: PRRef, handle: RunHandle) -> None: ...
+
+
+@runtime_checkable
+class LockProvider(Protocol):
+    """Per-entity advisory lock seam (SPEC §11.3).
+
+    Returns an async context manager that serializes concurrent calls on the same
+    entity reference.  Acquire on entry, release on exit — even if the body raises.
+
+    Single-process default: ``AsyncioLockProvider`` (one ``asyncio.Lock`` per key).
+    Multi-replica: swap in a DB-backed implementation backed by Postgres
+    ``pg_advisory_xact_lock`` (one lock row per entity key hash) — the seam is the
+    same; only the factory changes.  All replicas may accept requests and the DB lock
+    serializes per-entity work without leader election (SPEC §11.3).
+    """
+
+    def lock(self, entity_ref: IssueRef | PRRef) -> AbstractAsyncContextManager[None]: ...
