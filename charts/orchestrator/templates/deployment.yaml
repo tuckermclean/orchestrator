@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "orchestrator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orchestrator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "orchestrator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orchestrator.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Force pod restart on ConfigMap change (config hash)
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "orchestrator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # DB schema migration runs as an init container; must be idempotent (ARCHITECTURE §8)
+      initContainers:
+        - name: migrate
+          image: {{ include "orchestrator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - python
+            - -m
+            - src.db.migrate
+          envFrom:
+            - configMapRef:
+                name: {{ include "orchestrator.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secretName }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: orchestrator
+          image: {{ include "orchestrator.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            # Non-sensitive config from ConfigMap
+            - configMapRef:
+                name: {{ include "orchestrator.fullname" . }}-config
+            # Sensitive values from Secret (ARCHITECTURE §6)
+            # Keys injected: FORGE_TOKEN, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY,
+            # GITHUB_APP_INSTALLATION_ID, OPERATOR_SECRET_KEY,
+            # CLAUDE_CODE_OAUTH_TOKEN, PUSH_VAPID_PRIVATE_KEY
+            - secretRef:
+                name: {{ .Values.secretName }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            # Persistent data directory (SQLite DB or PVC mount point)
+            - name: data
+              mountPath: /data
+            # Writable temp space for subprocess clones (emptyDir)
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "orchestrator.fullname" . }}-data
+        {{- else }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

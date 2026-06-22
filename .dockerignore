@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# .dockerignore — exclude files that must not enter the build context
+# ---------------------------------------------------------------------------
+
+# Version control
+.git/
+.gitignore
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Test artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.lcov
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# Secrets and env files (never in image)
+*.env
+*.env.*
+orch-test.env
+.secrets/
+
+# Documentation (reduces context size)
+*.md
+!pyproject.toml
+
+# CI/CD — not needed in image
+.github/
+
+# UI source tree (compiled dist is included via COPY . .)
+# Only ui/dist needs to be present; ui/node_modules should not be.
+ui/node_modules/
+
+# Claude worktree directories
+.claude/
+
+# Archive
+archive/

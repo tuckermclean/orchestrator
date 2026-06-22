@@ -1,0 +1,193 @@
+# ---------------------------------------------------------------------------
+# Orchestrator Helm chart — default values
+# ---------------------------------------------------------------------------
+# Override in a values-prod.yaml (see values-prod.yaml for an example).
+# Secrets are NEVER hardcoded here; they are referenced by name from a
+# Kubernetes Secret created by the operator before install (see ARCHITECTURE §6).
+# ---------------------------------------------------------------------------
+
+# -- Image configuration --
+image:
+  repository: ghcr.io/tuckermclean/orchestrator
+  tag: "latest"
+  # Preferred: pin by digest for supply-chain control (ARCHITECTURE §5)
+  # Override at install time: --set image.digest=sha256:<digest>
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Replica count (ARCHITECTURE §6: default 2) --
+replicaCount: 2
+
+# -- Kubernetes Secret name --
+# The operator must create this secret before `helm install`:
+#
+#   kubectl create secret generic orchestrator-secrets \
+#     --from-literal=FORGE_TOKEN=<value_or_empty_if_app_mode> \
+#     --from-literal=GITHUB_APP_ID=<value> \
+#     --from-literal=GITHUB_APP_PRIVATE_KEY=<pem_value> \
+#     --from-literal=GITHUB_APP_INSTALLATION_ID=<value> \
+#     --from-literal=OPERATOR_SECRET_KEY=<webhook_hmac_secret> \
+#     --from-literal=CLAUDE_CODE_OAUTH_TOKEN=<value> \
+#     --from-literal=PUSH_VAPID_PRIVATE_KEY=<value>
+#
+# See ARCHITECTURE §6 for full field descriptions.
+secretName: orchestrator-secrets
+
+# -- ConfigMap / environment --
+config:
+  # GitHub owner for the default repo (used in PAT mode; App mode uses payload)
+  GITHUB_OWNER: ""
+  # GitHub repo name for the default repo
+  GITHUB_REPO: ""
+  # Comma-separated allowlist of GitHub logins (empty = all admitted)
+  ALLOWLIST: ""
+  # Reconciler cron schedule (must match RECONCILER_CRON constant)
+  RECONCILE_CRON: "*/15 * * * *"
+  # delivery-ID LRU ring buffer size
+  DEDUP_WINDOW: "1000"
+  # SwarmLimits
+  SWARM_LIMITS_GLOBAL: "10"
+  SWARM_LIMITS_PER_REPO: "4"
+  SWARM_LIMITS_RECONCILES: "4"
+  # SQLite (single-instance) or Postgres DSN (multi-replica)
+  DB_URL: "sqlite:///data/orchestrator.db"
+  # internal = built-in cadence loop; external = k8s CronJob hits /api/reconcile
+  RECONCILE_MODE: "internal"
+  # Non-sensitive VAPID public key for Web Push
+  PUSH_VAPID_PUBLIC_KEY: ""
+  # Optional: OpenTelemetry exporter endpoint
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+# -- Service --
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+# -- Ingress --
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+  hosts:
+    - host: orch.dcxxiv.com
+      paths:
+        # Webhook ingress — HMAC-validated (ARCHITECTURE §6)
+        - path: /webhook/
+          pathType: Prefix
+        # Control-plane API
+        - path: /api/
+          pathType: Prefix
+        # VAPID web push subscription
+        - path: /push/
+          pathType: Prefix
+        # PWA SPA catch-all
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: orchestrator-tls
+      hosts:
+        - orch.dcxxiv.com
+
+# -- Resource requests/limits (ARCHITECTURE §6) --
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Security context (ARCHITECTURE §6) --
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Probes (ARCHITECTURE §6) --
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# -- Volumes --
+# /data — persistent SQLite; use a PVC in production
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 1Gi
+  accessMode: ReadWriteOnce
+
+# -- ServiceAccount + RBAC --
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# RBAC: Role allowing Job create/get/list/delete in the release namespace
+# Required for the K8s Job harness backend (#51)
+rbac:
+  create: true
+
+# -- HPA (disabled by default; enable for multi-replica auto-scaling) --
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+# -- PodDisruptionBudget (disabled by default) --
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# -- CronJob reconciler (when RECONCILE_MODE=external) --
+cronJob:
+  enabled: false
+  schedule: "*/15 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+# -- Node selector / tolerations / affinity --
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Pod annotations (e.g. for Prometheus scraping) --
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"

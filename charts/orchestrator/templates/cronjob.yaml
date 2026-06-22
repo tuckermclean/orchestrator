@@ -1,0 +1,34 @@
+{{- if and (eq .Values.config.RECONCILE_MODE "external") .Values.cronJob.enabled -}}
+# External reconciler CronJob: calls POST /api/reconcile on schedule.
+# Only deployed when RECONCILE_MODE=external AND cronJob.enabled=true.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "orchestrator.fullname" . }}-reconcile
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "orchestrator.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.cronJob.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.cronJob.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: reconciler
+              image: curlimages/curl:8.7.1
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --max-time
+                - "60"
+                - -X
+                - POST
+                - http://{{ include "orchestrator.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}/api/dev/reconcile
+{{- end }}

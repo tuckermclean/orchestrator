@@ -1,0 +1,16 @@
+apiVersion: v2
+name: orchestrator
+description: Autonomous SWE-agent orchestration platform — control-plane Helm chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - orchestrator
+  - swe-agent
+  - automation
+home: https://github.com/tuckermclean/orchestrator
+sources:
+  - https://github.com/tuckermclean/orchestrator
+maintainers:
+  - name: Tucker McLean
+    email: me@tuckermclean.com

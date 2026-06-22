@@ -1,0 +1,216 @@
+# ---------------------------------------------------------------------------
+# Release workflow — container build, SBOM, cosign signing, GHCR push
+# ---------------------------------------------------------------------------
+# Operator-authorized edit to .github/workflows/ for Step 10 (issue #32).
+# This workflow does NOT modify ci.yml and does not conflict with the test gate.
+#
+# Triggers:
+#   - Push of a semver tag (v*) — builds and pushes the control-plane image
+#     and the agent-runner image to GHCR, attaches SBOM + SLSA provenance.
+#   - GitHub release published — same as tag push.
+#
+# Outputs:
+#   - ghcr.io/<owner>/orchestrator:<tag>
+#   - ghcr.io/<owner>/orchestrator-agent-runner:<tag>
+#   - SBOM (CycloneDX JSON) attached as OCI attestation
+#   - Cosign keyless signature (Sigstore OIDC)
+#   - SLSA provenance attestation via slsa-github-generator
+#
+# Required repository secrets: none beyond GITHUB_TOKEN (provided automatically).
+# GITHUB_TOKEN needs: packages:write, id-token:write (for keyless OIDC signing).
+# ---------------------------------------------------------------------------
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write  # required for keyless cosign OIDC signing
+  attestations: write  # required for SLSA provenance attestation
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/orchestrator
+  AGENT_RUNNER_IMAGE_NAME: ${{ github.repository_owner }}/orchestrator-agent-runner
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.push-control-plane.outputs.digest }}
+      agent-runner-digest: ${{ steps.push-agent-runner.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Docker Buildx setup ----
+      - name: Set up QEMU (for multi-arch builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---- GHCR login ----
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---- Extract metadata ----
+      - name: Extract Docker metadata (control-plane)
+        id: meta-cp
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=orchestrator
+            org.opencontainers.image.description=Autonomous SWE-agent orchestration control-plane
+            org.opencontainers.image.vendor=tuckermclean
+
+      - name: Extract Docker metadata (agent-runner)
+        id: meta-ar
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=orchestrator-agent-runner
+            org.opencontainers.image.description=Orchestrator agent-runner (K8s Job executor)
+            org.opencontainers.image.vendor=tuckermclean
+
+      # ---- Build + push control-plane image ----
+      - name: Build and push control-plane image
+        id: push-control-plane
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-cp.outputs.tags }}
+          labels: ${{ steps.meta-cp.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false  # SLSA provenance attached separately below
+
+      # ---- Build + push agent-runner image ----
+      - name: Build and push agent-runner image
+        id: push-agent-runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/agent-runner.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-ar.outputs.tags }}
+          labels: ${{ steps.meta-ar.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # ---- SBOM generation (syft / anchore) ----
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate SBOM for control-plane image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push-control-plane.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom-control-plane.cdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      - name: Generate SBOM for agent-runner image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}@${{ steps.push-agent-runner.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom-agent-runner.cdx.json
+          upload-artifact: true
+          upload-artifact-retention: 30
+
+      # ---- Attach SBOMs as OCI attestations ----
+      - name: Attest SBOM for control-plane image
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push-control-plane.outputs.digest }}
+          sbom-path: sbom-control-plane.cdx.json
+          push-to-registry: true
+
+      - name: Attest SBOM for agent-runner image
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}
+          subject-digest: ${{ steps.push-agent-runner.outputs.digest }}
+          sbom-path: sbom-agent-runner.cdx.json
+          push-to-registry: true
+
+      # ---- Cosign keyless signing (Sigstore OIDC) ----
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign control-plane image (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push-control-plane.outputs.digest }}"
+
+      - name: Sign agent-runner image (keyless OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}@${{ steps.push-agent-runner.outputs.digest }}"
+
+      # ---- SLSA provenance attestation ----
+      - name: Attest build provenance for control-plane image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push-control-plane.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest build provenance for agent-runner image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}
+          subject-digest: ${{ steps.push-agent-runner.outputs.digest }}
+          push-to-registry: true
+
+      # ---- Summary ----
+      - name: Release summary
+        run: |
+          echo "## Release summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Digest |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| control-plane | \`${{ steps.push-control-plane.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| agent-runner  | \`${{ steps.push-agent-runner.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Helm install command:" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm upgrade --install orchestrator ./charts/orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  -n orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  -f charts/orchestrator/values-prod.yaml \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --set image.digest=${{ steps.push-control-plane.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
