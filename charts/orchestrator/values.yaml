@@ -20,8 +20,13 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# -- Replica count (ARCHITECTURE §6: default 2) --
-replicaCount: 2
+# -- Replica count --
+# Default 1: the default DB_URL below is SQLite on a ReadWriteOnce PVC, which a
+# SINGLE pod can mount and write. ARCHITECTURE §6's 2-replica HA topology requires
+# a shared store — set DB_URL to a Postgres DSN, set persistence.enabled=false, and
+# raise replicaCount to 2+. Running 2 replicas on SQLite is unsafe (RWO mount
+# contention + split counter/converge state) and is not supported.
+replicaCount: 1
 
 # -- Kubernetes Secret name --
 # The operator must create this secret before `helm install`:
@@ -44,7 +49,9 @@ config:
   GITHUB_OWNER: ""
   # GitHub repo name for the default repo
   GITHUB_REPO: ""
-  # Comma-separated allowlist of GitHub logins (empty = all admitted)
+  # Comma-separated allowlist of GitHub logins. Default-deny (issue #48): an EMPTY
+  # allowlist admits ONLY the repo owner (GITHUB_OWNER); set logins to widen it.
+  # (The repo owner is always admitted regardless.)
   ALLOWLIST: ""
   # Reconciler cron schedule (must match RECONCILER_CRON constant)
   RECONCILE_CRON: "*/15 * * * *"
