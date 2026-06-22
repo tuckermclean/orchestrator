@@ -44,3 +44,28 @@ jobs:
       - name: Build UI (TypeScript check + Vite)
         run: npm run build
         working-directory: ui
+
+  image-smoke-boot:
+    # Build the control-plane image and smoke-boot it in both backend modes.
+    # Catches missing runtime deps (e.g. the v0.1.1 kubernetes ImportError) and
+    # missing PWA builds (e.g. the v0.1.2 "Not Found" at /) before they ship.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build control-plane image (linux/amd64, load only — smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: orchestrator-smoke:ci
+          push: false
+
+      - name: Smoke-boot the image in both backend modes
+        run: |
+          chmod +x scripts/smoke_image.sh
+          scripts/smoke_image.sh orchestrator-smoke:ci
