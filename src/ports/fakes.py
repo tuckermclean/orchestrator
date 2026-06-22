@@ -23,7 +23,11 @@ from src.domain.types import (
     RunState,
     RunStatus,
     RunSummary,
+    Verdict,
 )
+
+# Converge reviewer contract path — reviewer dispatches emit verdicts (SPEC §10.2).
+_CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
 
 
 class SpawnDenied(Exception):
@@ -427,18 +431,62 @@ _SCRIPTED_EVENTS: list[tuple[str, dict[str, object]]] = [
 class FakeHarnessPort:
     """In-memory harness port for testing."""
 
-    def __init__(self, session: FakeSessionPort | None = None) -> None:
+    def __init__(
+        self,
+        session: FakeSessionPort | None = None,
+        forge: FakeForgePort | None = None,
+    ) -> None:
         self._counter = 0
         self._runs: dict[str, RunStatus] = {}
         self._event_queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
         self._last_context: DispatchContext | None = None
         self._session: FakeSessionPort | None = session
+        # When wired, reviewer dispatches write a verdict to the forge branch (and post
+        # the footer comment) so Engine.converge can read a real round outcome.
+        self._forge: FakeForgePort | None = forge
+        self._verdict_script: list[Verdict] = []
 
         # Call logs
         self.dispatch_calls: list[DispatchContext] = []
         self.trigger_ci_calls: list[PRRef] = []
         self.trigger_workflow_calls: list[tuple[str, str, dict[str, object]]] = []
         self.cancel_calls: list[RunHandle] = []
+
+    def script_reviewer_verdicts(self, *verdicts: Verdict) -> None:
+        """Queue verdicts emitted (one per reviewer dispatch) to the wired forge branch.
+
+        Each reviewer-contract dispatch consumes the next queued verdict, overwriting the
+        init sentinel on `.converge-verdict.json` and posting the matching footer comment.
+        """
+        if self._forge is None:
+            raise ValueError("script_reviewer_verdicts requires a wired FakeForgePort")
+        self._verdict_script = list(verdicts)
+
+    def _emit_verdict(self, context: DispatchContext) -> None:
+        """If this is a reviewer dispatch and a verdict is queued, write it to the forge."""
+        if self._forge is None or not self._verdict_script:
+            return
+        if context.contract != _CONVERGE_REVIEWER_CONTRACT or context.pr_ref is None:
+            return
+        verdict = self._verdict_script.pop(0)
+        pr_ref = context.pr_ref
+        key = self._forge._pr_key(pr_ref)
+        self._forge._files.setdefault(key, {})[".converge-verdict.json"] = (
+            verdict.model_dump_json().encode()
+        )
+        footer = (
+            f"🔴 {verdict.blockers} blockers | 🟡 {verdict.suggestions} suggestions | "
+            f"💬 {len(verdict.nits)} nits"
+        )
+        comment_key = self._forge._entity_key(pr_ref)
+        self._forge._comments.setdefault(comment_key, []).append(
+            Comment(
+                id=str(len(self._forge._comments.get(comment_key, [])) + 1),
+                body=f"## Converge Review\n{footer}",
+                created_at=datetime.now(tz=UTC),
+                author="converge-reviewer",
+            )
+        )
 
     def seed_run(
         self,
@@ -456,6 +504,9 @@ class FakeHarnessPort:
 
         self.dispatch_calls.append(context)
         self._last_context = context
+
+        # Reviewer dispatches write their queued verdict to the forge branch.
+        self._emit_verdict(context)
 
         # Default: immediately completed/success (overridable via seed_run)
         self._runs[run_id] = RunStatus(state="completed", conclusion="success")
@@ -666,3 +717,111 @@ class FakeSessionPort:
 
     async def intervene(self, run_id: str, message: str) -> None:
         self.intervene_calls.append((run_id, message))
+
+
+# ---------------------------------------------------------------------------
+# FakeCounterStore
+# ---------------------------------------------------------------------------
+
+
+class FakeCounterStore:
+    """In-memory atomic per-entity, per-channel counter store (SPEC §8.2a)."""
+
+    def _init_state(self) -> None:
+        self._counts: dict[tuple[str, str], int] = {}
+        self._lock = asyncio.Lock()
+
+        # Call logs
+        self.get_count_calls: list[tuple[IssueRef | PRRef, str]] = []
+        self.increment_calls: list[tuple[IssueRef | PRRef, str]] = []
+        self.reset_calls: list[tuple[IssueRef | PRRef, str]] = []
+
+    def __init__(self) -> None:
+        self._init_state()
+
+    def reset_state(self) -> None:
+        """Clear all counters and call logs (distinct from the async `reset` method)."""
+        self._init_state()
+
+    def _key(self, entity_ref: IssueRef | PRRef, channel: str) -> tuple[str, str]:
+        if isinstance(entity_ref, IssueRef):
+            ref_key = f"issue:{entity_ref.repo.owner}/{entity_ref.repo.name}#{entity_ref.number}"
+        else:
+            ref_key = f"pr:{entity_ref.repo.owner}/{entity_ref.repo.name}!{entity_ref.number}"
+        return (ref_key, channel)
+
+    def seed_count(self, entity_ref: IssueRef | PRRef, channel: str, value: int) -> None:
+        self._counts[self._key(entity_ref, channel)] = value
+
+    async def get_count(self, entity_ref: IssueRef | PRRef, channel: str) -> int:
+        self.get_count_calls.append((entity_ref, channel))
+        return self._counts.get(self._key(entity_ref, channel), 0)
+
+    async def increment(self, entity_ref: IssueRef | PRRef, channel: str) -> int:
+        self.increment_calls.append((entity_ref, channel))
+        async with self._lock:
+            key = self._key(entity_ref, channel)
+            new_value = self._counts.get(key, 0) + 1
+            self._counts[key] = new_value
+            return new_value
+
+    async def reset(self, entity_ref: IssueRef | PRRef, channel: str) -> None:
+        self.reset_calls.append((entity_ref, channel))
+        self._counts[self._key(entity_ref, channel)] = 0
+
+
+# ---------------------------------------------------------------------------
+# FakeConvergeStateStore
+# ---------------------------------------------------------------------------
+
+
+class FakeConvergeStateStore:
+    """In-memory per-PR converge loop state store (SPEC §9.4)."""
+
+    def _init_state(self) -> None:
+        self._rounds: dict[str, int] = {}
+        self._round_starts: dict[str, datetime] = {}
+
+        # Call logs
+        self.get_converge_round_calls: list[PRRef] = []
+        self.set_converge_round_calls: list[tuple[PRRef, int]] = []
+        self.get_round_started_calls: list[PRRef] = []
+        self.set_round_started_calls: list[tuple[PRRef, datetime]] = []
+        self.clear_calls: list[PRRef] = []
+
+    def __init__(self) -> None:
+        self._init_state()
+
+    def reset(self) -> None:
+        self._init_state()
+
+    def _key(self, pr_ref: PRRef) -> str:
+        return f"{pr_ref.repo.owner}/{pr_ref.repo.name}!{pr_ref.number}"
+
+    def seed_round(self, pr_ref: PRRef, round: int) -> None:
+        self._rounds[self._key(pr_ref)] = round
+
+    def seed_round_started(self, pr_ref: PRRef, started: datetime) -> None:
+        self._round_starts[self._key(pr_ref)] = started
+
+    async def get_converge_round(self, pr_ref: PRRef) -> int:
+        self.get_converge_round_calls.append(pr_ref)
+        return self._rounds.get(self._key(pr_ref), 0)
+
+    async def set_converge_round(self, pr_ref: PRRef, round: int) -> None:
+        self.set_converge_round_calls.append((pr_ref, round))
+        self._rounds[self._key(pr_ref)] = round
+
+    async def get_round_started(self, pr_ref: PRRef) -> datetime | None:
+        self.get_round_started_calls.append(pr_ref)
+        return self._round_starts.get(self._key(pr_ref))
+
+    async def set_round_started(self, pr_ref: PRRef, started: datetime) -> None:
+        self.set_round_started_calls.append((pr_ref, started))
+        self._round_starts[self._key(pr_ref)] = started
+
+    async def clear_converge_state(self, pr_ref: PRRef) -> None:
+        self.clear_calls.append(pr_ref)
+        key = self._key(pr_ref)
+        self._rounds.pop(key, None)
+        self._round_starts.pop(key, None)

@@ -13,6 +13,46 @@
   "row-3-empty":
     tests: ["test_route_entry_empty_string"]
 
+"§8.2":  # resolve_blockers
+  "row-1-file-present-not-sentinel":
+    tests: ["test_resolve_blockers_row1_from_json", "test_resolve_blockers_row1_zero", "test_resolve_blockers_row1_non_numeric_blockers_unknown"]
+  "row-2-sentinel-round-started":
+    tests: ["test_resolve_blockers_row2_footer_in_round", "test_resolve_blockers_row2_filters_stale_footer"]
+  "row-3-sentinel-no-round-started":
+    tests: ["test_resolve_blockers_row3_footer_any_age"]
+  "row-4-no-footer-unknown":
+    tests: ["test_resolve_blockers_row4_no_footer_unknown", "test_resolve_blockers_row4_comment_without_footer"]
+
+"§8.3":  # decide_round
+  "row-1-approve":
+    tests: ["test_decide_round_approve_r1", "test_decide_round_approve_r2", "test_decide_round_approve_r3", "test_decide_round_zero_blockers_ci_red_not_approve_r1", "test_decide_round_unknown_never_approves_even_ci_green"]
+  "row-2-r1-fix":
+    tests: ["test_decide_round_fix_r1_with_blockers", "test_decide_round_fix_r1_unknown"]
+  "row-3-no-progress":
+    tests: ["test_decide_round_no_progress_r2", "test_decide_round_no_progress_r3", "test_decide_round_no_progress_sorts_before_compare", "test_decide_round_empty_sigs_not_no_progress", "test_decide_round_sentinel_normalized_not_no_progress", "test_decide_round_no_progress_skipped_when_blockers_zero", "test_decide_round_r3_no_progress_fires_before_cap"]
+  "row-4-r2-fix":
+    tests: ["test_decide_round_fix_r2_changed_sigs"]
+  "row-5-r3-no-verdict":
+    tests: ["test_decide_round_r3_no_verdict"]
+  "row-6-r3-ci-red":
+    tests: ["test_decide_round_r3_ci_red"]
+  "row-7-r3-cap-reached":
+    tests: ["test_decide_round_r3_cap_reached"]
+
+"§8.12":  # decide_specialists
+  "base-set-only":
+    tests: ["test_decide_specialists_base_set_only", "test_decide_specialists_empty_paths_returns_base"]
+  "routing-db":
+    tests: ["test_decide_specialists_db_migration", "test_decide_specialists_sql_file", "test_decide_specialists_schema_file"]
+  "routing-ui":
+    tests: ["test_decide_specialists_ui_tsx", "test_decide_specialists_css", "test_decide_specialists_components_dir"]
+  "routing-api":
+    tests: ["test_decide_specialists_api_dir", "test_decide_specialists_routes_dir", "test_decide_specialists_handlers_dir"]
+  "cap-enforcement":
+    tests: ["test_decide_specialists_cap_enforced"]
+  "determinism-order":
+    tests: ["test_decide_specialists_definition_order", "test_decide_specialists_deterministic_repeat", "test_decide_specialists_no_duplicate_refs"]
+
 "§8.9":
   "row-1-blocked":
     tests: ["test_health_blocked", "test_health_blocked_beats_at_risk"]
