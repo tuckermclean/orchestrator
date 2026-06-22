@@ -4,15 +4,29 @@ The harness spawns `claude` (Claude Code CLI) as a supervised async child proces
 Each dispatch:
   1. Mints a scoped GitHub App installation token (forge_token_scope determines perms).
   2. Clones the target repo into a temp dir with that token.
-  3. Spawns `claude -p "<prompt>" --output-format stream-json --permission-mode
+  3. Materialises a PreToolUse hook (I9 spawn allow-set gate) into repo_dir/.claude/
+     when DispatchContext.allowed_agent_refs is not None.
+  4. Spawns `claude -p "<prompt>" --output-format stream-json --permission-mode
      bypassPermissions --verbose` in the working tree.
-  4. Streams JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
-  5. Returns a RunHandle immediately (PID + run_id); process is watched in background.
+  5. Streams JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
+  6. Returns a RunHandle immediately (PID + run_id); process is watched in background.
 
 I3 invariants:
   - Only CLAUDE_CODE_OAUTH_TOKEN and a scoped GH_TOKEN reach the child env.
   - Orchestrator master creds (App private key, FORGE_TOKEN) are NEVER forwarded.
   - No contributor text in env or subprocess args (I9).
+
+I9 spawn enforcement (SECURITY.md §3 I9, closes #52):
+  When DispatchContext.allowed_agent_refs is a list (not None), the harness:
+    - Writes src/ports/i9_spawn_hook.py into the cloned repo at
+      .claude/i9_spawn_hook.py.
+    - Writes .claude/settings.json with a PreToolUse hook on the Task tool
+      that invokes the hook script via python3.
+    - Injects ORCHESTRATOR_ALLOWED_AGENT_REFS into the child env (comma-
+      separated AgentRef strings).
+  The hook fails closed: missing env var, empty allow-set, or unparseable
+  stdin all result in DENY.  When allowed_agent_refs is None, no hook is
+  written (no harness-level restriction).
 
 trigger_workflow / trigger_ci remain for re-running the repo's own CI via GitHub
 Actions.  All agent-dispatch-via-workflow_dispatch code is removed.
@@ -23,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import pathlib
 import shutil
 import signal
 import tempfile
@@ -272,10 +287,13 @@ class ClaudeCodeHarnessPort:
       - Operator master creds (App key, FORGE_TOKEN) never reach the child.
       - No contributor text in args or env.
 
-    I9 spawn gap (tracked in #52): the allow-set (allowed_agent_refs) is
-    enforced as a prompt instruction in _build_prompt. Hard rejection via a
-    claude PreToolUse hook is tracked separately in issue #52. Blast radius is
-    bounded by the single-repo scoped token from _mint_scoped_installation_token.
+    I9 spawn enforcement (#52 closed): when allowed_agent_refs is a list, the
+    harness materialises a PreToolUse hook (i9_spawn_hook.py) into the cloned
+    repo's .claude/ dir and injects ORCHESTRATOR_ALLOWED_AGENT_REFS into the
+    child env.  The hook fails closed (deny on missing env var / empty set /
+    parse error).  Prompt-level instruction is retained as defence in depth.
+    Blast radius is bounded by the single-repo scoped token from
+    _mint_scoped_installation_token.
 
     trigger_workflow / trigger_ci: retained for CI re-runs via GitHub Actions.
     """
@@ -346,14 +364,23 @@ class ClaudeCodeHarnessPort:
         )
         return " ".join(lines)
 
-    def _build_child_env(self, gh_token: str) -> dict[str, str]:
+    def _build_child_env(
+        self,
+        gh_token: str,
+        allowed_agent_refs: list[str] | None = None,
+    ) -> dict[str, str]:
         """Build the child process environment.
 
         I3: Only CLAUDE_CODE_OAUTH_TOKEN and GH_TOKEN (scoped) are injected.
         The orchestrator's FORGE_TOKEN, App private key, and all other operator
         credentials are NEVER forwarded to the child environment.
+
+        I9: When allowed_agent_refs is not None, ORCHESTRATOR_ALLOWED_AGENT_REFS
+        is injected as a comma-separated string so the PreToolUse hook can enforce
+        the allow-set.  An empty list injects an empty string (hook denies all
+        Task spawns — fail closed).
         """
-        return {
+        env: dict[str, str] = {
             # Claude auth (OAuth token — operator env, never repo secret)
             "CLAUDE_CODE_OAUTH_TOKEN": self._claude_oauth_token,
             # Scoped GitHub token (freshly minted, repo-limited, permission-limited)
@@ -365,6 +392,54 @@ class ClaudeCodeHarnessPort:
             # HOME is required for some git operations
             "HOME": os.environ.get("HOME", "/root"),
         }
+        if allowed_agent_refs is not None:
+            # Comma-separated allow-set consumed by i9_spawn_hook.py.
+            # Empty list → empty string → hook denies all Task spawns.
+            env["ORCHESTRATOR_ALLOWED_AGENT_REFS"] = ",".join(allowed_agent_refs)
+        return env
+
+    def _write_spawn_hook(self, repo_dir: str) -> None:
+        """Materialise the I9 PreToolUse hook into the cloned repo.
+
+        Writes two files into repo_dir/.claude/:
+          - i9_spawn_hook.py  — the hook script (copied from src/ports/).
+          - settings.json     — Claude Code settings with PreToolUse hook wired.
+
+        If .claude/settings.json already exists its content is REPLACED so that
+        the hook is always active for this dispatch (defence in depth; we own
+        the working tree).
+
+        Security (I9): the hook script is read from the orchestrator source tree
+        (not the cloned repo) so a compromised repo cannot substitute its own
+        hook script.
+        """
+        claude_dir = pathlib.Path(repo_dir) / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Copy the hook script from the orchestrator package into the repo.
+        # Use __file__ of this module to locate the sibling hook script reliably.
+        hook_src = pathlib.Path(__file__).parent / "i9_spawn_hook.py"
+        hook_dst = claude_dir / "i9_spawn_hook.py"
+        shutil.copy2(str(hook_src), str(hook_dst))
+
+        # 2. Write settings.json with the PreToolUse hook.
+        settings: dict[str, object] = {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Task",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f"python3 {hook_dst}",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        settings_path = claude_dir / "settings.json"
+        settings_path.write_text(json.dumps(settings, indent=2))
 
     async def _clone_repo(self, gh_token: str, work_dir: str, branch: str | None) -> None:
         """Clone the target repo into work_dir using the scoped GH_TOKEN.
@@ -479,6 +554,7 @@ class ClaudeCodeHarnessPort:
         Security:
           - I3: only CLAUDE_CODE_OAUTH_TOKEN + scoped GH_TOKEN in child env.
           - I9: prompt built from context.contract path only; no contributor text.
+               PreToolUse hook enforces allowed_agent_refs when not None (closes #52).
         """
         run_id = str(uuid.uuid4())
         self._event_store.register(run_id)
@@ -494,7 +570,7 @@ class ClaudeCodeHarnessPort:
             http_client=self._http_client,
         )
 
-        # 2. Clone the repo into a fresh temp dir.
+        # 2. Clone the repo into a fresh temp dir (branch from context).
         work_dir = tempfile.mkdtemp(prefix=f"orch-run-{run_id[:8]}-")
         repo_dir = os.path.join(work_dir, "repo")
         os.makedirs(repo_dir, exist_ok=True)
@@ -516,13 +592,19 @@ class ClaudeCodeHarnessPort:
             self._event_store.append(run_id, event)
             return RunHandle(run_id=run_id)
 
-        # 3. Build the prompt (I9: contract path only, no contributor text).
+        # 3. Materialise the I9 PreToolUse hook when an allow-set is specified.
+        #    The hook is the technical control; prompt instruction is defence in depth.
+        if context.allowed_agent_refs is not None:
+            self._write_spawn_hook(repo_dir)
+
+        # 4. Build the prompt (I9: contract path only, no contributor text).
         prompt = self._build_prompt(context)
 
-        # 4. Build the child env (I3: only CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN).
-        child_env = self._build_child_env(gh_token)
+        # 5. Build the child env (I3: only CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN).
+        #    I9: inject ORCHESTRATOR_ALLOWED_AGENT_REFS when allow-set is specified.
+        child_env = self._build_child_env(gh_token, context.allowed_agent_refs)
 
-        # 5. Build the claude CLI invocation.
+        # 6. Build the claude CLI invocation.
         #    -p / --print: headless (non-interactive) mode
         #    --output-format stream-json: NDJSON event stream on stdout
         #    --permission-mode bypassPermissions: autonomous run (no interactive prompts)
@@ -541,13 +623,13 @@ class ClaudeCodeHarnessPort:
             context.model,
         ]
 
-        # 6. Spawn the subprocess via the injectable runner.
+        # 7. Spawn the subprocess via the injectable runner.
         process = await self._process_runner(claude_args, repo_dir, child_env)
 
-        # 7. Track the process.
+        # 8. Track the process.
         self._processes[run_id] = (process, work_dir)
 
-        # 8. Watch in background — "fire and watch" (AGENTS.md §1).
+        # 9. Watch in background — "fire and watch" (AGENTS.md §1).
         watcher = asyncio.create_task(
             self._watch_process(run_id, process, work_dir),
             name=f"harness-watch-{run_id[:8]}",

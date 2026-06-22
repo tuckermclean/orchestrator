@@ -229,6 +229,18 @@
   "enum-exhaustiveness":
     tests: ["test_redispatch_arity"]
 
+"§9.2":  # I9 spawn allow-set enforcement — PreToolUse hook (closes #52)
+  "spawn-hook-in-set-allow":
+    tests: ["test_hook_allows_when_subagent_type_in_set"]
+  "spawn-hook-out-of-set-deny":
+    tests: ["test_security_spawn_ref_outside_allowset_rejected"]
+  "hook-config-content":
+    tests: ["test_write_spawn_hook_creates_settings_json", "test_write_spawn_hook_settings_has_pretooluse_hook", "test_write_spawn_hook_copies_hook_script", "test_write_spawn_hook_command_points_to_hook_script"]
+  "hook-env-var-injected":
+    tests: ["test_dispatch_injects_allowed_refs_env_var_when_set"]
+  "hook-env-var-absent-when-none":
+    tests: ["test_security_spawn_rejected_when_allowed_refs_none"]
+
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":
     tests: ["test_promote_concurrent_same_issue_serializes", "test_promote_lock_acquired_before_mutation"]
