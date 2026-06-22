@@ -39,7 +39,8 @@ Secret keys the operator must supply in {{ .Values.secretName }}:
   GITHUB_APP_ID                — GitHub App ID (App mode)
   GITHUB_APP_PRIVATE_KEY       — PEM-encoded RS256 private key (App mode)
   GITHUB_APP_INSTALLATION_ID   — Installation ID (App mode)
-  OPERATOR_SECRET_KEY          — Webhook HMAC secret + operator JWT signing key
+  OPERATOR_SECRET_KEY          — Webhook HMAC secret + operator JWT signing key (use >= 32
+                                 bytes; HS256 emits a weak-key warning below that)
   OPERATOR_BOOTSTRAP_PASSWORD  — seeds the initial 'admin' operator at boot (REQUIRED to
                                  log in; without it no operator exists and login is impossible)
   CLAUDE_CODE_OAUTH_TOKEN      — Claude API OAuth token for agent harness

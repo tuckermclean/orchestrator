@@ -16,6 +16,7 @@ a starlette middleware so it does not intercept static asset serving.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import time
 from typing import Annotated
@@ -42,6 +43,19 @@ _AUTH_BYPASS_EXACT: tuple[str, ...] = (
     "/readyz",
 )
 
+_logger = logging.getLogger(__name__)
+
+# Module flag so the weak-key warning is emitted at most once (not per token op).
+_short_key_warned_flag = False
+
+
+def _short_key_warned() -> bool:
+    """Return whether the short-key warning has already fired; mark it fired (warn-once)."""
+    global _short_key_warned_flag
+    already = _short_key_warned_flag
+    _short_key_warned_flag = True
+    return already
+
 
 def _secret_key() -> str:
     """Return OPERATOR_SECRET_KEY from the environment.
@@ -55,6 +69,12 @@ def _secret_key() -> str:
         raise RuntimeError(
             "OPERATOR_SECRET_KEY environment variable is not set. "
             "JWT auth cannot function without it."
+        )
+    if len(key.encode()) < 32 and not _short_key_warned():
+        _logger.warning(
+            "OPERATOR_SECRET_KEY is %d bytes; RFC 7518 §3.2 recommends >= 32 bytes for "
+            "HS256 JWT signing. Use a longer secret in production.",
+            len(key.encode()),
         )
     return key
 

@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -103,7 +103,7 @@ def _make_router(service: OrchestratorService, registry: RepoRegistryPort) -> AP
         response.headers["X-Dev-Mode"] = "true"
         repo = await _active_repo(registry)
         if repo is None:
-            repo = RepoRef(owner="demo", name="repo")
+            raise HTTPException(status_code=404, detail="No enabled repo configured")
         handle = await service.dev_dispatch(repo)
         return {"run_id": handle.run_id}
 
@@ -128,7 +128,7 @@ def _make_router(service: OrchestratorService, registry: RepoRegistryPort) -> AP
         operator = str(auth.get("sub", "operator"))
         repo = await _active_repo(registry)
         if repo is None:
-            repo = RepoRef(owner="demo", name="repo")
+            raise HTTPException(status_code=404, detail="No enabled repo configured")
         issue_ref = IssueRef(repo=repo, number=issue_number)
         handle = await service.promote(issue_ref, operator=operator)
         return {"status": "promoted", "run_id": handle.run_id}
@@ -141,7 +141,7 @@ def _make_router(service: OrchestratorService, registry: RepoRegistryPort) -> AP
         operator = str(auth.get("sub", "operator"))
         repo = await _active_repo(registry)
         if repo is None:
-            repo = RepoRef(owner="demo", name="repo")
+            raise HTTPException(status_code=404, detail="No enabled repo configured")
         issue_ref = IssueRef(repo=repo, number=issue_number)
         await service.decline(issue_ref, operator=operator)
         return {"status": "declined"}

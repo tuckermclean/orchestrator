@@ -25,7 +25,7 @@ from src.db.push_store import FakePushStore  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TEST_OPERATOR_SECRET = "test-operator-secret-push"
+_TEST_OPERATOR_SECRET = "test-operator-secret-push-padded-to-32b"
 
 
 def _valid_token(operator_id: str = "admin") -> str:
