@@ -44,6 +44,9 @@ from src.service.registry import (
 
 _log = logging.getLogger(__name__)
 
+_VERSION: str = os.environ.get("ORCHESTRATOR_VERSION", "0.0.0-dev")
+_GIT_SHA: str = (os.environ.get("ORCHESTRATOR_GIT_SHA", "unknown") or "unknown")[:7]
+
 
 def _has_prod_creds() -> bool:
     """Return True when at least one complete credential set is present.
@@ -97,7 +100,7 @@ def create_app(
     )
     _registry: RepoRegistryPort = registry if registry is not None else FakeRepoRegistry()
 
-    app = FastAPI(title="Orchestrator", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Orchestrator", version=_VERSION, lifespan=lifespan)
 
     # CORS for dev (Vite dev server at :5173)
     app.add_middleware(
@@ -113,7 +116,10 @@ def create_app(
     # These routes are EXCLUDED from JWT auth (no Depends(require_auth)).
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> Response:
-        return Response(content='{"status":"ok"}', media_type="application/json")
+        import json as _json
+
+        body = _json.dumps({"status": "ok", "version": _VERSION, "sha": _GIT_SHA})
+        return Response(content=body, media_type="application/json")
 
     # /readyz — readiness: 200 when the service is ready to handle traffic.
     # Returns sub-check status for forge connectivity, DB, and scheduler.
