@@ -43,20 +43,31 @@ I9 invariant (spawn hook — each backend installs it):
 Kubernetes dependency:
   The kubernetes-client package is imported lazily inside K8sJobBackend only.
   The default subprocess path carries zero hard dependency on the kube SDK.
+
+Live transcript streaming:
+  Both backends stream the agent's JSONL stdout into the RunEventStore so the
+  run page can show a live transcript.  The JSONL → RunEvent conversion lives in
+  src/ports/agent_transcript.py (pure functions, independently unit-tested).
+  SubprocessBackend reads the subprocess stdout pipe line-by-line in _watch().
+  K8sJobBackend reads pod logs via KubeLogPort in a background streaming task.
+  Both spawn the streaming task as a ref-kept background asyncio.Task so it
+  cannot be garbage-collected before completion (same pattern as _converge_tasks
+  in OrchestratorService and SQLiteRunStore._tasks).
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shutil
 import tempfile
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from src.domain.types import RunEvent, RunStatus
+from src.ports.agent_transcript import parse_jsonl_line
 from src.ports.harness import (
     ProcessResult,
     ProcessRunner,
@@ -309,7 +320,16 @@ class SubprocessBackend:
         work_dir: str,
         event_store: RunEventStore,
     ) -> None:
-        """Background: stream JSON events from stdout and update status on exit."""
+        """Background: stream JSONL events from stdout and update status on exit.
+
+        Uses parse_jsonl_line() to filter and map each stdout line into a
+        meaningful RunEvent (agent_message, agent_tool_use, agent_tool_result,
+        agent_result, or agent_thinking).  Noise lines (system, thinking_tokens)
+        and non-JSON lines are silently dropped.
+
+        Security (I3): parse_jsonl_line() redacts secret-like strings and
+        truncates large payloads before they reach the event store.
+        """
         event_store.set_status(run_id, RunStatus(state="in_progress"))
 
         if process.stdout is not None:
@@ -317,24 +337,9 @@ class SubprocessBackend:
                 line = raw_line.decode(errors="replace").strip()
                 if not line:
                     continue
-                try:
-                    data = json.loads(line)
-                    event_type = str(data.get("type", "stream"))
-                    event = RunEvent(
-                        event_type=event_type,
-                        data={k: v for k, v in data.items() if k != "type"},
-                        timestamp=datetime.now(tz=UTC),
-                    )
+                event = parse_jsonl_line(line)
+                if event is not None:
                     event_store.append(run_id, event)
-                except Exception:
-                    event_store.append(
-                        run_id,
-                        RunEvent(
-                            event_type="raw",
-                            data={"line": line},
-                            timestamp=datetime.now(tz=UTC),
-                        ),
-                    )
 
         exit_code = await process.wait()
         event_store.set_status(
@@ -409,6 +414,68 @@ class KubeClientPort(Protocol):
     ) -> None:
         """Delete the Job (and its pods when propagation_policy='Foreground')."""
         ...
+
+
+# ---------------------------------------------------------------------------
+# KubeLogPort — thin seam over kubernetes-client CoreV1Api pod log streaming
+# ---------------------------------------------------------------------------
+
+
+class KubeLogPort(Protocol):
+    """Minimal Kubernetes API surface for streaming pod logs.
+
+    A real implementation calls CoreV1Api.read_namespaced_pod_log with
+    follow=True, _preload_content=False and iterates the response body.
+    Tests inject a FakeKubeLogClient.
+    """
+
+    def stream_pod_log(
+        self,
+        namespace: str,
+        label_selector: str,
+    ) -> AsyncIterator[str]:
+        """Yield JSONL lines from the first pod matching label_selector.
+
+        Uses follow=True so lines arrive incrementally (non-blocking tail).
+        Returns when the pod exits or the log stream is closed.
+
+        Each yielded item is one decoded text line (no newline).
+
+        Declared as a plain ``def`` returning ``AsyncIterator[str]`` (not
+        ``async def``): an async-generator implementation, when called, returns
+        the async iterator directly — it is not a coroutine to be awaited. This
+        lets ``async for line in client.stream_pod_log(...)`` type-check.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# FakeKubeLogClient — injectable double for K8s transcript streaming tests
+# ---------------------------------------------------------------------------
+
+
+class FakeKubeLogClient:
+    """Controllable fake Kubernetes log client for K8sJobBackend unit tests.
+
+    Call configure_log_lines() before dispatch to set the lines the async
+    iterator will yield for the matching pod.
+    """
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+
+    def configure_log_lines(self, lines: list[str]) -> None:
+        """Set the lines that stream_pod_log() will yield (in order)."""
+        self._lines = list(lines)
+
+    async def stream_pod_log(
+        self,
+        namespace: str,
+        label_selector: str,
+    ) -> AsyncIterator[str]:
+        """Yield the pre-configured lines, simulating a live pod log stream."""
+        for line in self._lines:
+            yield line
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +614,7 @@ class K8sJobBackend:
         image: str = "ghcr.io/tuckermclean/orchestrator-agent-runner:latest",
         namespace: str = "default",
         kube_client: KubeClientPort | None = None,
+        kube_log_client: KubeLogPort | None = None,
         poll_interval_s: float = _K8S_POLL_INTERVAL_S,
         job_timeout_s: float = _K8S_JOB_TIMEOUT_S,
         service_account: str = "orchestrator",
@@ -556,10 +624,16 @@ class K8sJobBackend:
         self._kube_client: KubeClientPort = (
             kube_client if kube_client is not None else _make_real_kube_client()
         )
+        # KubeLogPort: streams pod stdout (JSONL) for live transcript.
+        # None → no log streaming (default for prod until real adapter is wired).
+        # FakeKubeLogClient is injected by tests.
+        # The real adapter (_RealKubeLogClient) is constructed when
+        # kube_log_client is None and we are in production (see _make_real_kube_log_client).
+        self._kube_log_client: KubeLogPort | None = kube_log_client
         self._poll_interval_s = poll_interval_s
         self._job_timeout_s = job_timeout_s
         self._service_account = service_account
-        # Background watcher tasks
+        # Background watcher tasks — kept to prevent GC before completion.
         self._background_tasks: set[asyncio.Task[None]] = set()
         # run_id → job_name mapping for cancel()
         self._job_names: dict[str, str] = {}
@@ -818,6 +892,17 @@ class K8sJobBackend:
         self._background_tasks.add(watcher)
         watcher.add_done_callback(self._background_tasks.discard)
 
+        # Spawn live transcript streamer when a log client is wired.
+        # The label selector matches the run-id label baked into the Job spec.
+        if self._kube_log_client is not None:
+            label_selector = f"run-id={run_id[:63]}"
+            log_streamer = asyncio.create_task(
+                self._stream_pod_log(run_id, label_selector, event_store),
+                name=f"k8s-log-{run_id[:8]}",
+            )
+            self._background_tasks.add(log_streamer)
+            log_streamer.add_done_callback(self._background_tasks.discard)
+
     async def _watch(
         self,
         run_id: str,
@@ -879,6 +964,41 @@ class K8sJobBackend:
                 break
 
             await asyncio.sleep(self._poll_interval_s)
+
+    async def _stream_pod_log(
+        self,
+        run_id: str,
+        label_selector: str,
+        event_store: RunEventStore,
+    ) -> None:
+        """Background: stream JSONL lines from the pod log into the event store.
+
+        Called only when a KubeLogPort is wired (self._kube_log_client is not None).
+        Uses parse_jsonl_line() to convert each line into a meaningful RunEvent,
+        identical to SubprocessBackend._watch() so the UI sees the same event
+        taxonomy regardless of backend.
+
+        Security (I3): parse_jsonl_line() redacts secret-like strings and
+        truncates large payloads before they enter the event store.
+
+        Errors from the log stream are swallowed (best-effort) — the job status
+        watcher (_watch) is the authoritative source of truth for run completion.
+        """
+        assert self._kube_log_client is not None  # caller guarantees this
+        try:
+            async for line in self._kube_log_client.stream_pod_log(
+                self._namespace, label_selector
+            ):
+                line = line.strip()
+                if not line:
+                    continue
+                event = parse_jsonl_line(line)
+                if event is not None:
+                    event_store.append(run_id, event)
+        except Exception:
+            # Log-streaming errors are non-fatal — the job status watcher is
+            # the authority.  Swallow silently to avoid crashing the task.
+            pass
 
     def _cleanup_job(self, job_name: str) -> None:
         """Delete the K8s Job (best-effort; TTL handles it if this fails)."""
@@ -984,6 +1104,105 @@ class _RealKubeClient:
         )
 
 
+class _RealKubeLogClient:
+    """Thin wrapper adapting kubernetes CoreV1Api pod logs to KubeLogPort.
+
+    Streams pod logs with follow=True so lines arrive incrementally.
+    The kubernetes python SDK's read_namespaced_pod_log with
+    _preload_content=False returns a urllib3 HTTPResponse whose iter_lines()
+    we wrap in an async generator by running it in a thread pool executor.
+
+    We select pods by label_selector (run-id=<run_id[:63]>) and wait briefly
+    for the pod to appear (the Job scheduler takes a moment to start the pod
+    after job creation).
+    """
+
+    def __init__(self, core_v1: Any) -> None:
+        self._api = core_v1
+
+    async def stream_pod_log(
+        self,
+        namespace: str,
+        label_selector: str,
+    ) -> AsyncIterator[str]:
+        """Yield log lines from the pod matching label_selector.
+
+        Polls for the pod to appear (up to 30 s), then streams with follow=True.
+        Each yielded item is one decoded UTF-8 line.
+        """
+        import asyncio as _asyncio
+
+        loop = _asyncio.get_running_loop()
+
+        # Wait up to 30 s for the pod to be created and reach Running.
+        pod_name: str | None = None
+        for _ in range(60):
+            try:
+                pod_list = await loop.run_in_executor(
+                    None,
+                    lambda: self._api.list_namespaced_pod(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    ),
+                )
+                pods = pod_list.items if hasattr(pod_list, "items") else []
+                if pods:
+                    pod_name = pods[0].metadata.name
+                    break
+            except Exception:
+                pass
+            await _asyncio.sleep(0.5)
+
+        if pod_name is None:
+            return
+
+        # Stream with follow=True, _preload_content=False.
+        try:
+            resp = await loop.run_in_executor(
+                None,
+                lambda: self._api.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    follow=True,
+                    _preload_content=False,
+                ),
+            )
+            for raw_line in resp.iter_lines():
+                if isinstance(raw_line, bytes):
+                    yield raw_line.decode("utf-8", errors="replace")
+                else:
+                    yield str(raw_line)
+        except Exception:
+            return
+
+
+def _make_real_kube_log_client() -> _RealKubeLogClient:
+    """Return a log-streaming wrapper around kubernetes CoreV1Api.
+
+    Lazy-imports kubernetes so the subprocess path is unaffected.
+    """
+    try:
+        # No type: ignore needed here — the module-level import-not-found is already
+        # suppressed at the first `import kubernetes` site (mypy caches it).
+        import kubernetes as _kube_pkg  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "The 'kubernetes' package is required for K8s pod log streaming. "
+            "Install the k8s extra: pip install '.[k8s]' (baked into the control-plane image)."
+        ) from exc
+
+    k8s_client = _kube_pkg.client
+    k8s_config = _kube_pkg.config
+
+    try:
+        k8s_config.load_incluster_config()
+    except Exception:
+        k8s_config.load_kube_config()
+
+    core_v1 = k8s_client.CoreV1Api()
+    return _RealKubeLogClient(core_v1)
+
+
 # ---------------------------------------------------------------------------
 # Backend factory — selects subprocess vs k8s based on env / config
 # ---------------------------------------------------------------------------
@@ -993,6 +1212,7 @@ def make_execution_backend(
     *,
     process_runner: ProcessRunner | None = None,
     kube_client: KubeClientPort | None = None,
+    kube_log_client: KubeLogPort | None = None,
 ) -> SubprocessBackend | K8sJobBackend:
     """Construct the appropriate ExecutionBackend based on HARNESS_EXECUTION_BACKEND.
 
@@ -1002,6 +1222,10 @@ def make_execution_backend(
     k8s:
       Used when HARNESS_EXECUTION_BACKEND=k8s.  The kubernetes package is imported
       lazily so the subprocess path never acquires the dependency.
+      kube_log_client: if None and HARNESS_K8S_STREAM_LOGS is set, the real
+      CoreV1Api log adapter is constructed.  If not set, log streaming is disabled
+      (safe default — K8s prod deployments should set HARNESS_K8S_STREAM_LOGS=1
+      once the agent-runner image is reachable from the control-plane).
     """
     backend_name = os.environ.get("HARNESS_EXECUTION_BACKEND", "subprocess").lower()
     if backend_name == "k8s":
@@ -1011,10 +1235,16 @@ def make_execution_backend(
         )
         namespace = os.environ.get("HARNESS_K8S_NAMESPACE", "default")
         service_account = os.environ.get("HARNESS_K8S_SERVICE_ACCOUNT", "orchestrator")
+        # Only construct the real log client when explicitly opted in
+        # (HARNESS_K8S_STREAM_LOGS=1) so existing deployments are unaffected.
+        resolved_log_client: KubeLogPort | None = kube_log_client
+        if resolved_log_client is None and os.environ.get("HARNESS_K8S_STREAM_LOGS", ""):
+            resolved_log_client = _make_real_kube_log_client()
         return K8sJobBackend(
             image=image,
             namespace=namespace,
             kube_client=kube_client,
+            kube_log_client=resolved_log_client,
             service_account=service_account,
         )
     return SubprocessBackend(process_runner=process_runner)

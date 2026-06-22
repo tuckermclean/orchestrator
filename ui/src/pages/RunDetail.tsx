@@ -10,13 +10,125 @@ const card: React.CSSProperties = {
   marginBottom: "16px",
 };
 
+// Colour palette for transcript event types.
 const eventStyles: Record<string, React.CSSProperties> = {
+  // Lifecycle events
   queued: { color: "#8b949e" },
   in_progress: { color: "#58a6ff" },
-  tool_use: { color: "#d2a8ff" },
   completed: { color: "#3fb950" },
-  default: { color: "#e6edf3" },
+  // Agent transcript events (new)
+  agent_message: { color: "#e6edf3" },
+  agent_thinking: { color: "#6e7681", fontStyle: "italic" },
+  agent_tool_use: { color: "#d2a8ff" },
+  agent_tool_result: { color: "#79c0ff" },
+  agent_result: { color: "#3fb950", fontWeight: 600 },
+  // Fallback
+  default: { color: "#8b949e" },
 };
+
+/** Render a single event row, with richer layout for transcript event types. */
+function EventRow({ ev }: { ev: RunEvent }) {
+  const style = eventStyles[ev.event_type] ?? eventStyles.default;
+  const time = new Date(ev.timestamp).toLocaleTimeString();
+
+  // agent_message — show prose text
+  if (ev.event_type === "agent_message") {
+    return (
+      <div style={{ marginBottom: "8px", ...style }}>
+        <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {String(ev.data.text ?? "")}
+        </span>
+      </div>
+    );
+  }
+
+  // agent_thinking — collapsible italics block
+  if (ev.event_type === "agent_thinking") {
+    return (
+      <div style={{ marginBottom: "6px", ...style }}>
+        <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+        <span style={{ color: "#6e7681" }}>💭 </span>
+        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {String(ev.data.thinking ?? "")}
+        </span>
+      </div>
+    );
+  }
+
+  // agent_tool_use — monospace name + input summary
+  if (ev.event_type === "agent_tool_use") {
+    return (
+      <div style={{ marginBottom: "6px", ...style }}>
+        <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+        <span style={{ fontWeight: 700 }}>⚙ {String(ev.data.name ?? "")}</span>
+        {ev.data.input_summary ? (
+          <span
+            style={{
+              color: "#8b949e",
+              marginLeft: "8px",
+              fontFamily: "monospace",
+              fontSize: "12px",
+            }}
+          >
+            {String(ev.data.input_summary)}
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+
+  // agent_tool_result — monospace content
+  if (ev.event_type === "agent_tool_result") {
+    return (
+      <div style={{ marginBottom: "6px", ...style }}>
+        <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+        <span style={{ color: "#6e7681", marginRight: "4px" }}>↩</span>
+        <span
+          style={{
+            fontFamily: "monospace",
+            fontSize: "12px",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {String(ev.data.content ?? "")}
+        </span>
+      </div>
+    );
+  }
+
+  // agent_result — bold final outcome
+  if (ev.event_type === "agent_result") {
+    return (
+      <div style={{ marginBottom: "8px", ...style }}>
+        <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+        <span style={{ marginRight: "6px" }}>✓ RESULT</span>
+        {ev.data.subtype ? (
+          <span style={{ color: "#58a6ff", marginRight: "6px" }}>
+            [{String(ev.data.subtype)}]
+          </span>
+        ) : null}
+        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          {String(ev.data.result ?? "")}
+        </span>
+      </div>
+    );
+  }
+
+  // Generic fallback for lifecycle / infrastructure events
+  return (
+    <div style={{ marginBottom: "6px", ...style }}>
+      <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
+      <span style={{ fontWeight: 600 }}>{ev.event_type}</span>
+      {Object.keys(ev.data).length > 0 && (
+        <span style={{ color: "#8b949e", marginLeft: "8px", fontFamily: "monospace", fontSize: "12px" }}>
+          {JSON.stringify(ev.data)}
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function RunDetail() {
   const { run_id } = useParams<{ run_id: string }>();
@@ -207,22 +319,9 @@ export default function RunDetail() {
           {events.length === 0 && (
             <span style={{ color: "#6e7681" }}>No events yet. Connect SSE to stream live events.</span>
           )}
-          {events.map((ev, i) => {
-            const style = eventStyles[ev.event_type] ?? eventStyles.default;
-            return (
-              <div key={i} style={{ marginBottom: "6px", ...style }}>
-                <span style={{ color: "#6e7681", marginRight: "8px" }}>
-                  [{new Date(ev.timestamp).toLocaleTimeString()}]
-                </span>
-                <span style={{ fontWeight: 600 }}>{ev.event_type}</span>
-                {Object.keys(ev.data).length > 0 && (
-                  <span style={{ color: "#8b949e", marginLeft: "8px" }}>
-                    {JSON.stringify(ev.data)}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          {events.map((ev, i) => (
+            <EventRow key={i} ev={ev} />
+          ))}
           <div ref={eventsEndRef} />
         </div>
       </div>
