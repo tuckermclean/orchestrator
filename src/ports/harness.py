@@ -466,6 +466,93 @@ class ClaudeCodeHarnessPort:
             env["ORCHESTRATOR_ALLOWED_AGENT_REFS"] = ",".join(allowed_agent_refs)
         return env
 
+    def _materialize_contract(self, contract: str, repo_dir: str) -> None:
+        """Copy the agent contract file from the package into the cloned workspace.
+
+        Used by SubprocessBackend (dev/CI path) so the agent can read its contract
+        at the repo-relative path the prompt references (e.g. "agents/orchestrator.md").
+
+        The contract is sourced from the orchestrator package's own agents/ directory
+        (sibling of src/ at the repo root), NOT from the cloned target repo — which
+        will never contain orchestrator's own contracts (#111).
+
+        Fails loudly with a clear error message if the contract file is absent,
+        rather than silently letting the agent run without its governing instructions.
+
+        Args:
+          contract:  DispatchContext.contract, e.g. "agents/orchestrator.md".
+          repo_dir:  absolute path to the cloned working tree root.
+        """
+        import pathlib
+        import shutil
+
+        basename = contract.rsplit("/", 1)[-1]
+        # Locate the package's own agents/ dir: src/ports/harness.py → ../../agents/
+        package_agents_dir = pathlib.Path(__file__).parent.parent.parent / "agents"
+        src_path = package_agents_dir / basename
+        if not src_path.exists():
+            raise FileNotFoundError(
+                f"Agent contract not found at expected package path: {src_path}. "
+                f"Contract '{contract}' cannot be materialised into the workspace. "
+                "The orchestrator's contracts are in the 'agents/' directory at the "
+                "repo root; they are baked into the agent-runner image at /app/agents/ "
+                "for K8s dispatches. Check that agents/ is present and the contract "
+                f"basename '{basename}' matches an existing file."
+            )
+        dest_dir = pathlib.Path(repo_dir) / "agents"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_path), str(dest_dir / basename))
+
+    async def _configure_git_identity(self, repo_dir: str, gh_token: str) -> None:
+        """Configure repo-local git identity and push credentials for the agent (#112).
+
+        Sets user.name and user.email locally (not globally) so the agent can
+        commit without "Author identity unknown".  Configures url.insteadOf for
+        the token so git push works without terminal prompts.
+
+        Repo-local scope is used for subprocess dispatches to avoid clobbering the
+        developer's global git config.  For K8s, the entry script uses --global
+        because the pod is single-use.
+
+        I3: the token appears only in the repo-local .git/config, which is written
+        inside the cloned working tree (not the orchestrator source tree).  It is
+        never forwarded to the child env as a new variable.
+        """
+        base_env = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/root"),
+        }
+        for args in (
+            ["git", "config", "user.name", "Orchestrator Agent"],
+            ["git", "config", "user.email", "agent@orchestrator"],
+            # Configure push auth via url.insteadOf (repo-local, inside .git/config).
+            # This covers both fetch and push without exposing the token in argv.
+            [
+                "git",
+                "config",
+                f"url.https://x-access-token:{gh_token}@github.com/.insteadOf",
+                "https://github.com/",
+            ],
+        ):
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=repo_dir,
+                env=base_env,
+            )
+            await proc.wait()
+            # Failures are non-fatal (logged) — they degrade gracefully rather
+            # than killing the dispatch.  The agent will hit the original error
+            # if identity is truly absent, which surfaces via the run log.
+            if proc.returncode != 0:
+                _log.warning(
+                    "_configure_git_identity: git config failed (exit %s) for %s",
+                    proc.returncode,
+                    args[2] if len(args) > 2 else args,
+                )
+
     def _write_spawn_hook(self, repo_dir: str) -> None:
         """Materialise the I9 PreToolUse hook into the cloned repo.
 
@@ -644,8 +731,11 @@ class ClaudeCodeHarnessPort:
         # 6. Delegate execution to the backend (fire and watch — AGENTS.md §1).
         #    The backend is responsible for:
         #      a) Cloning the repo (subprocess: locally; k8s: inside the pod).
-        #      b) Materialising the I9 hook when allowed_agent_refs is set.
-        #      c) Running claude in the cloned working tree.
+        #      b) Materialising the agent contract (#111: subprocess copies from
+        #         the package agents/ dir; k8s copies from the baked /app/agents/).
+        #      c) Configuring git identity and push auth (#112).
+        #      d) Materialising the I9 hook when allowed_agent_refs is set.
+        #      e) Running claude in the cloned working tree.
         await self._backend.dispatch(
             run_id=run_id,
             repo_owner=self._repo_owner,
@@ -654,6 +744,7 @@ class ClaudeCodeHarnessPort:
             claude_args=claude_args,
             child_env=child_env,
             allowed_agent_refs=context.allowed_agent_refs,
+            contract=context.contract,
             event_store=self._event_store,
             harness=self,
         )
