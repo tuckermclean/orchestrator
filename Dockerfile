@@ -89,10 +89,18 @@ WORKDIR /ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY ui/ ./
+# Build-time version injection: Vite replaces __APP_VERSION__ / __APP_SHA__ in the bundle.
+ARG VERSION=0.0.0-dev
+ARG GIT_SHA=unknown
+ENV VITE_APP_VERSION=$VERSION VITE_APP_GIT_SHA=$GIT_SHA
 RUN npm run build   # tsc && vite build → /ui/dist
 
 # ---- runtime stage ----
 FROM base AS runtime
+
+# Build-time version baked into env for the Python process.
+ARG VERSION=0.0.0-dev
+ARG GIT_SHA=unknown
 
 # Non-root user (ARCHITECTURE.md §5/§6 security context)
 RUN groupadd --gid 1001 orch \
@@ -117,7 +125,9 @@ USER orch
 ENV PATH="/app/venv/bin:${PATH}" \
     PYTHONPATH="/app" \
     PYTHONUNBUFFERED="1" \
-    PORT="8080"
+    PORT="8080" \
+    ORCHESTRATOR_VERSION=$VERSION \
+    ORCHESTRATOR_GIT_SHA=$GIT_SHA
 
 EXPOSE 8080 9090
 

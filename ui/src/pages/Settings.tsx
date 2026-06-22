@@ -444,7 +444,9 @@ export default function Settings() {
         <h2 id="about-heading" style={s.h2}>
           About
         </h2>
-        <p style={s.muted}>Orchestrator — autonomous SWE-agent pipeline v0.1.0</p>
+        <p style={s.muted}>
+          {`Orchestrator — autonomous SWE-agent pipeline v${__APP_VERSION__}${__APP_SHA__ ? ` (${__APP_SHA__})` : ""}`}
+        </p>
         <div style={{ marginTop: "16px" }}>
           <button
             onClick={() => {

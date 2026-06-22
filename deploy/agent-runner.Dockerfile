@@ -26,6 +26,9 @@
 #     -t ghcr.io/<owner>/orchestrator-agent-runner:<tag> .
 # ---------------------------------------------------------------------------
 
+ARG VERSION=0.0.0-dev
+ARG GIT_SHA=unknown
+
 FROM node:22-slim AS node-base
 
 # Install system packages: git, gh CLI, ca-certificates, Python 3.12
@@ -61,6 +64,8 @@ ARG AGENT_PACK_DEST_DIR=".agents"
 LABEL org.opencontainers.image.source="https://github.com/tuckermclean/orchestrator"
 LABEL org.opencontainers.image.description="Orchestrator agent-runner (K8s Job executor)"
 LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.agent-pack.source="${AGENT_PACK_REPO_URL}"
 LABEL org.opencontainers.image.agent-pack.ref="${AGENT_PACK_PINNED_REF}"
 

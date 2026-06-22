@@ -44,14 +44,17 @@ def _make_test_app() -> object:
 
 @pytest.mark.asyncio
 async def test_healthz_returns_200() -> None:
-    """/healthz responds 200 with {"status":"ok"}."""
+    """/healthz responds 200 with status ok, version, and sha fields."""
     app = _make_test_app()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         response = await client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert "version" in body
+    assert "sha" in body
 
 
 @pytest.mark.asyncio
