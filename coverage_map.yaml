@@ -156,10 +156,14 @@
 #   # implemented in Step 2 (tests/security/test_intake_security.py)
 
 "§8.11":
-  "row-empty-allowlist":
-    tests: ["test_intake_gate_disabled", "test_intake_gate_disabled_empty_string_author"]
+  "row-empty-allowlist-owner-admit":
+    tests: ["test_intake_empty_allowlist_owner_admitted", "test_intake_empty_allowlist_owner_admitted_matches_repo_owner"]
+  "row-empty-allowlist-nonowner-queue":
+    tests: ["test_intake_empty_allowlist_nonowner_queued", "test_intake_empty_allowlist_empty_string_author_queued", "test_intake_empty_allowlist_random_actor_queued"]
   "row-allowlisted-admit":
     tests: ["test_intake_allowlisted_first", "test_intake_allowlisted_second", "test_intake_single_match"]
+  "row-nonempty-owner-admit":
+    tests: ["test_intake_owner_always_admitted_nonempty_allowlist", "test_intake_owner_admitted_single_entry_allowlist"]
   "row-unlisted-queue":
     tests: ["test_intake_unlisted", "test_intake_single_nomatch", "test_intake_case_sensitive_upper_in_list", "test_intake_case_sensitive_lower_in_list"]
 

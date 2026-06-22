@@ -73,7 +73,8 @@ def _build_dev_service() -> OrchestratorService:
         harness=harness,
         session=session,
         audit=audit,
-        allowlist=[],  # gate disabled in dev mode — all authors admit
+        allowlist=[],
+        owner="demo",  # dev mode: owner is "demo" (matches seed data RepoRef)
     )
     return service
 
@@ -150,7 +151,9 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
     audit = AuditLog()
 
     # I1: parse ALLOWLIST from env (comma-separated GitHub logins).
-    # An empty/unset ALLOWLIST disables the gate (appropriate for private repos).
+    # DEFAULT-DENY (issue #48): an empty/unset ALLOWLIST is fail-closed — it
+    # admits ONLY the repo owner (GITHUB_OWNER) and queues everyone else.
+    # To allow additional authors, populate ALLOWLIST with their GitHub logins.
     allowlist_raw = os.environ.get("ALLOWLIST", "")
     allowlist = [u.strip() for u in allowlist_raw.split(",") if u.strip()]
 
@@ -160,6 +163,7 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
         session=session,
         audit=audit,
         allowlist=allowlist,
+        owner=default_repo.owner,
     )
     return service, webhook_secret
 

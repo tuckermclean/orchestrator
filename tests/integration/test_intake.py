@@ -23,6 +23,7 @@ def _make_engine(
     session: FakeSessionPort,
     audit: AuditLog,
     allowlist: list[str],
+    owner: str = _REPO.owner,
 ) -> IntakeEngine:
     return IntakeEngine(
         forge=forge,
@@ -30,6 +31,7 @@ def _make_engine(
         session=session,
         audit=audit,
         allowlist=allowlist,
+        owner=owner,
     )
 
 

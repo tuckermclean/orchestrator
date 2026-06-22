@@ -56,6 +56,7 @@ async def test_security_unlisted_never_dispatches() -> None:
         session=session,
         audit=audit,
         allowlist=["alice"],
+        owner=_REPO.owner,
     )
     await engine.intake(issue_ref)
 
@@ -93,6 +94,7 @@ async def test_security_promotion_required() -> None:
         session=session,
         audit=audit,
         allowlist=["alice"],
+        owner=_REPO.owner,
     )
     await engine.intake(issue_ref)
 
@@ -137,6 +139,7 @@ async def test_security_triage_agent_read_only() -> None:
         session=session,
         audit=audit,
         allowlist=["alice"],
+        owner=_REPO.owner,
     )
     await engine.intake(admit_ref)
 
@@ -183,6 +186,7 @@ async def test_security_awaiting_and_agent_work_never_coexist() -> None:
         session=session,
         audit=audit,
         allowlist=["alice"],
+        owner=_REPO.owner,
     )
 
     # After intake (queue path)
@@ -227,7 +231,8 @@ async def test_intake_audit_logged() -> None:
         harness=harness,
         session=session,
         audit=audit,
-        allowlist=[],  # gate disabled → admit
+        allowlist=[],   # empty allowlist → default-deny; "someone" is not owner → queue
+        owner=_REPO.owner,
     )
     await engine.intake(issue_ref)
 

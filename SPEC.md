@@ -593,11 +593,22 @@ commit. The adapter must not return a cached count that could diverge from the l
 
 ### §8.11 `decide_intake`
 
-| `allowlist` | `author in allowlist` | Result |
+**Inputs**: `issue: Issue`, `allowlist: list[str]`, `owner: str`
+**Outputs**: `"admit" | "queue"`
+
+Default-deny / fail-closed (issue #48). An empty `allowlist` is NOT gate-disabled — it
+admits ONLY the repo owner and queues everyone else.
+
+| `allowlist` | `author` | Result |
 |---|---|---|
-| empty (`[]`) | n/a | `admit` — gate disabled |
-| non-empty | true | `admit` |
-| non-empty | false | `queue` |
+| empty (`[]`) | `== owner` | `admit` — owner-only default |
+| empty (`[]`) | `!= owner` | `queue` — fail-closed |
+| non-empty | `== owner` | `admit` — owner implicitly admitted |
+| non-empty | `in allowlist` | `admit` |
+| non-empty | `not in allowlist AND != owner` | `queue` |
+
+`owner` is derived from `RepoRef.owner` (passed by `IntakeEngine`; sourced from
+`GITHUB_OWNER` env var in production).
 
 Pure, synchronous, no forge calls. Exact string equality (no case folding, no fuzzy match).
 Side effects (label writes) are performed by `Engine.intake`, not this function.

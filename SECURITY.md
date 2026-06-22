@@ -23,7 +23,7 @@ prompt.
 | **Triage agent** | Read-only | Posts one structured comment. Sandbox receives `forge_token_scope: "repo-comment"` (`SPEC.md §9.2`) — cannot add labels, create PRs, or trigger workflows even if deceived (I5). |
 | **Implementer / specialist agents** | Narrowly scoped | Sandbox has `forge_token_scope: "repo-branch"`. No multi-repo credentials. Cannot modify PROTECTED_PATHS without triggering E1 (I3). |
 
-**Default-deny.** Non-empty `allowlist` queues unlisted authors; empty = gate disabled. See `SPEC.md §8.11`.
+**Default-deny (fail-closed, issue #48).** An empty `allowlist` admits ONLY the repository owner and queues everyone else — it is NOT a gate-disable.  A non-empty `allowlist` admits listed authors and the owner; unlisted non-owners are queued. See `SPEC.md §8.11`.
 
 ---
 
@@ -37,7 +37,7 @@ prompt.
 | **T4** | Secret exfiltration via agent | High | The sandbox receives only an ephemeral, repo-scoped forge token (minimum needed for branch/PR writes). The orchestrator's `FORGE_TOKEN`, `HARNESS_API_KEY`, and all operator credentials are held exclusively by `PortProvider` and never surfaced in `DispatchContext`. The security specialist (always in `CONVERGE_REVIEW_BASE`) scans PR diffs for credential patterns per its agent-pack contract (`.agents/engineering-security-engineer.md`, SHA-pinned) — this behavior is pack-contract-enforced, not separately mandated in this spec. `.github/workflows/**` is PROTECTED_PATHS. | `PortProvider`, `HarnessPort`, `DispatchContext` schema (§9.2), `CONVERGE_REVIEW_BASE`, SHA-pinned agent pack |
 | **T5** | Supply-chain / dependency poisoning + agent-pack SHA-bump | High | Security specialist checks new dependencies. Human merge gate is final control. Pack is SHA-pinned (`AgentPackConfig.pinned_ref`), baked at build, recorded in SBOM. SHA bumps require explicit diff review of upstream repo. `.agents/**` is PROTECTED_PATHS against in-band tampering. | Converge reviewer, `AgentPackConfig`, PROTECTED_PATHS, human merge gate |
 | **T6** | Protected-path modification | High | `Engine.converge` checks changed files against PROTECTED_PATHS before round 1. Any match → `LABEL_NEEDS_HUMAN` immediately; no review round runs, no auto-merge. Applies to all PRs including allowlisted authors. | `Engine.converge` (P6, E1) |
-| **T7** | Allowlist bypass / privilege escalation | High | `decide_intake` is a trivial pure function: `author in allowlist`, exact string match, no error paths that default to `admit`. Allowlist is in operator-controlled config, not the forge. Every admit/queue decision is audit-logged. | `decide_intake`, Config store, audit log |
+| **T7** | Allowlist bypass / privilege escalation | High | `decide_intake` is a trivial pure function: fail-closed by default — empty allowlist admits only the owner; non-empty allowlist admits owner + listed authors; exact string match only. No error paths default to `admit`. Allowlist is in operator-controlled config, not the forge. Every admit/queue decision is audit-logged. | `decide_intake`, Config store, audit log |
 | **T8** | Webhook replay / `delivery_id` collision | Low | LRU dedup cache keyed on `delivery_id` in `OrchestratorService`. `Engine.converge` idempotency gate checks label state before acting. Reconciler channels are idempotent. Correctness does not depend on the dedup cache. | `OrchestratorService`, `Engine.converge`, `Engine.reconcile` |
 
 **Out of scope:** forge platform security, network-level DoS against the webhook endpoint,
@@ -58,9 +58,10 @@ Every correct implementation must preserve all nine invariants. Test coverage is
 in `TESTING.md §5`.
 
 **I1 — Non-allowlisted authors never reach a code-writing agent without human promotion.**
-When `allowlist` is non-empty and `decide_intake` returns `queue`, the issue receives
-`LABEL_AWAITING_PROMOTION` and no harness dispatch call is ever made until a human
-explicitly adds `LABEL_AGENT_WORK`. No code path bypasses this gate.
+`decide_intake` is fail-closed (default-deny, issue #48): an empty `allowlist` admits
+ONLY the repository owner and queues everyone else.  When `decide_intake` returns `queue`
+the issue receives `LABEL_AWAITING_PROMOTION` and no harness dispatch call is ever made
+until a human explicitly adds `LABEL_AGENT_WORK`. No code path bypasses this gate.
 
 **I2 — PROTECTED_PATHS modifications always escalate to E1 / `needs-human`.**
 `Engine.converge` checks changed files against PROTECTED_PATHS before round 1. On match:
