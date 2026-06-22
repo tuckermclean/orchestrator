@@ -337,6 +337,11 @@ The ordered list of CI check names that must all be green before a converge `app
 
 A check is green when its state is `success`, `skipped`, or `neutral`.
 
+Per-repo override: `RepoConfig.required_checks` (from the registry, issue #49) may
+narrow this set for a specific repo.  The converge approve gate uses that narrowed
+set when available, falling back to the full `BLOCKING_CI_CHECKS` when no per-repo
+config exists.  The `ci-red` recovery re-poll uses the same set (closes #71).
+
 ---
 
 ## §8 Decision Functions

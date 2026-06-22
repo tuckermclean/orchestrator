@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from src.decisions.route_entry import route_entry
 from src.domain.types import (
     _CLOSING_RE,
+    BLOCKING_CI_CHECKS,
     CI_WAIT_S,
     LABEL_AGENT_WORK,
     LABEL_IMPLEMENTING,
@@ -122,11 +123,20 @@ class Engine:
 
         return None
 
-    async def converge(self, pr_ref: PRRef) -> PRState:
-        """Run the converge sub-machine for one PR (SPEC §10.2)."""
+    async def converge(
+        self,
+        pr_ref: PRRef,
+        required_checks: tuple[str, ...] = BLOCKING_CI_CHECKS,
+    ) -> PRState:
+        """Run the converge sub-machine for one PR (SPEC §10.2).
+
+        ``required_checks`` is forwarded to the converge gate so per-repo CI
+        subsets take effect.  Defaults to ``BLOCKING_CI_CHECKS`` for callers
+        that do not supply a registry-resolved override (closes #71).
+        """
         from src.engine.converge import converge as _converge
 
-        return await _converge(self, pr_ref)
+        return await _converge(self, pr_ref, required_checks)
 
     async def reconcile(self, repo: RepoRef) -> ReconcileReport:
         """Run the four RC channels for a repo (SPEC §10.3)."""
