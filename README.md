@@ -63,7 +63,9 @@ Harness-fed prompt/contract documents injected into each agent at runtime.
 
 **To understand the product:** `ARCHITECTURE.md` → `SECURITY.md` → `WEBUI.md`
 
-**To build it:** `AGENTS.md` first, then the 7-phase build order it describes
+**To build it:** `AGENTS.md` first, then the 7-phase build order it describes. If you are
+orchestrating a multi-PR agent swarm, also read `AGENTS.md §14` (field notes — operational
+lessons that are not derivable from the specs or code)
 
 **To run agents in the swarm:** `agents/triager.md` → `agents/orchestrator.md` +
 `agents/implementer.md` → `agents/converge-reviewer.md` + `agents/converge-fixer.md`

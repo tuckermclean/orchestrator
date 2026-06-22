@@ -361,3 +361,73 @@ Never hardcode `2`. Two remaining active caps: `RECONCILER_STALE_REDISPATCH_CAP=
 
 **OQ-4: `COMPLIANCE.md` is in PROTECTED_PATHS but not yet authored.** Do not invent its
 content. The namespace is reserved.
+
+---
+
+## §14 Field Notes — Operating the Build Swarm
+
+Hard-won lessons from driving issues through the **implement → review-swarm → fix →
+adjudicate** pipeline in this repo. None are derivable from the specs or the code — a
+freshly-spawned agent will not have them. Read these before orchestrating multi-PR work.
+
+Throughout, *the adjudicator* is the orchestrating agent acting as the terminal converge
+gate — the role the converge reviewer plays at R3 with the `ADJUDICATION_MODEL` (Opus)
+verdict (`SPEC.md §5`). It runs the final review and stamps approve or escalate.
+
+**Rebase every PR branch onto current `main` before the final review and before merge.**
+This repo squash-merges PRs, which creates two traps. (1) *Stranded content*: a PR stacked
+on another branch can be merged into that branch while the base is *separately*
+squash-merged to `main` — so the stacked changes never reach `main`. A `SECURITY.md` /
+`ARCHITECTURE.md` fix was lost exactly this way and had to be re-landed in a fresh PR.
+(2) *Stale-base illusion*: a branch cut before other PRs merged shows a diff against current
+`main` that appears to **revert** those merged changes — producing false-positive
+protected-path review findings and a real risk of reverting merged work on squash. The fix
+for both is the same: `git fetch` and rebase onto current `main` before reviewing or merging.
+Never review a diff computed against a stale base.
+
+**Re-run the gates yourself; never trust an agent's "all green."** Implementer and fixer
+agents reliably *report* success, but independently re-running `pytest` / `mypy --strict` /
+`ruff` plus behavioral spot-checks has repeatedly caught real defects the agent missed or
+mis-tested — e.g. a `decide_round` that silently accepted out-of-range rounds (the `Literal`
+type was never enforced at runtime), and a "timeout" test whose assertion was vacuously true
+over an empty list. The adjudicator verifies behavior, it does not relay a report.
+
+**The adjudicator resolves reviewer severity disagreements — don't just count votes.**
+Reviewers will split on blocker-vs-suggestion (the uncancelled reviewer-timeout was a
+SUGGESTION to one reviewer and a BLOCKER to another). Decide on the merits: a wired-in code
+path that violates its own documented contract is a blocker even if "the happy path doesn't
+hit it."
+
+**Route reviewers by the actual risk surface, and over-staff logic/coverage-heavy PRs.**
+`decide_specialists` routing (security + code-reviewer base, plus a11y/db/api by changed
+path) is the floor for a review swarm. For decision-function or engine changes, also add a
+Test-Results-Analyzer (truth-table → named-test mapping — it caught a missing SPEC-named
+regression guard and a dangling `coverage_map` reference) and a Software-Architect
+(spec fidelity — it independently caught the stale-base hazard and an OQ-1 named-guard gap).
+No single reviewer catches every class of defect.
+
+**Escalate protected-path contradictions to a human; never silently fix them; disclose every
+touched file.** Correcting a spec can leave a contradiction in a PROTECTED_PATH doc
+(`ARCHITECTURE.md`, `SECURITY.md`). Open an escalation issue and route a *separate*,
+clearly-labeled human-authorized PR — do not edit the protected file inside a build PR.
+Protected-path review is **path-based, not semantic**: even a one-character cross-reference
+fix in `SECURITY.md` trips E1. Always list every touched file (especially protected ones) in
+the PR body so the human gate is never surprised by an undisclosed edit.
+
+**Keep a model-tier fallback and confirm spawns actually started.** The swarm tier
+(`DEFAULT_SWARM_MODEL`, Sonnet) had transient capacity failures (HTTP 529); falling back to
+the adjudication tier (Opus) for implementers kept work moving. An async agent that returns
+with **0 tool-uses** died at startup and did *nothing* — verify it produced a branch/commit
+before assuming progress, and relaunch rather than continue.
+
+**To push a fix onto an agent's PR branch that is checked out in that agent's worktree:** you
+cannot check the branch out a second time. Either work in a fresh worktree with
+`git reset --hard origin/<branch>` then `git push origin HEAD:<branch>`, or rebase a temporary
+local branch and push it to the remote ref with `git push --force-with-lease origin
+<tmp>:<branch>`.
+
+**Confirm that claimed CI gates actually run.** `coverage_map.yaml` was documented since
+Step 1 as a gate that "rejects missing rows," but the `@covers` enforcement was never
+implemented — truth-table coverage was enforced only by human/swarm review (which is how a
+dangling row name survived into a PR). A hand-maintained map with no validator gives false
+confidence: if a doc claims a gate, verify the gate exists and has teeth before relying on it.
