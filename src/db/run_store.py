@@ -22,6 +22,7 @@ from datetime import UTC, datetime  # noqa: TC003
 
 import aiosqlite
 
+from src.db import configure_sqlite_connection
 from src.domain.types import RepoRef, RunDetail, RunEvent, RunSummary
 
 # ---------------------------------------------------------------------------
@@ -172,6 +173,7 @@ class SQLiteRunStore:
         if self._db is not None:
             return
         self._db = await aiosqlite.connect(self._db_path)
+        await configure_sqlite_connection(self._db)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute(_CREATE_RUNS)
         await self._db.execute(_CREATE_EVENTS)
