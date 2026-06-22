@@ -15,6 +15,7 @@ from src.domain.types import (
     BLOCKING_CI_CHECKS,
     LABEL_AGENT_WORK,
     LABEL_AWAITING_PROMOTION,
+    LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
     LABEL_TRIAGE,
     RECONCILER_CRON,
@@ -373,6 +374,25 @@ class OrchestratorService:
 
         if event_name == "issues" and issue_ref is not None:
             await intake_engine.intake(issue_ref)
+        elif event_name == "pull_request" and pr_ref is not None:
+            # SPEC §11.1 event routing table — pull_request actions:
+            #   ready_for_review  → Engine.converge (P2)
+            #   labeled (converge label only) → Engine.converge (P2/P7)
+            #   synchronize       → Engine.converge (P7; idempotency gate returns
+            #                       immediately for draft PRs, so this is always safe)
+            #   anything else     → no-op (fall through without dispatch)
+            action = str(payload.get("action", ""))
+            if action == "ready_for_review" or action == "synchronize":
+                await self.converge_pr(pr_ref)
+            elif action == "labeled":
+                label_data = payload.get("label", {})
+                label_name = (
+                    str(label_data.get("name", ""))
+                    if isinstance(label_data, dict)
+                    else ""
+                )
+                if label_name == LABEL_CONVERGE:
+                    await self.converge_pr(pr_ref)
         else:
             await self.engine.dispatch(
                 event_name,
