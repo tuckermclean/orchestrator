@@ -240,6 +240,59 @@
     tests: ["test_dispatch_injects_allowed_refs_env_var_when_set"]
   "hook-env-var-absent-when-none":
     tests: ["test_security_spawn_rejected_when_allowed_refs_none"]
+  # ExecutionBackend seam — K8s Job backend + subprocess parity (closes #51)
+  "subprocess-backend-dispatch":
+    tests: ["test_subprocess_backend_dispatch_calls_runner"]
+  "subprocess-backend-status-in-progress":
+    tests: ["test_subprocess_backend_sets_in_progress"]
+  "subprocess-backend-success":
+    tests: ["test_subprocess_backend_success_on_zero_exit"]
+  "subprocess-backend-failure":
+    tests: ["test_subprocess_backend_failure_on_nonzero_exit"]
+  "subprocess-backend-events":
+    tests: ["test_subprocess_backend_captures_json_events"]
+  "subprocess-backend-cancel":
+    tests: ["test_subprocess_backend_cancel_marks_cancelled"]
+  "subprocess-backend-queue-sentinel":
+    tests: ["test_subprocess_backend_queue_sentinel_on_completion"]
+  "k8s-backend-job-spec-image":
+    tests: ["test_k8s_build_job_spec_has_correct_image"]
+  "k8s-backend-job-spec-command":
+    tests: ["test_k8s_build_job_spec_has_correct_command"]
+  "k8s-i3-master-creds-absent":
+    tests: ["test_k8s_i3_master_creds_absent_from_job_env"]
+  "k8s-i9-allowed-refs-env-var":
+    tests: ["test_k8s_i9_allowed_refs_in_job_env"]
+  "k8s-i9-no-refs-env-var-absent":
+    tests: ["test_k8s_i9_no_allowed_refs_env_var_absent"]
+  "k8s-backend-job-spec-structure":
+    tests: ["test_k8s_build_job_spec_structure"]
+  "k8s-backend-dispatch-creates-job":
+    tests: ["test_k8s_backend_dispatch_creates_job"]
+  "k8s-backend-success":
+    tests: ["test_k8s_backend_watch_success"]
+  "k8s-backend-failure":
+    tests: ["test_k8s_backend_watch_failure"]
+  "k8s-backend-timeout":
+    tests: ["test_k8s_backend_watch_timeout"]
+  "k8s-backend-read-error":
+    tests: ["test_k8s_backend_watch_read_error_retries"]
+  "k8s-backend-cancel":
+    tests: ["test_k8s_backend_cancel_deletes_job"]
+  "k8s-backend-job-created-event":
+    tests: ["test_k8s_backend_dispatch_emits_job_created_event"]
+  "k8s-backend-cleanup-job-on-success":
+    tests: ["test_k8s_backend_cleanup_job_on_success"]
+  "harness-delegates-to-backend":
+    tests: ["test_harness_dispatch_delegates_to_backend"]
+  "harness-cancel-delegates-to-backend":
+    tests: ["test_harness_cancel_delegates_to_backend"]
+  "backend-factory-subprocess-default":
+    tests: ["test_backend_factory_defaults_to_subprocess"]
+  "backend-factory-k8s-env":
+    tests: ["test_backend_factory_returns_k8s_when_env_set"]
+  "backend-factory-subprocess-explicit":
+    tests: ["test_backend_factory_subprocess_explicit"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":

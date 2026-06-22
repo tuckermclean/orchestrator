@@ -1,15 +1,17 @@
-"""ClaudeCodeHarnessPort — Claude Code subprocess HarnessPort implementation.
+"""ClaudeCodeHarnessPort — Claude Code HarnessPort implementation.
 
-The harness spawns `claude` (Claude Code CLI) as a supervised async child process.
+The harness dispatches `claude` (Claude Code CLI) agents via a pluggable
+ExecutionBackend.  By default (dev/CI) the subprocess backend spawns a local
+child process; in production the K8s Job backend schedules an isolated pod.
+
 Each dispatch:
   1. Mints a scoped GitHub App installation token (forge_token_scope determines perms).
   2. Clones the target repo into a temp dir with that token.
   3. Materialises a PreToolUse hook (I9 spawn allow-set gate) into repo_dir/.claude/
      when DispatchContext.allowed_agent_refs is not None.
-  4. Spawns `claude -p "<prompt>" --output-format stream-json --permission-mode
-     bypassPermissions --verbose` in the working tree.
-  5. Streams JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
-  6. Returns a RunHandle immediately (PID + run_id); process is watched in background.
+  4. Delegates to ExecutionBackend.dispatch() which spawns the agent and streams
+     JSON events from stdout → RunEventStore (queryable; Step 9 SSE).
+  5. Returns a RunHandle immediately (non-blocking).
 
 I3 invariants:
   - Only CLAUDE_CODE_OAUTH_TOKEN and a scoped GH_TOKEN reach the child env.
@@ -25,11 +27,17 @@ I9 spawn enforcement (SECURITY.md §3 I9, closes #52):
     - Injects ORCHESTRATOR_ALLOWED_AGENT_REFS into the child env (comma-
       separated AgentRef strings).
   The hook fails closed: missing env var, empty allow-set, or unparseable
-  stdin all result in DENY.  When allowed_agent_refs is None, no hook is
-  written (no harness-level restriction).
+  stdin all result in DENY (exit code 2 — the Claude Code blocking code).
+  When allowed_agent_refs is None, no hook is written (no harness-level restriction).
+  The hook carry-over applies equally to the K8s backend: both the script in
+  repo_dir/.claude/ and the env var are present in the Job pod.
 
 trigger_workflow / trigger_ci remain for re-running the repo's own CI via GitHub
 Actions.  All agent-dispatch-via-workflow_dispatch code is removed.
+
+Backend selection (HARNESS_EXECUTION_BACKEND env var):
+  subprocess (default) — local child process, dev/CI.
+  k8s                  — Kubernetes Job per dispatch, prod isolation.
 """
 
 from __future__ import annotations
@@ -270,30 +278,28 @@ async def _mint_scoped_installation_token(
 # ---------------------------------------------------------------------------
 
 class ClaudeCodeHarnessPort:
-    """HarnessPort that dispatches by spawning Claude Code as a supervised subprocess.
+    """HarnessPort that dispatches Claude Code agents via a pluggable ExecutionBackend.
 
     dispatch(context):
       - Mints a scoped GH installation token for the target repo.
       - Clones the repo into a per-dispatch temp dir.
-      - Spawns `claude -p <prompt> --output-format stream-json
-          --permission-mode bypassPermissions --verbose` in the working tree.
-      - Streams JSON events from stdout into the RunEventStore.
+      - Materialises the I9 PreToolUse hook when allowed_agent_refs is not None.
+      - Delegates to the ExecutionBackend (subprocess or K8s Job).
       - Returns a RunHandle immediately (non-blocking).
 
-    get_run_status / cancel reflect live process state.
+    get_run_status / cancel reflect live run state via RunEventStore.
 
     Security (I3 / I9):
       - Child env contains ONLY CLAUDE_CODE_OAUTH_TOKEN + GH_TOKEN (scoped).
       - Operator master creds (App key, FORGE_TOKEN) never reach the child.
       - No contributor text in args or env.
+      - I9 hook (exit-2 deny) carried over to K8s backend identically.
 
-    I9 spawn enforcement (#52 closed): when allowed_agent_refs is a list, the
-    harness materialises a PreToolUse hook (i9_spawn_hook.py) into the cloned
-    repo's .claude/ dir and injects ORCHESTRATOR_ALLOWED_AGENT_REFS into the
-    child env.  The hook fails closed (deny on missing env var / empty set /
-    parse error).  Prompt-level instruction is retained as defence in depth.
-    Blast radius is bounded by the single-repo scoped token from
-    _mint_scoped_installation_token.
+    Backend selection:
+      - subprocess (default, dev/CI): HARNESS_EXECUTION_BACKEND unset or 'subprocess'.
+      - k8s (prod): HARNESS_EXECUTION_BACKEND=k8s.
+      - Injected via execution_backend param (tests use FakeExecutionBackend or
+        SubprocessBackend with a FakeProcessRunner).
 
     trigger_workflow / trigger_ci: retained for CI re-runs via GitHub Actions.
     """
@@ -311,6 +317,10 @@ class ClaudeCodeHarnessPort:
         http_client: httpx.AsyncClient | None = None,
         # Kept for compatibility with tests that wire trigger_ci/trigger_workflow
         forge_token: str = "",
+        # Injectable ExecutionBackend — defaults to SubprocessBackend (or K8s if
+        # HARNESS_EXECUTION_BACKEND=k8s).  Tests inject a fake/subprocess backend.
+        # The type is imported inline to avoid a circular import at module level.
+        execution_backend: Any | None = None,
     ) -> None:
         self._claude_oauth_token = claude_oauth_token
         self._app_id = app_id
@@ -319,15 +329,23 @@ class ClaudeCodeHarnessPort:
         self._repo_owner = repo_owner
         self._repo_name = repo_name
         self._event_store = event_store or RunEventStore()
-        self._process_runner = process_runner or _default_process_runner
         self._http_client = http_client or httpx.AsyncClient(timeout=30.0)
         self._forge_token = forge_token  # used only for trigger_ci / trigger_workflow
 
-        # Active process map: run_id → (ProcessResult, temp_dir)
-        self._processes: dict[str, tuple[ProcessResult, str]] = {}
-        # Background watcher tasks — kept so cancel() can cancel them and to
-        # prevent garbage collection before the task completes.
-        self._background_tasks: set[asyncio.Task[None]] = set()
+        # ExecutionBackend — wires subprocess vs K8s.  process_runner is forwarded
+        # to SubprocessBackend for test compat (so existing tests passing process_runner
+        # continue to work without modification).
+        # Type is ExecutionBackend Protocol; Any used to avoid circular import.
+        from src.ports.execution_backend import make_execution_backend
+        self._backend: Any = (
+            execution_backend
+            if execution_backend is not None
+            else make_execution_backend(process_runner=process_runner)
+        )
+
+        # Keep _process_runner for direct access in tests that inspect it, but
+        # process execution is handled by _backend.
+        self._process_runner = process_runner or _default_process_runner
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -490,71 +508,21 @@ class ClaudeCodeHarnessPort:
         """
         return context.head_branch
 
-    async def _watch_process(
-        self,
-        run_id: str,
-        process: ProcessResult,
-        work_dir: str,
-    ) -> None:
-        """Background task: stream JSON events from stdout, update run status on exit."""
-        self._event_store.set_status(run_id, RunStatus(state="in_progress"))
-
-        if process.stdout is not None:
-            async for raw_line in process.stdout:
-                line = raw_line.decode(errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    event_type = str(data.get("type", "stream"))
-                    event = RunEvent(
-                        event_type=event_type,
-                        data={k: v for k, v in data.items() if k != "type"},
-                        timestamp=datetime.now(tz=UTC),
-                    )
-                    self._event_store.append(run_id, event)
-                except Exception:
-                    # Non-JSON line (e.g. stderr bleed) — record as raw text event
-                    event = RunEvent(
-                        event_type="raw",
-                        data={"line": line},
-                        timestamp=datetime.now(tz=UTC),
-                    )
-                    self._event_store.append(run_id, event)
-
-        exit_code = await process.wait()
-        run_conclusion = "success" if exit_code == 0 else "failure"
-        self._event_store.set_status(
-            run_id,
-            RunStatus(
-                state="completed",
-                conclusion="success" if run_conclusion == "success" else "failure",
-            ),
-        )
-
-        # Clean up the working tree
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except Exception:
-            pass
-
-        # Remove from active map
-        self._processes.pop(run_id, None)
-
     # ------------------------------------------------------------------
     # HarnessPort implementation
     # ------------------------------------------------------------------
 
     async def dispatch(self, context: DispatchContext) -> RunHandle:
-        """Spawn Claude Code as a supervised child process and return a RunHandle.
+        """Dispatch Claude Code via the configured ExecutionBackend; return a RunHandle.
 
-        Non-blocking: returns immediately after spawning.  The child is watched
-        in a background asyncio task.
+        Non-blocking: returns immediately.  The backend watches the run in a
+        background asyncio task.
 
         Security:
           - I3: only CLAUDE_CODE_OAUTH_TOKEN + scoped GH_TOKEN in child env.
           - I9: prompt built from context.contract path only; no contributor text.
-               PreToolUse hook enforces allowed_agent_refs when not None (closes #52).
+               PreToolUse hook (exit-2 deny) enforces allowed_agent_refs when not
+               None (closes #52), carried over to K8s backend identically.
         """
         run_id = str(uuid.uuid4())
         self._event_store.register(run_id)
@@ -584,16 +552,21 @@ class ClaudeCodeHarnessPort:
                 run_id,
                 RunStatus(state="completed", conclusion="failure"),
             )
-            event = RunEvent(
-                event_type="error",
-                data={"message": f"Clone failed: {exc}"},
-                timestamp=datetime.now(tz=UTC),
+            self._event_store.append(
+                run_id,
+                RunEvent(
+                    event_type="error",
+                    data={"message": f"Clone failed: {exc}"},
+                    timestamp=datetime.now(tz=UTC),
+                ),
             )
-            self._event_store.append(run_id, event)
             return RunHandle(run_id=run_id)
 
         # 3. Materialise the I9 PreToolUse hook when an allow-set is specified.
         #    The hook is the technical control; prompt instruction is defence in depth.
+        #    The hook denies via EXIT CODE 2 — not 1 — per the Claude Code contract.
+        #    Both subprocess and K8s backends receive the hook via the working tree
+        #    and the ORCHESTRATOR_ALLOWED_AGENT_REFS env var.
         if context.allowed_agent_refs is not None:
             self._write_spawn_hook(repo_dir)
 
@@ -623,19 +596,15 @@ class ClaudeCodeHarnessPort:
             context.model,
         ]
 
-        # 7. Spawn the subprocess via the injectable runner.
-        process = await self._process_runner(claude_args, repo_dir, child_env)
-
-        # 8. Track the process.
-        self._processes[run_id] = (process, work_dir)
-
-        # 9. Watch in background — "fire and watch" (AGENTS.md §1).
-        watcher = asyncio.create_task(
-            self._watch_process(run_id, process, work_dir),
-            name=f"harness-watch-{run_id[:8]}",
+        # 7. Delegate execution to the backend (fire and watch — AGENTS.md §1).
+        await self._backend.dispatch(
+            run_id=run_id,
+            claude_args=claude_args,
+            repo_dir=repo_dir,
+            work_dir=work_dir,
+            child_env=child_env,
+            event_store=self._event_store,
         )
-        self._background_tasks.add(watcher)
-        watcher.add_done_callback(self._background_tasks.discard)
 
         return RunHandle(run_id=run_id)
 
@@ -650,32 +619,20 @@ class ClaudeCodeHarnessPort:
         return self._event_store.get_status(handle.run_id)
 
     async def cancel(self, handle: RunHandle) -> None:
-        """Terminate the child process group and clean up (idempotent)."""
+        """Terminate the run and clean up (idempotent).
+
+        Delegates to the ExecutionBackend which signals the process group
+        (subprocess) or deletes the K8s Job.  Already-terminal runs are
+        a no-op (SPEC §9.2).
+        """
         status = self._event_store.get_status(handle.run_id)
         if status.state == "completed":
             # Already terminal — no-op (SPEC §9.2)
             return
 
-        # Cancel any outstanding background watcher task for this run.
-        for task in list(self._background_tasks):
-            if handle.run_id in (task.get_name() or ""):
-                task.cancel()
-
-        entry = self._processes.get(handle.run_id)
-        if entry is not None:
-            process, work_dir = entry
-            await process.terminate()
-            # Give the process group a moment to exit cleanly, then force-kill.
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except TimeoutError:
-                await process.kill()
-            shutil.rmtree(work_dir, ignore_errors=True)
-            self._processes.pop(handle.run_id, None)
-
-        self._event_store.set_status(
-            handle.run_id,
-            RunStatus(state="completed", conclusion="cancelled"),
+        await self._backend.cancel(
+            run_id=handle.run_id,
+            event_store=self._event_store,
         )
 
     # ------------------------------------------------------------------
