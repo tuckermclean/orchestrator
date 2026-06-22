@@ -229,7 +229,13 @@ def collect_markers(
     skip_dirs = {".venv", ".claude", "__pycache__", "node_modules", ".git"}
     markers: dict[tuple[str, str], list[str]] = {}
     for py_file in sorted(search_root.rglob("test_*.py")):
-        if any(part in skip_dirs for part in py_file.parts):
+        # Check relative parts only — the absolute path may contain skip_dir
+        # components (e.g. when the worktree lives inside .claude/worktrees/).
+        try:
+            rel_parts = py_file.relative_to(search_root).parts
+        except ValueError:
+            rel_parts = py_file.parts
+        if any(part in skip_dirs for part in rel_parts):
             continue
         try:
             source = py_file.read_text(encoding="utf-8")

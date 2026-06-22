@@ -149,10 +149,14 @@ class DispatchContext(BaseModel):
     issue_ref: IssueRef | None = None
     pr_ref: PRRef | None = None
     contract: str
-    model: str
+    model: Annotated[str, Field(pattern=r"^[A-Za-z0-9._:\-]+$")]
     max_turns: int
     forge_token_scope: Literal["repo-comment", "repo-branch"]
     allowed_agent_refs: list[str] | None = None
+    # head_branch: the PR head branch to check out (additive field; None = default branch).
+    # Set by converge() from forge.get_pr(pr_ref).head_branch so the reviewer/fixer
+    # operates on the actual PR diff rather than the default branch.
+    head_branch: str | None = None
 
 
 # ---------------------------------------------------------------------------

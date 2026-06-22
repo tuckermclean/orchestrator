@@ -21,8 +21,10 @@ Actions.  All agent-dispatch-via-workflow_dispatch code is removed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
+import signal
 import tempfile
 import time
 import uuid
@@ -45,8 +47,8 @@ from src.domain.types import (
 # GitHub API constants (shared with github.py — keep in sync)
 # ---------------------------------------------------------------------------
 
+# _GITHUB_API duplicated here for standalone import; authoritative copy is github.py.
 _GITHUB_API = "https://api.github.com"
-_APP_TOKEN_REFRESH_MARGIN = 120  # seconds before expiry to refresh
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +77,34 @@ class ProcessResult:
         return await self._process.wait()
 
     async def terminate(self) -> None:
+        """Send SIGTERM to the entire process group (kills child processes too).
+
+        Uses os.killpg so that the root claude process and all its children
+        (git, tools, sub-agents) are signalled together.  Falls back to the
+        process's own terminate() when the process group is unavailable (e.g.
+        the process was not spawned with start_new_session=True in unit tests).
+        """
         try:
-            self._process.terminate()
-        except ProcessLookupError:
-            pass  # already dead — idempotent
+            pgid = os.getpgid(self._process.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            # Process already dead or pgid unavailable — try single-process.
+            try:
+                self._process.terminate()
+            except (ProcessLookupError, PermissionError, AttributeError):
+                pass  # already dead — idempotent
 
     async def kill(self) -> None:
+        """Send SIGKILL to the entire process group."""
         try:
-            self._process.kill()
-        except ProcessLookupError:
-            pass
+            pgid = os.getpgid(self._process.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            # Process already dead or pgid unavailable — try single-process.
+            try:
+                self._process.kill()
+            except (ProcessLookupError, PermissionError, AttributeError):
+                pass
 
 
 # Callable type: (args, cwd, env) → ProcessResult
@@ -99,13 +119,19 @@ async def _default_process_runner(
     cwd: str,
     env: dict[str, str],
 ) -> ProcessResult:
-    """Default runner: spawns the real claude subprocess."""
+    """Default runner: spawns the real claude subprocess.
+
+    start_new_session=True places the child in its own process group so that
+    cancel() can signal the entire group (claude + git + sub-agents) rather
+    than only the root process.
+    """
     process = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
         env=env,
+        start_new_session=True,
     )
     return ProcessResult(process)
 
@@ -140,6 +166,10 @@ class RunEventStore:
             self._queues[run_id].put_nowait(event)
 
     def set_status(self, run_id: str, status: RunStatus) -> None:
+        current = self._statuses.get(run_id)
+        if current is not None and current.state == "completed":
+            # Already terminal — guard against double-sentinel on the queue.
+            return
         self._statuses[run_id] = status
         if status.state == "completed" and run_id in self._queues:
             # Signal end-of-stream
@@ -193,7 +223,6 @@ async def _mint_scoped_installation_token(
         permissions = {
             "contents": "read",
             "issues": "write",
-            "pull_requests": "write",
             "metadata": "read",
         }
     else:  # "repo-branch"
@@ -243,6 +272,11 @@ class ClaudeCodeHarnessPort:
       - Operator master creds (App key, FORGE_TOKEN) never reach the child.
       - No contributor text in args or env.
 
+    I9 spawn gap (tracked in #52): the allow-set (allowed_agent_refs) is
+    enforced as a prompt instruction in _build_prompt. Hard rejection via a
+    claude PreToolUse hook is tracked separately in issue #52. Blast radius is
+    bounded by the single-repo scoped token from _mint_scoped_installation_token.
+
     trigger_workflow / trigger_ci: retained for CI re-runs via GitHub Actions.
     """
 
@@ -273,6 +307,9 @@ class ClaudeCodeHarnessPort:
 
         # Active process map: run_id → (ProcessResult, temp_dir)
         self._processes: dict[str, tuple[ProcessResult, str]] = {}
+        # Background watcher tasks — kept so cancel() can cancel them and to
+        # prevent garbage collection before the task completes.
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -323,7 +360,6 @@ class ClaudeCodeHarnessPort:
             "GH_TOKEN": gh_token,
             # Required for git to work non-interactively
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_ASKPASS": "echo",
             # Forward PATH so the claude binary is findable
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             # HOME is required for some git operations
@@ -331,25 +367,34 @@ class ClaudeCodeHarnessPort:
         }
 
     async def _clone_repo(self, gh_token: str, work_dir: str, branch: str | None) -> None:
-        """Clone the target repo into work_dir using the scoped GH_TOKEN."""
-        clone_url = (
-            f"https://x-access-token:{gh_token}@github.com"
-            f"/{self._repo_owner}/{self._repo_name}.git"
-        )
+        """Clone the target repo into work_dir using the scoped GH_TOKEN.
+
+        Security: the token is passed via GIT_CONFIG_* env vars so it never
+        appears in process argv (/proc/PID/cmdline) or in .git/config.
+        """
+        plain_url = f"https://github.com/{self._repo_owner}/{self._repo_name}.git"
+        # Inject the token via git's url.insteadOf mechanism (env-only; not
+        # written to .git/config because --no-local / env-only config is
+        # transient for this subprocess only).
+        clone_env = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": (
+                f"url.https://x-access-token:{gh_token}@github.com/.insteadOf"
+            ),
+            "GIT_CONFIG_VALUE_0": "https://github.com/",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/root"),
+        }
         args = ["git", "clone", "--depth", "1"]
         if branch:
             args += ["--branch", branch]
-        args += [clone_url, work_dir]
+        args += [plain_url, work_dir]
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_ASKPASS": "echo",
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "HOME": os.environ.get("HOME", "/root"),
-            },
+            env=clone_env,
         )
         await proc.wait()
         # Non-zero exit means clone failed; callers let the exception propagate.
@@ -363,13 +408,12 @@ class ClaudeCodeHarnessPort:
             )
 
     def _target_branch(self, context: DispatchContext) -> str | None:
-        """Return the branch to check out, or None for default branch."""
-        if context.pr_ref is not None:
-            # For PRs we'd ideally check out the PR head branch; without the forge
-            # here we fall back to default branch.  Step 9 can thread the branch name
-            # through DispatchContext when needed.
-            return None
-        return None
+        """Return the branch to check out, or None for default branch.
+
+        P0.4: head_branch is set by converge() so reviewers/fixers operate on
+        the actual PR diff rather than the default branch.
+        """
+        return context.head_branch
 
     async def _watch_process(
         self,
@@ -386,8 +430,7 @@ class ClaudeCodeHarnessPort:
                 if not line:
                     continue
                 try:
-                    import json as _json
-                    data = _json.loads(line)
+                    data = json.loads(line)
                     event_type = str(data.get("type", "stream"))
                     event = RunEvent(
                         event_type=event_type,
@@ -505,29 +548,42 @@ class ClaudeCodeHarnessPort:
         self._processes[run_id] = (process, work_dir)
 
         # 8. Watch in background — "fire and watch" (AGENTS.md §1).
-        asyncio.create_task(
+        watcher = asyncio.create_task(
             self._watch_process(run_id, process, work_dir),
             name=f"harness-watch-{run_id[:8]}",
         )
+        self._background_tasks.add(watcher)
+        watcher.add_done_callback(self._background_tasks.discard)
 
         return RunHandle(run_id=run_id)
 
     async def get_run_status(self, handle: RunHandle) -> RunStatus:
-        """Return the live status of the run."""
+        """Return the live status of the run.
+
+        P1.8: Unknown run IDs return completed/failure (avoids polling a dead
+        handle as pending; consistent with crash-only recovery).
+        """
+        if handle.run_id not in self._event_store._statuses:
+            return RunStatus(state="completed", conclusion="failure")
         return self._event_store.get_status(handle.run_id)
 
     async def cancel(self, handle: RunHandle) -> None:
-        """Terminate the child process (idempotent — already-terminal is a no-op)."""
+        """Terminate the child process group and clean up (idempotent)."""
         status = self._event_store.get_status(handle.run_id)
         if status.state == "completed":
             # Already terminal — no-op (SPEC §9.2)
             return
 
+        # Cancel any outstanding background watcher task for this run.
+        for task in list(self._background_tasks):
+            if handle.run_id in (task.get_name() or ""):
+                task.cancel()
+
         entry = self._processes.get(handle.run_id)
         if entry is not None:
             process, work_dir = entry
             await process.terminate()
-            # Give the process a moment to exit cleanly, then force-kill.
+            # Give the process group a moment to exit cleanly, then force-kill.
             try:
                 await asyncio.wait_for(process.wait(), timeout=5.0)
             except TimeoutError:
@@ -605,6 +661,5 @@ class ClaudeCodeHarnessPort:
         rerun_resp.raise_for_status()
 
 
-# Alias kept for any existing import of RealHarnessPort; new code should use
-# ClaudeCodeHarnessPort directly.
+# Deprecated: RealHarnessPort is an alias for back-compat. Use ClaudeCodeHarnessPort.
 RealHarnessPort = ClaudeCodeHarnessPort
