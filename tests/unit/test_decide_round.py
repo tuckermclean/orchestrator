@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.decisions.decide_round import decide_round
 
 # ---------------------------------------------------------------------------
@@ -112,3 +114,38 @@ def test_decide_round_r3_cap_reached() -> None:
 def test_decide_round_r3_no_progress_fires_before_cap() -> None:
     """Row 3 fires before rows 5–7 in R3 when sigs are stable."""
     assert decide_round(3, 2, False, ["a:x"], ["a:x"]) == "escalate:no-progress"
+
+
+# ---------------------------------------------------------------------------
+# Runtime validation — Literal[1,2,3] / bool / int|"unknown" enforced (TESTING.md §2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_decide_round_invalid_round_zero() -> None:
+    """round == 0 is outside Literal[1,2,3] → TypeError (SPEC §8.3)."""
+    with pytest.raises(TypeError):
+        decide_round(0, 0, True, [], [])  # type: ignore[arg-type]
+
+
+def test_decide_round_invalid_round_four() -> None:
+    """round == 4 is outside Literal[1,2,3] → TypeError (must not fall through to R3)."""
+    with pytest.raises(TypeError):
+        decide_round(4, 0, True, [], [])  # type: ignore[arg-type]
+
+
+def test_decide_round_invalid_ci_green() -> None:
+    """ci_green must be a bool; a non-bool raises TypeError."""
+    with pytest.raises(TypeError):
+        decide_round(1, 0, "yes", [], [])  # type: ignore[arg-type]
+
+
+def test_decide_round_invalid_blockers() -> None:
+    """blockers must be int or 'unknown'; another string raises TypeError."""
+    with pytest.raises(TypeError):
+        decide_round(1, "bad", True, [], [])  # type: ignore[arg-type]
+
+
+def test_decide_round_invalid_blockers_mixed() -> None:
+    """blockers as a bool (not a real int) raises TypeError (bool != int|'unknown')."""
+    with pytest.raises(TypeError):
+        decide_round(1, True, True, [], [])  # type: ignore[arg-type]

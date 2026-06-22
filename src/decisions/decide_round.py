@@ -35,7 +35,21 @@ def decide_round(
     Priority table evaluated top-to-bottom; first match fires. Both signature lists are
     sentinel-normalized and sorted lexicographically before the no-progress comparison so
     detection is stable regardless of reviewer output order.
+
+    `round` is `Literal[1, 2, 3]`; a value outside that set is a `TypeError` (SPEC §8.3).
+    Implementations must not accept arbitrary integers. `ci_green` must be a `bool` and
+    `blockers` must be an `int` or the literal `"unknown"`; wrong types raise `TypeError`.
     """
+    # Runtime validation — the static Literal is not enforced at runtime, so guard the
+    # call site explicitly (SPEC §8.3). bool is a subclass of int; reject it for `round`
+    # and `blockers` but require it exactly for `ci_green`.
+    if not isinstance(round, int) or isinstance(round, bool) or round not in (1, 2, 3):
+        raise TypeError(f"round must be one of 1, 2, 3; got {round!r}")
+    if not isinstance(ci_green, bool):
+        raise TypeError(f"ci_green must be a bool; got {ci_green!r}")
+    if blockers != "unknown" and (not isinstance(blockers, int) or isinstance(blockers, bool)):
+        raise TypeError(f"blockers must be an int or 'unknown'; got {blockers!r}")
+
     # Row 1 — clean and green approves in any round. "unknown" never matches (int 0 only).
     if blockers == 0 and ci_green:
         return "approve"
