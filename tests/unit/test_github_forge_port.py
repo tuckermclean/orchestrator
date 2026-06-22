@@ -19,7 +19,7 @@ from src.domain.types import (
     PRRef,
     RepoRef,
 )
-from src.ports.github import GitHubForgePort
+from src.ports.github import GitHubForgePort, _parse_run_conclusion
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -77,10 +77,15 @@ def _mock_issue_data(
 
 
 class _MockTransportBuilder:
-    """Build an httpx.MockTransport that returns scripted responses in order."""
+    """Build an httpx.MockTransport that returns scripted responses in order.
+
+    After build(), inspect .requests for the list of captured outgoing requests.
+    Each entry is a dict with keys: method (str), url (str), body (Any).
+    """
 
     def __init__(self) -> None:
         self._responses: list[httpx.Response] = []
+        self.requests: list[dict[str, Any]] = []
 
     def add_json(
         self,
@@ -101,14 +106,30 @@ class _MockTransportBuilder:
         return self
 
     def build(self) -> httpx.AsyncClient:
+        import json as _json
+
         index = {"i": 0}
         responses = self._responses
+        captured = self.requests
 
         def _handler(request: httpx.Request) -> httpx.Response:
             if index["i"] >= len(responses):
                 raise RuntimeError(
                     f"Unexpected request: {request.method} {request.url}"
                 )
+            body_bytes = request.read()
+            try:
+                body = _json.loads(body_bytes) if body_bytes else None
+            except Exception:
+                body = None
+            captured.append(
+                {
+                    "method": request.method,
+                    "url": str(request.url),
+                    "body": body,
+                    "path": request.url.path,
+                }
+            )
             resp = responses[index["i"]]
             index["i"] += 1
             return resp
@@ -119,6 +140,13 @@ class _MockTransportBuilder:
 
 def _port(builder: _MockTransportBuilder) -> GitHubForgePort:
     return GitHubForgePort(token=_TOKEN, client=builder.build())
+
+
+def _port_and_builder(
+    builder: _MockTransportBuilder,
+) -> tuple[GitHubForgePort, _MockTransportBuilder]:
+    """Return (port, builder) so tests can inspect captured requests."""
+    return GitHubForgePort(token=_TOKEN, client=builder.build()), builder
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +440,77 @@ async def test_github_get_check_runs_empty() -> None:
     port = _port(b)
     runs = await port.get_check_runs(_PR_REF)
     assert runs == []
+
+
+async def test_github_get_check_runs_wrapper_dict_form() -> None:
+    """get_check_runs correctly handles the real GitHub wrapper dict form."""
+    b = _MockTransportBuilder()
+    b.add_json(_mock_pr_data(head_sha="sha789"))
+    # Real GitHub API wraps check_runs in a dict
+    b.add_json(
+        {
+            "total_count": 2,
+            "check_runs": [
+                {"name": "build", "status": "completed", "conclusion": "success"},
+                {"name": "test", "status": "completed", "conclusion": "failure"},
+            ],
+        }
+    )
+    port = _port(b)
+    runs = await port.get_check_runs(_PR_REF)
+    assert len(runs) == 2
+    names = {r.name for r in runs}
+    assert "build" in names
+    assert "test" in names
+    build_run = next(r for r in runs if r.name == "build")
+    assert build_run.conclusion == "success"
+    test_run = next(r for r in runs if r.name == "test")
+    assert test_run.conclusion == "failure"
+
+
+async def test_github_get_check_runs_multi_page() -> None:
+    """get_check_runs fetches all pages when total_count exceeds one page."""
+    # Build a transport that returns page 1 (100 items) then page 2 (1 item)
+    page1_runs = [
+        {"name": f"check-{i}", "status": "completed", "conclusion": "success"}
+        for i in range(100)
+    ]
+    page2_runs = [
+        {"name": "check-100", "status": "completed", "conclusion": "failure"}
+    ]
+
+    page_index: dict[str, int] = {"i": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        idx = page_index["i"]
+        page_index["i"] += 1
+        if idx == 0:
+            # PR data fetch
+            return httpx.Response(200, json=_mock_pr_data(head_sha="multisha"))
+        elif idx == 1:
+            # Page 1 of check-runs
+            return httpx.Response(
+                200,
+                json={"total_count": 101, "check_runs": page1_runs},
+            )
+        else:
+            # Page 2 of check-runs
+            return httpx.Response(
+                200,
+                json={"total_count": 101, "check_runs": page2_runs},
+            )
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="https://api.github.com")
+    port = GitHubForgePort(token=_TOKEN, client=client)
+    runs = await port.get_check_runs(_PR_REF)
+    assert len(runs) == 101
+    names = {r.name for r in runs}
+    assert "check-0" in names
+    assert "check-100" in names
+    # check-100 is a failure
+    last_run = next(r for r in runs if r.name == "check-100")
+    assert last_run.conclusion == "failure"
 
 
 # ---------------------------------------------------------------------------
@@ -764,3 +863,122 @@ async def test_github_last_dispatch_run_at_never_returns_none() -> None:
     port = _port(b)
     result = await port.last_dispatch_run_at(_PR_REF)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Request body assertions for void-returning methods (P1.8)
+# ---------------------------------------------------------------------------
+
+
+async def test_github_add_label_verb_url_body() -> None:
+    """add_label sends POST to the labels endpoint with correct body."""
+    b = _MockTransportBuilder()
+    b.add_json([{"name": "my-label"}])
+    port, builder = _port_and_builder(b)
+    await port.add_label(_ISSUE_REF, "my-label")
+    req = builder.requests[0]
+    assert req["method"] == "POST"
+    assert f"/issues/{_ISSUE_REF.number}/labels" in req["path"]
+    assert req["body"] == {"labels": ["my-label"]}
+
+
+async def test_github_set_labels_verb_url_body() -> None:
+    """set_labels sends PUT to the labels endpoint with correct body."""
+    b = _MockTransportBuilder()
+    b.add_json([{"name": "a"}, {"name": "b"}])
+    port, builder = _port_and_builder(b)
+    await port.set_labels(_ISSUE_REF, ["a", "b"])
+    req = builder.requests[0]
+    assert req["method"] == "PUT"
+    assert f"/issues/{_ISSUE_REF.number}/labels" in req["path"]
+    assert req["body"] == {"labels": ["a", "b"]}
+
+
+async def test_github_set_pr_ready_verb_url_body() -> None:
+    """set_pr_ready sends PATCH to the pulls endpoint with draft=false."""
+    b = _MockTransportBuilder()
+    b.add_json(_mock_pr_data(draft=False))
+    port, builder = _port_and_builder(b)
+    await port.set_pr_ready(_PR_REF)
+    req = builder.requests[0]
+    assert req["method"] == "PATCH"
+    assert f"/pulls/{_PR_REF.number}" in req["path"]
+    assert req["body"] == {"draft": False}
+
+
+async def test_github_post_comment_verb_url_body() -> None:
+    """post_comment sends POST to the comments endpoint with correct body."""
+    b = _MockTransportBuilder()
+    b.add_json(
+        {"id": 99, "body": "hello", "created_at": "2024-01-01T00:00:00Z", "user": {"login": "bot"}}
+    )
+    port, builder = _port_and_builder(b)
+    await port.post_comment(_ISSUE_REF, "hello")
+    req = builder.requests[0]
+    assert req["method"] == "POST"
+    assert f"/issues/{_ISSUE_REF.number}/comments" in req["path"]
+    assert req["body"] == {"body": "hello"}
+
+
+async def test_github_create_review_verb_url_body() -> None:
+    """create_review sends POST to reviews endpoint with event and body fields."""
+    b = _MockTransportBuilder()
+    b.add_json({"id": 1, "state": "APPROVED", "body": "LGTM"})
+    port, builder = _port_and_builder(b)
+    await port.create_review(_PR_REF, "APPROVE", "LGTM")
+    req = builder.requests[0]
+    assert req["method"] == "POST"
+    assert f"/pulls/{_PR_REF.number}/reviews" in req["path"]
+    assert req["body"] == {"event": "APPROVE", "body": "LGTM"}
+
+
+async def test_github_create_review_request_changes_body() -> None:
+    """create_review with REQUEST_CHANGES sends correct event value."""
+    b = _MockTransportBuilder()
+    b.add_json({"id": 2, "state": "CHANGES_REQUESTED", "body": "needs work"})
+    port, builder = _port_and_builder(b)
+    await port.create_review(_PR_REF, "REQUEST_CHANGES", "needs work")
+    req = builder.requests[0]
+    assert req["body"] is not None
+    assert req["body"]["event"] == "REQUEST_CHANGES"
+
+
+# ---------------------------------------------------------------------------
+# _parse_run_conclusion — mapping coverage (P0.9)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_run_conclusion_skipped_maps_to_success() -> None:
+    assert _parse_run_conclusion("skipped") == "success"
+
+
+def test_parse_run_conclusion_neutral_maps_to_success() -> None:
+    assert _parse_run_conclusion("neutral") == "success"
+
+
+def test_parse_run_conclusion_timed_out_maps_to_failure() -> None:
+    assert _parse_run_conclusion("timed_out") == "failure"
+
+
+def test_parse_run_conclusion_action_required_maps_to_failure() -> None:
+    assert _parse_run_conclusion("action_required") == "failure"
+
+
+def test_parse_run_conclusion_stale_maps_to_failure() -> None:
+    assert _parse_run_conclusion("stale") == "failure"
+
+
+def test_parse_run_conclusion_none_returns_none() -> None:
+    assert _parse_run_conclusion(None) is None
+
+
+def test_parse_run_conclusion_success_passthrough() -> None:
+    assert _parse_run_conclusion("success") == "success"
+
+
+def test_parse_run_conclusion_failure_passthrough() -> None:
+    assert _parse_run_conclusion("failure") == "failure"
+
+
+def test_parse_run_conclusion_cancelled_passthrough() -> None:
+    assert _parse_run_conclusion("cancelled") == "cancelled"

@@ -13,10 +13,16 @@ from src.domain.types import (
     RunHandle,
     RunStatus,
 )
-from src.ports.github import _GITHUB_API, _parse_run_conclusion, _parse_run_state
+from src.ports.github import (
+    _DISPATCH_WORKFLOW_NAME,
+    _GITHUB_API,
+    _parse_run_conclusion,
+    _parse_run_state,
+)
 
-# claude-code-action workflow filename (dispatched on the target repo)
-_CLAUDE_CODE_ACTION_WORKFLOW = "claude-code-action.yml"
+# claude-code-action workflow filename (dispatched on the target repo).
+# The base name is shared with github.py to avoid duplication.
+_CLAUDE_CODE_ACTION_WORKFLOW = f"{_DISPATCH_WORKFLOW_NAME}.yml"
 
 # Workflow ref (branch/tag) for triggering the claude-code-action workflow
 _CLAUDE_CODE_ACTION_REF = "main"
@@ -89,6 +95,18 @@ class RealHarnessPort:
 
         Triggers workflow_dispatch on the target repo.  The workflow ID returned
         by GitHub is used to construct a RunHandle.  Returns immediately.
+
+        Security — I3 / I9 / D2:
+          - FORGE_TOKEN and HARNESS_API_KEY are NEVER included in workflow inputs.
+            This adapter holds credentials but does not forward them to the sandbox.
+          - allowed_agent_refs is serialized into workflow inputs as a JSON string so
+            the agent runtime (claude-code-action) can enforce the allow-set at
+            execution time.
+          - Out-of-set spawn rejection is enforced by the agent-runtime layer
+            (claude-code-action contract + harness), NOT by this dispatch call.
+            This adapter cannot observe sub-agent spawns that occur inside the
+            sandboxed workflow execution.  The serialized allowed_agent_refs value
+            is the authoritative contract boundary passed to that runtime.
         """
         # Build inputs from DispatchContext (I3: never expose forge credentials)
         inputs: dict[str, str] = {
@@ -149,31 +167,44 @@ class RealHarnessPort:
         )
 
     async def trigger_ci(self, pr_ref: PRRef) -> None:
-        """Re-trigger CI on a PR by creating an empty commit or re-running failed checks.
+        """Re-trigger CI on a PR by re-running the most recent failed workflow run.
 
-        Implements the RC-1 'trigger-ci' recovery by re-running failed check runs.
+        Implements the RC-1 'trigger-ci' recovery by calling the GitHub Actions
+        rerun-failed-jobs API on the most recent workflow run for the PR's head SHA.
+
+        Strategy:
+          1. Fetch the PR to get the head SHA.
+          2. List workflow runs for the head SHA to find the most recent one.
+          3. POST to /actions/runs/{run_id}/rerun-failed-jobs.
+
+        Raises httpx.HTTPStatusError on unexpected failures (does NOT swallow errors
+        silently — callers can decide to log/ignore if needed).
         """
-        # Fetch the PR's head SHA and re-run the latest failed check suite
         pr_data = await self._get(
             f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
             f"/pulls/{pr_ref.number}"
         )
         head_sha = str(pr_data["head"]["sha"])
 
-        # Re-run all failed check runs for the head commit
-        try:
-            await self._post(
-                f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
-                f"/check-runs",
-                json_body={
-                    "name": "trigger-ci",
-                    "head_sha": head_sha,
-                    "status": "queued",
-                },
-            )
-        except httpx.HTTPStatusError:
-            # Best-effort: trigger_ci failures do not block the engine
-            pass
+        # Find the most recent workflow run for this commit
+        runs_data = await self._get(
+            f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
+            f"/actions/runs",
+            params={"head_sha": head_sha, "per_page": 1},
+        )
+        runs = runs_data.get("workflow_runs", [])
+        if not runs:
+            # No workflow runs found for this SHA — nothing to rerun
+            return
+
+        run_id = str(runs[0]["id"])
+
+        # Re-run failed jobs for the most recent run
+        await self._post(
+            f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
+            f"/actions/runs/{run_id}/rerun-failed-jobs",
+            json_body={},
+        )
 
     async def get_run_status(self, handle: RunHandle) -> RunStatus:
         """Poll the GitHub Actions run status for the given handle."""
@@ -203,6 +234,8 @@ class RealHarnessPort:
                 json_body={},
             )
         except httpx.HTTPStatusError as exc:
+            # 404 = run already gone (terminal no-op per SPEC §9.2)
             # 409 = already in a terminal state (idempotent no-op per SPEC §9.2)
-            if exc.response.status_code not in (409, 422):
+            # 422 = already completed (idempotent no-op per SPEC §9.2)
+            if exc.response.status_code not in (404, 409, 422):
                 raise

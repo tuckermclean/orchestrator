@@ -137,7 +137,7 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
     if not forge_token:
         return _build_dev_service(), None
 
-    webhook_secret = os.environ.get("WEBHOOK_SECRET") or None
+    webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
     # For the production singleton we default to a placeholder repo; the service
     # routes per-event to the repo extracted from each payload.
@@ -149,12 +149,17 @@ def _build_prod_service() -> tuple[OrchestratorService, str | None]:
     forge, harness, session = provider.ports(default_repo)
     audit = AuditLog()
 
+    # I1: parse ALLOWLIST from env (comma-separated GitHub logins).
+    # An empty/unset ALLOWLIST disables the gate (appropriate for private repos).
+    allowlist_raw = os.environ.get("ALLOWLIST", "")
+    allowlist = [u.strip() for u in allowlist_raw.split(",") if u.strip()]
+
     service = OrchestratorService(
         forge=forge,
         harness=harness,
         session=session,
         audit=audit,
-        allowlist=[],
+        allowlist=allowlist,
     )
     return service, webhook_secret
 

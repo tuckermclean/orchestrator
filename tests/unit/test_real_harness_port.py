@@ -53,6 +53,7 @@ def _make_context(
 class _MockTransportBuilder:
     def __init__(self) -> None:
         self._responses: list[httpx.Response] = []
+        self.requests: list[dict[str, Any]] = []
 
     def add_json(self, data: Any, status_code: int = 200) -> _MockTransportBuilder:
         self._responses.append(httpx.Response(status_code, json=data))
@@ -67,14 +68,30 @@ class _MockTransportBuilder:
         return self
 
     def build(self) -> httpx.AsyncClient:
+        import json as _json
+
         index = {"i": 0}
         responses = self._responses
+        captured = self.requests
 
         def _handler(request: httpx.Request) -> httpx.Response:
             if index["i"] >= len(responses):
                 raise RuntimeError(
                     f"Unexpected request: {request.method} {request.url}"
                 )
+            body_bytes = request.read()
+            try:
+                body = _json.loads(body_bytes) if body_bytes else None
+            except Exception:
+                body = None
+            captured.append(
+                {
+                    "method": request.method,
+                    "url": str(request.url),
+                    "path": request.url.path,
+                    "body": body,
+                }
+            )
             resp = responses[index["i"]]
             index["i"] += 1
             return resp
@@ -172,6 +189,64 @@ async def test_harness_dispatch_fallback_when_no_runs() -> None:
     assert handle.run_id.startswith("dispatch-")
 
 
+async def test_harness_dispatch_inputs_contain_contract_model_turns() -> None:
+    """dispatch POST body contains contract, model, max_turns in workflow inputs."""
+    b = _MockTransportBuilder()
+    b.add_empty(204)
+    b.add_json({"workflow_runs": [{"id": 55}], "total_count": 1})
+    RealHarnessPort(
+        forge_token=_TOKEN,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+        client=b.build(),
+    )
+    # Rebuild port with the builder so we can capture requests
+    b2 = _MockTransportBuilder()
+    b2.add_empty(204)
+    b2.add_json({"workflow_runs": [{"id": 55}], "total_count": 1})
+    port2 = RealHarnessPort(
+        forge_token=_TOKEN,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+        client=b2.build(),
+    )
+    ctx = _make_context(model="claude-opus-4", max_turns=15)
+    await port2.dispatch(ctx)
+
+    dispatch_reqs = [r for r in b2.requests if "dispatches" in r["path"]]
+    assert dispatch_reqs, "No dispatch request captured"
+    inputs = dispatch_reqs[0]["body"]["inputs"]
+    assert inputs["contract"] == "agents/orchestrator.md"
+    assert inputs["model"] == "claude-opus-4"
+    assert inputs["max_turns"] == "15"
+
+
+async def test_harness_dispatch_inputs_contain_allowed_agent_refs() -> None:
+    """dispatch includes allowed_agent_refs as JSON string in inputs."""
+    import json
+
+    b = _MockTransportBuilder()
+    b.add_empty(204)
+    b.add_json({"workflow_runs": [{"id": 88}], "total_count": 1})
+    port = RealHarnessPort(
+        forge_token=_TOKEN,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+        client=b.build(),
+    )
+    ctx = _make_context(
+        allowed_agent_refs=["agents/code-reviewer.md", "agents/security.md"]
+    )
+    await port.dispatch(ctx)
+
+    dispatch_reqs = [r for r in b.requests if "dispatches" in r["path"]]
+    assert dispatch_reqs
+    inputs = dispatch_reqs[0]["body"]["inputs"]
+    parsed_refs = json.loads(inputs["allowed_agent_refs"])
+    assert "agents/code-reviewer.md" in parsed_refs
+    assert "agents/security.md" in parsed_refs
+
+
 # ---------------------------------------------------------------------------
 # trigger_workflow
 # ---------------------------------------------------------------------------
@@ -196,9 +271,10 @@ async def test_harness_trigger_workflow_custom_ref() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_harness_trigger_ci_fetches_pr_then_posts() -> None:
+async def test_harness_trigger_ci_reruns_failed_jobs() -> None:
+    """trigger_ci fetches PR head SHA, finds most recent run, and re-runs failed jobs."""
     b = _MockTransportBuilder()
-    # PR data (to get head SHA)
+    # 1. PR data (to get head SHA)
     b.add_json(
         {
             "number": 7,
@@ -206,21 +282,38 @@ async def test_harness_trigger_ci_fetches_pr_then_posts() -> None:
             "state": "open",
         }
     )
-    # Post check run (best-effort)
-    b.add_json({"id": 1, "status": "queued"}, status_code=201)
+    # 2. List workflow runs for head SHA
+    b.add_json({"workflow_runs": [{"id": 9999, "status": "completed"}], "total_count": 1})
+    # 3. POST rerun-failed-jobs
+    b.add_empty(201)
     port = _port(b)
     pr_ref = PRRef(repo=_REPO, number=7)
     await port.trigger_ci(pr_ref)  # should not raise
 
 
-async def test_harness_trigger_ci_ignores_api_error() -> None:
-    """trigger_ci is best-effort; errors are swallowed."""
+async def test_harness_trigger_ci_no_runs_is_noop() -> None:
+    """trigger_ci exits cleanly when no workflow runs exist for the PR head SHA."""
     b = _MockTransportBuilder()
     b.add_json({"number": 7, "head": {"ref": "feat/fix", "sha": "abc123"}, "state": "open"})
-    b.add_json({"message": "Unprocessable Entity"}, status_code=422)
+    b.add_json({"workflow_runs": [], "total_count": 0})
     port = _port(b)
     pr_ref = PRRef(repo=_REPO, number=7)
-    await port.trigger_ci(pr_ref)  # should not raise (best-effort)
+    await port.trigger_ci(pr_ref)  # should not raise (no runs to rerun)
+
+
+async def test_harness_trigger_ci_surfaces_api_error() -> None:
+    """trigger_ci propagates unexpected API errors (does not silently swallow)."""
+    import pytest
+
+    b = _MockTransportBuilder()
+    b.add_json({"number": 7, "head": {"ref": "feat/fix", "sha": "abc123"}, "state": "open"})
+    b.add_json({"workflow_runs": [{"id": 9998, "status": "completed"}], "total_count": 1})
+    # rerun-failed-jobs returns 500 (unexpected error)
+    b.add_json({"message": "Internal Server Error"}, status_code=500)
+    port = _port(b)
+    pr_ref = PRRef(repo=_REPO, number=7)
+    with pytest.raises(Exception):
+        await port.trigger_ci(pr_ref)
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +402,76 @@ async def test_harness_cancel_idempotent_on_422() -> None:
     await port.cancel(RunHandle(run_id="456"))  # should not raise
 
 
+async def test_harness_cancel_idempotent_on_404() -> None:
+    """404 on cancel means the run is gone — should be a terminal no-op (SPEC §9.2)."""
+    b = _MockTransportBuilder()
+    b.add_json({"message": "Not Found"}, status_code=404)
+    port = _port(b)
+    await port.cancel(RunHandle(run_id="gone-run"))  # should not raise
+
+
 async def test_harness_run_handle_round_trip() -> None:
     """RunHandle.from_run_id round-trip is lossless."""
     handle = RunHandle(run_id="workflow-run-42")
     reconstructed = RunHandle.from_run_id(handle.run_id)
     assert reconstructed == handle
     assert reconstructed.run_id == handle.run_id
+
+
+# ---------------------------------------------------------------------------
+# Security: I3 — no credentials in dispatch inputs
+# ---------------------------------------------------------------------------
+
+
+async def test_security_no_credentials_in_dispatch_context() -> None:
+    """I3: FORGE_TOKEN and HARNESS_API_KEY values must not appear in dispatch inputs."""
+    captured_requests: list[dict[str, object]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        try:
+            body = request.read()
+            parsed = __import__("json").loads(body) if body else {}
+        except Exception:
+            parsed = {}
+        captured_requests.append(
+            {"method": request.method, "url": str(request.url), "body": parsed}
+        )
+        # First call: workflow dispatch → 204
+        if request.method == "POST" and "dispatches" in str(request.url):
+            return httpx.Response(204, content=b"")
+        # Second call: resolve latest run
+        return httpx.Response(200, json={"workflow_runs": [{"id": 42}], "total_count": 1})
+
+    transport = httpx.MockTransport(_handler)
+    client = httpx.AsyncClient(transport=transport, base_url="https://api.github.com")
+
+    _REAL_TOKEN = "ghp_super_secret_forge_token_xyz"
+    _REAL_HARNESS_KEY = "harness-api-key-very-secret-123"
+
+    port = RealHarnessPort(
+        forge_token=_REAL_TOKEN,
+        repo_owner=_OWNER,
+        repo_name=_REPO_NAME,
+        harness_api_key=_REAL_HARNESS_KEY,
+        client=client,
+    )
+    ctx = _make_context(allowed_agent_refs=["agents/reviewer.md"])
+    await port.dispatch(ctx)
+
+    # Find the dispatch POST body
+    dispatch_reqs = [r for r in captured_requests if "dispatches" in str(r["url"])]
+    assert dispatch_reqs, "Expected at least one dispatch POST"
+    dispatch_body = dispatch_reqs[0]["body"]
+    assert isinstance(dispatch_body, dict)
+
+    inputs = dispatch_body.get("inputs", {})
+    assert isinstance(inputs, dict)
+
+    # Serialize inputs to a flat string for substring search
+    inputs_str = __import__("json").dumps(inputs)
+    assert _REAL_TOKEN not in inputs_str, (
+        "FORGE_TOKEN leaked into dispatch inputs (I3 violation)"
+    )
+    assert _REAL_HARNESS_KEY not in inputs_str, (
+        "HARNESS_API_KEY leaked into dispatch inputs (I3 violation)"
+    )

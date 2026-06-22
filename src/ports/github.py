@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+import time
 from datetime import datetime
 from typing import Any
 
 import httpx
+import jwt
 
 from src.domain.types import (
     _CLOSING_RE,
@@ -26,6 +28,9 @@ _GITHUB_API = "https://api.github.com"
 
 # Workflow name used for dispatch runs (matches the action workflow file name)
 _DISPATCH_WORKFLOW_NAME = "claude-code-action"
+
+# GitHub App installation tokens expire after 1 hour; refresh with this margin (seconds)
+_APP_TOKEN_REFRESH_MARGIN = 120
 
 
 def _repo_url(repo: RepoRef) -> str:
@@ -140,17 +145,6 @@ class GitHubForgePort:
             page += 1
         return results
 
-    def _branch_from_pr(self, pr_ref: PRRef) -> str:
-        """Resolve the head branch for a PR ref (requires a prior get_pr call if not cached)."""
-        # The branch is not embedded in PRRef; callers that need it must pass it separately.
-        # For file operations, the GitHub API uses the PR's head ref directly.
-        return str(pr_ref.number)  # fallback placeholder — callers use _get_pr_head
-
-    async def _get_pr_head(self, pr_ref: PRRef) -> str:
-        """Return the head branch name for the PR."""
-        pr = await self.get_pr(pr_ref)
-        return pr.head_branch
-
     # ------------------------------------------------------------------
     # ForgePort implementation
     # ------------------------------------------------------------------
@@ -207,10 +201,12 @@ class GitHubForgePort:
         )
 
     async def remove_label(self, entity_ref: IssueRef | PRRef, label: str) -> None:
+        from urllib.parse import quote
+
         number = entity_ref.number
         repo = entity_ref.repo
-        # Encode label name for URL; 404 is idempotent
-        encoded = label.replace(" ", "%20")
+        # Encode label name for URL (safe='' ensures all special chars are encoded)
+        encoded = quote(label, safe="")
         await self._delete(
             f"{_GITHUB_API}/repos/{repo.owner}/{repo.name}/issues/{number}"
             f"/labels/{encoded}"
@@ -309,11 +305,43 @@ class GitHubForgePort:
         )
         return [str(item["filename"]) for item in data]
 
+    async def _get_check_runs_paginated(
+        self, url: str, params: dict[str, Any] | None = None
+    ) -> list[Any]:
+        """Paginate the check-runs wrapper endpoint ``{total_count, check_runs: [...]}``.
+
+        The check-runs endpoint returns ``{"total_count": N, "check_runs": [...]}``
+        rather than a bare list, so _get_paginated (which expects a bare list) cannot
+        be used directly.  This method loops until all pages are fetched.
+        """
+        page_params: dict[str, Any] = {"per_page": 100, **(params or {})}
+        all_runs: list[Any] = []
+        page = 1
+        while True:
+            page_params["page"] = page
+            resp = await self._client.get(url, headers=self._headers(), params=page_params)
+            resp.raise_for_status()
+            data = resp.json()
+            # Handle both wrapper dict form and bare list (test compatibility)
+            if isinstance(data, dict):
+                page_runs: list[Any] = data.get("check_runs", [])
+                total_count = int(data.get("total_count", len(page_runs)))
+            else:
+                page_runs = list(data)
+                total_count = len(all_runs) + len(page_runs)
+            all_runs.extend(page_runs)
+            # Stop when we have all runs or the page is partial
+            if len(page_runs) < 100 or len(all_runs) >= total_count:
+                break
+            page += 1
+        return all_runs
+
     async def get_check_runs(self, pr_ref: PRRef) -> list[CheckRun]:
-        """Fetch check runs for the PR's head commit.
+        """Fetch all check runs for the PR's head commit (paginated).
 
         GitHub's check-runs endpoint returns a wrapper object
         ``{"total_count": N, "check_runs": [...]}``, not a bare list.
+        All pages are fetched so that no BLOCKING_CI_CHECK can be silently dropped.
         """
         # Fetch the PR's HEAD commit SHA directly
         pr_data = await self._get(
@@ -321,17 +349,10 @@ class GitHubForgePort:
             f"/pulls/{pr_ref.number}"
         )
         head_sha = str(pr_data["head"]["sha"])
-        # Use _get (not _get_paginated) because the response is a wrapper object
-        response = await self._get(
+        items = await self._get_check_runs_paginated(
             f"{_GITHUB_API}/repos/{pr_ref.repo.owner}/{pr_ref.repo.name}"
             f"/commits/{head_sha}/check-runs",
-            params={"per_page": 100},
         )
-        # GitHub wraps check runs in {"check_runs": [...]} — handle both forms
-        if isinstance(response, dict):
-            items: list[Any] = response.get("check_runs", [])
-        else:
-            items = list(response)  # bare list (test mock may return this)
         runs = []
         for item in items:
             state = _parse_run_state(None, str(item.get("status", "queued")))
@@ -519,3 +540,123 @@ class GitHubForgePort:
     async def last_dispatch_run_at(self, pr_ref: PRRef) -> datetime | None:
         """Return the most recent dispatch run timestamp (Actions workflow) for the PR branch."""
         return await self.last_workflow_run_at(pr_ref, _DISPATCH_WORKFLOW_NAME)
+
+
+# ---------------------------------------------------------------------------
+# GitHub App installation auth
+# ---------------------------------------------------------------------------
+
+
+class GitHubAppForgePort(GitHubForgePort):
+    """ForgePort that authenticates via a GitHub App installation token.
+
+    When GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID
+    are set, this class mints an installation access token by:
+      1. Signing a short-lived JWT with the App's RS256 private key.
+      2. Exchanging the JWT for an installation access token via
+         POST /app/installations/{id}/access_tokens.
+      3. Caching the token and refreshing it before the ~1 h expiry.
+
+    Credentials come exclusively from environment variables (I3).
+    """
+
+    def __init__(
+        self,
+        app_id: str,
+        private_key_pem: str,
+        installation_id: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        # We pass an empty string as token; _get_token() provides the real one.
+        super().__init__(token="", client=client)
+        self._app_id = app_id
+        self._private_key_pem = private_key_pem
+        self._installation_id = installation_id
+        self._cached_token: str = ""
+        self._token_expires_at: float = 0.0  # Unix timestamp
+
+    def _mint_app_jwt(self) -> str:
+        """Return a short-lived GitHub App JWT (10 min) signed with the private key."""
+        now = int(time.time())
+        payload = {
+            "iat": now - 60,  # allow 60 s clock skew
+            "exp": now + 600,  # 10 minutes
+            "iss": self._app_id,
+        }
+        return jwt.encode(payload, self._private_key_pem, algorithm="RS256")
+
+    async def _refresh_token(self) -> None:
+        """Mint a fresh installation access token and cache it."""
+        app_jwt = self._mint_app_jwt()
+        headers = {
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        resp = await self._client.post(
+            f"{_GITHUB_API}/app/installations/{self._installation_id}/access_tokens",
+            headers=headers,
+            json={},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        self._cached_token = str(data["token"])
+        # GitHub expiry is an ISO-8601 string; parse conservatively with margin
+        expires_at_str = str(data.get("expires_at", ""))
+        if expires_at_str:
+            expires_dt = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+            self._token_expires_at = expires_dt.timestamp() - _APP_TOKEN_REFRESH_MARGIN
+        else:
+            # Fallback: treat as ~55 min from now
+            self._token_expires_at = time.time() + 3300
+
+    async def _get_token(self) -> str:
+        """Return a valid installation access token, refreshing if near expiry."""
+        if not self._cached_token or time.time() >= self._token_expires_at:
+            await self._refresh_token()
+        return self._cached_token
+
+    def _headers(self) -> dict[str, str]:
+        # Override is intentionally sync; callers that need the latest token must
+        # call await self._get_token() first.  The async methods below do this.
+        # For the cached (still-valid) token case this is fine.
+        return {
+            "Authorization": f"Bearer {self._cached_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        self._token = await self._get_token()
+        self._cached_token = self._token
+        resp = await self._client.get(url, headers=self._headers(), params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _post(self, url: str, json: dict[str, Any]) -> Any:
+        self._token = await self._get_token()
+        self._cached_token = self._token
+        resp = await self._client.post(url, headers=self._headers(), json=json)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _patch(self, url: str, json: dict[str, Any]) -> Any:
+        self._token = await self._get_token()
+        self._cached_token = self._token
+        resp = await self._client.patch(url, headers=self._headers(), json=json)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _put(self, url: str, json: dict[str, Any]) -> Any:
+        self._token = await self._get_token()
+        self._cached_token = self._token
+        resp = await self._client.put(url, headers=self._headers(), json=json)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _delete(self, url: str) -> None:
+        self._token = await self._get_token()
+        self._cached_token = self._token
+        resp = await self._client.delete(url, headers=self._headers())
+        if resp.status_code not in (200, 204, 404):
+            resp.raise_for_status()

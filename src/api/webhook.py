@@ -8,13 +8,14 @@ Security invariants:
   - Invalid HMAC → 403 (no body inspection before signature check)
   - Missing signature header → 403
   - Replayed delivery ID → 200 with {"handled": false, "reason": "duplicate_delivery_id"}
-  - WEBHOOK_SECRET sourced from environment only (never from request)
+  - OPERATOR_SECRET_KEY sourced from environment only (never from request)
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
@@ -52,8 +53,6 @@ def _make_webhook_router(
             raise HTTPException(status_code=403, detail="Invalid HMAC signature")
 
         # --- Route to service ---
-        import json
-
         try:
             payload: dict[str, object] = json.loads(body)
         except Exception:
