@@ -18,3 +18,12 @@ ui/node_modules/
 *.pem
 *.key
 *.p12
+# env files holding tokens/creds (App private key, CLAUDE_CODE_OAUTH_TOKEN, FORGE_TOKEN, …)
+.env
+.env.*
+*.env
+orch-test.env
+# …but allow checked-in, secret-free templates
+!.env.example
+!*.env.example
+!.env.sample
