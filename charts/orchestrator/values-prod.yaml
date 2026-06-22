@@ -52,9 +52,9 @@ config:
   # Production runs agents as isolated K8s Jobs (issue #51) — the control-plane image has
   # no claude CLI. Namespace + ServiceAccount are derived from the release + RBAC.
   HARNESS_EXECUTION_BACKEND: "k8s"
-  # Agent-runner image pinned by digest (v0.1.1 release; image tag is 0.1.1 — the release
+  # Agent-runner image pinned by digest (v0.1.2 release; image tag is 0.1.2 — the release
   # workflow strips the leading "v" via semver). Bump intentionally on a new release.
-  HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner@sha256:32065727952aba3b3c87fe31acbf6886a66d89125286dc1b513b4a4719563933"
+  HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner@sha256:c05eec93d03cf25ee1ca5588174005586d7fdf704917c84b91126ec917ad7d46"
 
 ingress:
   enabled: true
