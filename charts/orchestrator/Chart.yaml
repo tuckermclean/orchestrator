@@ -2,8 +2,13 @@ apiVersion: v2
 name: orchestrator
 description: Autonomous SWE-agent orchestration platform — control-plane Helm chart
 type: application
-version: 0.1.1
-appVersion: "0.1.4"
+# version/appVersion are PLACEHOLDERS — do not hardcode per release. The running app's
+# version is single-sourced from the git release tag, baked into the image at build time
+# (Dockerfile ARG VERSION/GIT_SHA from release.yml) and reported at /healthz + the UI.
+# A release that publishes a packaged chart should stamp these via
+# `helm package --version <tag> --app-version <tag>` (tracked follow-up).
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
 keywords:
   - orchestrator
   - swe-agent
