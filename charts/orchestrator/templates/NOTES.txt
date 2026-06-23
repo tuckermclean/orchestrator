@@ -61,3 +61,44 @@ Live transcript streaming: HARNESS_K8S_STREAM_LOGS={{ .Values.config.HARNESS_K8S
   "1" (default) — agent pod logs are streamed live into the run view via CoreV1Api.
   ""            — streaming disabled; run view shows only job lifecycle events.
   Override: --set config.HARNESS_K8S_STREAM_LOGS="" to disable.
+
+OCI Helm chart registry (issues #120, #89):
+  Each release tag (e.g. v1.2.3) publishes a versioned chart artifact at:
+    oci://ghcr.io/tuckermclean/charts/orchestrator:<semver>
+
+  Chart.yaml in the repository keeps version/appVersion as "0.0.0-dev".
+  The semver is stamped into the packaged artifact at release time only via
+  `helm package --version <tag>` — never committed to the repo.
+
+  Install directly from the OCI registry:
+    helm upgrade --install orchestrator \
+      oci://ghcr.io/tuckermclean/charts/orchestrator \
+      --version <semver> -n orchestrator -f values-prod.yaml
+
+  Flux GitOps consumers — use an OCIRepository pointing at the semver-tagged
+  chart so Flux re-pulls chart templates (not just the container image) on every
+  release.  Example Flux resources:
+
+    apiVersion: source.toolkit.fluxcd.io/v1beta2
+    kind: OCIRepository
+    metadata:
+      name: orchestrator-chart
+      namespace: flux-system
+    spec:
+      interval: 5m
+      url: oci://ghcr.io/tuckermclean/charts/orchestrator
+      ref:
+        semver: ">=1.0.0"   # or pin: tag: "1.2.3"
+      provider: generic
+    ---
+    apiVersion: helm.toolkit.fluxcd.io/v2beta2
+    kind: HelmRelease
+    metadata:
+      name: orchestrator
+      namespace: orchestrator
+    spec:
+      interval: 10m
+      chartRef:
+        kind: OCIRepository
+        name: orchestrator-chart
+        namespace: flux-system

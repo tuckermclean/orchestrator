@@ -1,17 +1,25 @@
 # ---------------------------------------------------------------------------
-# Release workflow — container build, SBOM, cosign signing, GHCR push
+# Release workflow — container build, SBOM, cosign signing, GHCR push,
+#                    tag-stamped OCI Helm chart publish (issues #120, #89)
 # ---------------------------------------------------------------------------
-# Operator-authorized edit to .github/workflows/ for Step 10 (issue #32).
-# This workflow does NOT modify ci.yml and does not conflict with the test gate.
+# Operator-authorized edits to .github/workflows/:
+#   - Step 10 (issue #32): image build/push, SBOM, cosign, SLSA provenance.
+#   - Issues #120 + #89: Helm chart packaged with --version/$TAG and pushed as
+#     an OCI artifact to oci://ghcr.io/tuckermclean/charts/orchestrator so that
+#     Flux re-pulls chart templates on every release tag (not just the image).
+#     Chart.yaml version/appVersion remain "0.0.0-dev" in the repo; the tag is
+#     stamped into the packaged artifact only via `helm package --version`.
 #
 # Triggers:
 #   - Push of a semver tag (v*) — builds and pushes the control-plane image
-#     and the agent-runner image to GHCR, attaches SBOM + SLSA provenance.
+#     and the agent-runner image to GHCR, attaches SBOM + SLSA provenance,
+#     then lints, packages, and pushes the Helm chart as an OCI artifact.
 #   - GitHub release published — same as tag push.
 #
 # Outputs:
 #   - ghcr.io/<owner>/orchestrator:<tag>
 #   - ghcr.io/<owner>/orchestrator-agent-runner:<tag>
+#   - oci://ghcr.io/tuckermclean/charts/orchestrator:<tag>
 #   - SBOM (CycloneDX JSON) attached as OCI attestation
 #   - Cosign keyless signature (Sigstore OIDC)
 #   - SLSA provenance attestation via slsa-github-generator
@@ -203,19 +211,55 @@ jobs:
           subject-digest: ${{ steps.push-agent-runner.outputs.digest }}
           push-to-registry: true
 
+      # ---- Helm chart — lint, package, push OCI (issues #120, #89) ----
+      # The tag is stripped of its leading "v" to produce a pure semver for
+      # helm package (e.g. "v1.2.3" → "1.2.3").  Chart.yaml stays "0.0.0-dev"
+      # in the repo; --version/--app-version stamp the packaged artifact only.
+      - name: Derive chart version from tag
+        id: chart-version
+        run: |
+          TAG="${{ github.ref_name }}"
+          SEMVER="${TAG#v}"
+          echo "semver=$SEMVER" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR for Helm (helm registry login)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            helm registry login ghcr.io \
+              --username "${{ github.actor }}" \
+              --password-stdin
+
+      - name: Lint Helm chart
+        run: helm lint charts/orchestrator
+
+      - name: Package Helm chart
+        run: |
+          helm package charts/orchestrator \
+            --version "${{ steps.chart-version.outputs.semver }}" \
+            --app-version "${{ steps.chart-version.outputs.semver }}"
+
+      - name: Push Helm chart to GHCR OCI registry
+        run: |
+          helm push \
+            "orchestrator-${{ steps.chart-version.outputs.semver }}.tgz" \
+            oci://ghcr.io/tuckermclean/charts
+
       # ---- Summary ----
       - name: Release summary
         run: |
           echo "## Release summary" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Image | Digest |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| control-plane | \`${{ steps.push-control-plane.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| agent-runner  | \`${{ steps.push-agent-runner.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Artifact | Reference |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| control-plane image | \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push-control-plane.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| agent-runner image  | \`${{ env.REGISTRY }}/${{ env.AGENT_RUNNER_IMAGE_NAME }}@${{ steps.push-agent-runner.outputs.digest }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Helm chart (OCI)    | \`oci://ghcr.io/tuckermclean/charts/orchestrator:${{ steps.chart-version.outputs.semver }}\` |" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Helm install command:" >> "$GITHUB_STEP_SUMMARY"
+          echo "Helm install from OCI registry:" >> "$GITHUB_STEP_SUMMARY"
           echo "\`\`\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "helm upgrade --install orchestrator ./charts/orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "helm upgrade --install orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  oci://ghcr.io/tuckermclean/charts/orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
+          echo "  --version ${{ steps.chart-version.outputs.semver }} \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  -n orchestrator \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  -f charts/orchestrator/values-prod.yaml \\" >> "$GITHUB_STEP_SUMMARY"
           echo "  --set image.digest=${{ steps.push-control-plane.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
