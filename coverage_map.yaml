@@ -354,6 +354,17 @@
     tests: ["test_real_kube_log_client_logs_stream_error"]
   "k8s-stream-pod-log-error-logged":
     tests: ["test_k8s_backend_stream_pod_log_method_logs_error"]
+  # Executor starvation fix — dedicated pool + read1 so concurrent streamers don't block
+  "k8s-log-stream-dedicated-executor":
+    tests: ["test_real_kube_log_client_uses_dedicated_executor"]
+  "k8s-log-stream-read1-not-read":
+    tests: ["test_real_kube_log_client_calls_read1_not_blocking_read"]
+  "k8s-log-stream-done-callback-logs-exception":
+    tests: ["test_background_task_done_callback_logs_exception"]
+  "k8s-log-stream-done-callback-no-log-on-success":
+    tests: ["test_background_task_done_callback_no_log_on_success"]
+  "k8s-log-stream-concurrent-streamers":
+    tests: ["test_multiple_concurrent_streamers_all_receive_events"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":
