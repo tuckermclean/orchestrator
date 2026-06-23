@@ -23,7 +23,7 @@ from datetime import UTC, datetime  # noqa: TC003
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection, serialized_write
+from src.db import SharedDB, _make_shared_db, serialized_write
 from src.domain.types import RepoRef, RunDetail, RunEvent, RunSummary
 
 _log = logging.getLogger(__name__)
@@ -157,6 +157,9 @@ class FakeRunStore:
 class SQLiteRunStore:
     """SQLite-backed run metadata store.
 
+    Accepts either a ``SharedDB`` (production, shared connections) or a plain
+    path string (tests / legacy callers).
+
     Schema: two tables — runs (one row per run) and run_events (one row per
     event).  Status updates are applied via UPDATE.  Events are appended.
 
@@ -168,9 +171,10 @@ class SQLiteRunStore:
     Callers must call init() before use and close() on shutdown.
     """
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+    def __init__(self, db_path: str | SharedDB) -> None:
+        self._shared: SharedDB = _make_shared_db(db_path)
+        self._owns_shared: bool = not isinstance(db_path, SharedDB)
+        self._initialized = False
         # Keep strong refs to fire-and-forget write tasks: an unreferenced
         # asyncio task can be garbage-collected mid-flight, silently dropping
         # the DB write (run record / status update). Discard on completion and
@@ -189,20 +193,28 @@ class SQLiteRunStore:
         task.add_done_callback(_done)
 
     async def init(self) -> None:
-        if self._db is not None:
+        if self._initialized:
             return
-        self._db = await aiosqlite.connect(self._db_path)
-        await configure_sqlite_connection(self._db)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_RUNS)
-        await self._db.execute(_CREATE_EVENTS)
-        await self._db.commit()
+        await self._shared.init()
+        wc = self._shared.write
+        wc.row_factory = aiosqlite.Row
+        await wc.execute(_CREATE_RUNS)
+        await wc.execute(_CREATE_EVENTS)
+        await wc.commit()
+        self._shared.read.row_factory = aiosqlite.Row
+        self._initialized = True
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if not self._initialized:
             raise RuntimeError("SQLiteRunStore.init() must be called before use")
-        return self._db
+        return self._shared.write
+
+    @property
+    def _read_conn(self) -> aiosqlite.Connection:
+        if not self._initialized:
+            raise RuntimeError("SQLiteRunStore.init() must be called before use")
+        return self._shared.read
 
     def record(
         self,
@@ -306,7 +318,7 @@ class SQLiteRunStore:
             clauses.append("type = ?")
             params.append(type)
         where = " AND ".join(clauses)
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             f"SELECT * FROM runs WHERE {where} ORDER BY started_at DESC",
             params,
         ) as cursor:
@@ -331,7 +343,7 @@ class SQLiteRunStore:
         return result
 
     async def get_run(self, run_id: str) -> RunDetail | None:
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT * FROM runs WHERE run_id = ?", (run_id,)
         ) as cursor:
             row = await cursor.fetchone()
@@ -342,7 +354,7 @@ class SQLiteRunStore:
             if row["completed_at"]
             else None
         )
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT * FROM run_events WHERE run_id = ? ORDER BY id", (run_id,)
         ) as cursor:
             event_rows = await cursor.fetchall()
@@ -365,13 +377,13 @@ class SQLiteRunStore:
         )
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._owns_shared:
+            await self._shared.close()
+        self._initialized = False
 
     async def iter_events(self, run_id: str) -> AsyncIterator[RunEvent]:
         """Async iterator over stored events (for SSE streaming from DB)."""
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT * FROM run_events WHERE run_id = ? ORDER BY id", (run_id,)
         ) as cursor:
             rows = await cursor.fetchall()

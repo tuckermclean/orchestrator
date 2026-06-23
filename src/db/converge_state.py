@@ -11,7 +11,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection, serialized_write
+from src.db import SharedDB, _make_shared_db, serialized_write
 from src.domain.types import PRRef, RunHandle
 
 _CREATE_TABLE = """
@@ -32,37 +32,56 @@ def _pr_key(pr_ref: PRRef) -> str:
 class SQLiteConvergeStateStore:
     """SQLite-backed per-PR converge loop state store.
 
+    Accepts either a ``SharedDB`` (production, shared connections) or a plain
+    path string (tests / legacy callers).
+
     ``init()`` must be awaited before any other method.  ``close()`` must be
     awaited on shutdown to avoid ``aiosqlite`` event-loop teardown warnings.
     """
 
-    def __init__(self, db_path: str = ":memory:") -> None:
-        self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+    def __init__(self, db_path: str | SharedDB = ":memory:") -> None:
+        self._shared: SharedDB = _make_shared_db(db_path)
+        self._owns_shared: bool = not isinstance(db_path, SharedDB)
+        self._initialized = False
 
     async def init(self) -> None:
         """Open the connection and create the table if absent."""
-        if self._db is not None:
+        if self._initialized:
             return
-        self._db = await aiosqlite.connect(self._db_path)
-        await configure_sqlite_connection(self._db)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_TABLE)
-        await self._db.commit()
+        await self._shared.init()
+        wc = self._shared.write
+        wc.row_factory = aiosqlite.Row
+        await wc.execute(_CREATE_TABLE)
+        await wc.commit()
+        self._shared.read.row_factory = aiosqlite.Row
+        self._initialized = True
+
+    @property
+    def _db(self) -> aiosqlite.Connection | None:
+        """Legacy compat: expose the write connection as ``_db``."""
+        return self._shared._write
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if not self._initialized:
             raise RuntimeError(
                 "SQLiteConvergeStateStore.init() must be called before use"
             )
-        return self._db
+        return self._shared.write
+
+    @property
+    def _read_conn(self) -> aiosqlite.Connection:
+        if not self._initialized:
+            raise RuntimeError(
+                "SQLiteConvergeStateStore.init() must be called before use"
+            )
+        return self._shared.read
 
     async def close(self) -> None:
         """Close the database connection."""
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._owns_shared:
+            await self._shared.close()
+        self._initialized = False
 
     # ------------------------------------------------------------------
     # ConvergeStateStore Protocol methods
@@ -70,7 +89,7 @@ class SQLiteConvergeStateStore:
 
     async def get_converge_round(self, pr_ref: PRRef) -> int:
         """Return the current converge round (0 if no state recorded yet)."""
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT converge_round FROM converge_state WHERE pr_key = ?",
             (_pr_key(pr_ref),),
         ) as cursor:
@@ -92,7 +111,7 @@ class SQLiteConvergeStateStore:
 
     async def get_round_started(self, pr_ref: PRRef) -> datetime | None:
         """Return the round-start timestamp, or None if not set."""
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT round_started FROM converge_state WHERE pr_key = ?",
             (_pr_key(pr_ref),),
         ) as cursor:
@@ -126,7 +145,7 @@ class SQLiteConvergeStateStore:
 
     async def get_last_run_handle(self, pr_ref: PRRef) -> RunHandle | None:
         """Return the last dispatched run handle, or None if not set."""
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT last_run_handle FROM converge_state WHERE pr_key = ?",
             (_pr_key(pr_ref),),
         ) as cursor:

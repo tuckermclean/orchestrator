@@ -675,3 +675,24 @@
     tests: ["test_audit_record_succeeds_normally_when_no_contention"]
   "write-lock-shared-cross-store":
     tests: ["test_write_lock_serializes_cross_store_writes"]
+  # SharedDB single-writer architecture (supersedes PR #137 asyncio.Lock approach)
+  "shared-db-file-backed-separate-connections":
+    tests: ["test_shared_db_file_backed_separate_read_write_connections"]
+  "shared-db-memory-same-connection":
+    tests: ["test_shared_db_memory_same_connection"]
+  "shared-db-init-idempotent":
+    tests: ["test_shared_db_init_idempotent"]
+  "shared-db-close-idempotent":
+    tests: ["test_shared_db_close_idempotent"]
+  "single-writer-all-stores-concurrent-real-file":
+    tests: ["test_single_writer_all_six_stores_concurrent_no_lock_error"]
+  "shared-db-writes-visible-on-read-connection":
+    tests: ["test_shared_db_writes_visible_on_read_connection"]
+  "shared-db-counter-atomic-no-drift":
+    tests: ["test_shared_db_counter_atomic_increment_no_drift"]
+  "stores-not-owning-shared-db-skip-close":
+    tests: ["test_stores_not_owning_shared_db_skip_close"]
+  "memory-store-reads-see-writes":
+    tests: ["test_memory_store_reads_see_writes"]
+  "high-concurrency-writes-no-dropped-rows":
+    tests: ["test_high_concurrency_writes_no_dropped_rows"]

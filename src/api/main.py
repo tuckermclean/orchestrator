@@ -20,6 +20,7 @@ from src.api.operator_routes import _make_operator_router
 from src.api.push_routes import _make_push_router
 from src.api.routes import _make_router
 from src.api.webhook import _make_webhook_router
+from src.db import SharedDB
 from src.db.audit import AuditLog
 from src.db.converge_state import SQLiteConvergeStateStore
 from src.db.counter import SQLiteCounterStore
@@ -278,6 +279,9 @@ _ProdStores = tuple[
     SQLiteCounterStore | None,
     SQLiteConvergeStateStore | None,
     SQLiteRunStore | None,
+    # Shared connection set: one write + one read connection for all stores.
+    # When None, stores are in-memory (no shared connection needed).
+    SharedDB | None,
 ]
 
 
@@ -302,7 +306,7 @@ def _build_prod_service() -> _ProdStores:
 
     if not _has_prod_creds():
         _svc, _op, _push, _dev_reg = _build_dev_service()
-        return _svc, None, _op, _push, _dev_reg, None, None, None, None
+        return _svc, None, _op, _push, _dev_reg, None, None, None, None, None
 
     webhook_secret = os.environ.get("OPERATOR_SECRET_KEY") or None
 
@@ -353,14 +357,19 @@ def _build_prod_service() -> _ProdStores:
         )
 
     if db_path is not None:
-        # File-backed: all four engine stores use the same SQLite file.
-        # init() is called in _lifespan before traffic arrives.
-        audit: AuditLog = AuditLog(db_path=db_path)
-        counter_store: SQLiteCounterStore | FakeCounterStore = SQLiteCounterStore(db_path)
+        # File-backed: ONE shared connection set for ALL six stores.
+        # All writes go through shared_db.write (single aiosqlite background thread →
+        # zero concurrent writers, zero WAL-checkpoint cross-connection lock races).
+        # Reads go through shared_db.read (separate connection → reads never block
+        # on the write queue).  init() is called in _lifespan before traffic arrives.
+        shared_db: SharedDB | None = SharedDB(db_path)
+        assert shared_db is not None
+        audit: AuditLog = AuditLog(db_path=shared_db)  # type: ignore[arg-type]
+        counter_store: SQLiteCounterStore | FakeCounterStore = SQLiteCounterStore(shared_db)
         converge_store: SQLiteConvergeStateStore | FakeConvergeStateStore = (
-            SQLiteConvergeStateStore(db_path)
+            SQLiteConvergeStateStore(shared_db)
         )
-        run_store_inst: SQLiteRunStore | FakeRunStore = SQLiteRunStore(db_path)
+        run_store_inst: SQLiteRunStore | FakeRunStore = SQLiteRunStore(shared_db)
         db_audit: AuditLog | None = audit
         db_counter: SQLiteCounterStore | None = counter_store  # type: ignore[assignment]
         db_converge: SQLiteConvergeStateStore | None = converge_store  # type: ignore[assignment]
@@ -368,6 +377,7 @@ def _build_prod_service() -> _ProdStores:
     else:
         # In-memory: use AuditLog() (defaults to :memory:) and Fake stores.
         # These do not need lifespan init()/close() beyond what AuditLog already does.
+        shared_db = None
         audit = AuditLog()
         counter_store = FakeCounterStore()
         converge_store = FakeConvergeStateStore()
@@ -394,11 +404,11 @@ def _build_prod_service() -> _ProdStores:
         run_store=run_store_inst,
     )
 
-    # Operator account store: SQLite when DB_URL names a file, Fake otherwise.
-    # SessionPort: FakeSessionPort is acceptable (observability, not durability-critical).
-    if db_path is not None:
-        op_store: FakeOperatorStore | SQLiteOperatorStore = SQLiteOperatorStore(db_path)
-        push_store_inst: FakePushStore | SQLitePushStore = SQLitePushStore(db_path)
+    # Operator account store and push store also share the same connection.
+    # SQLite when DB_URL names a file, Fake otherwise.
+    if db_path is not None and shared_db is not None:
+        op_store: FakeOperatorStore | SQLiteOperatorStore = SQLiteOperatorStore(shared_db)
+        push_store_inst: FakePushStore | SQLitePushStore = SQLitePushStore(shared_db)
     else:
         op_store = FakeOperatorStore()
         push_store_inst = FakePushStore()
@@ -417,6 +427,7 @@ def _build_prod_service() -> _ProdStores:
         db_counter,
         db_converge,
         db_run_store,
+        shared_db,
     )
 
 
@@ -431,13 +442,22 @@ def _build_prod_service() -> _ProdStores:
     _db_counter,
     _db_converge,
     _db_run_store,
+    _shared_db,
 ) = _build_prod_service()
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Init DB-backed stores before accepting traffic (SPEC §6 crash-only-durability).
-    # AuditLog always needs init() — whether backed by file or :memory:.
+    #
+    # When a SharedDB is present, calling shared_db.init() opens the write + read
+    # connections once; each store then calls init() to create its tables (idempotent:
+    # shared_db.init() is a no-op on subsequent calls from individual stores).
+    # When no SharedDB (in-memory / dev mode), AuditLog still needs init() for its
+    # :memory: connection.
+    if _shared_db is not None:
+        # Open the shared connections first so all stores can use them during DDL.
+        await _shared_db.init()
     if _db_audit is not None:
         await _db_audit.init()
     if _db_counter is not None:
@@ -483,19 +503,19 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Stop the reconciler loop before closing DB connections.
         if _reconcile_mode == "internal":
             await _service.stop_reconciler()
-        # Close DB connections on shutdown to avoid aiosqlite event-loop teardown warnings.
-        if _db_converge is not None:
-            await _db_converge.close()
-        if _db_counter is not None:
-            await _db_counter.close()
-        if _db_audit is not None:
-            await _db_audit.close()
-        if _db_run_store is not None:
-            await _db_run_store.close()
-        if isinstance(_operator_store, SQLiteOperatorStore):
-            await _operator_store.close()
-        if isinstance(_push_store, SQLitePushStore):
-            await _push_store.close()
+        # Close the shared connection set on shutdown.
+        # Individual store close() calls are no-ops when they don't own the SharedDB;
+        # _shared_db.close() tears down both write and read connections.
+        if _shared_db is not None:
+            await _shared_db.close()
+        else:
+            # In-memory / dev mode: close individual stores that own their connections.
+            if _db_audit is not None:
+                await _db_audit.close()
+            if isinstance(_operator_store, SQLiteOperatorStore):
+                await _operator_store.close()
+            if isinstance(_push_store, SQLitePushStore):
+                await _push_store.close()
 
 
 app = create_app(
