@@ -547,6 +547,14 @@ _BAKED_HOOK_PATH = "/opt/orchestrator/i9_spawn_hook.py"
 # Used by _build_entry_script to materialise the contract into the clone.
 _BAKED_CONTRACT_DIR = "/app/agents"
 
+# Baked directory for the specialist agent pack in the agent-runner image.
+# The Dockerfile Phase 7 step (AGENTS.md §8) fetches the SHA-pinned pack and
+# copies all *.md files flat into /app/.agents/ (AGENT_PACK_DEST_DIR=.agents).
+# This MUST match deploy/agent-runner.Dockerfile's pack destination.
+# Used by _build_entry_script to materialise the pack into the clone so agents
+# can read ".agents/<AgentRef>" at their expected workspace-relative path.
+_BAKED_PACK_DIR = "/app/.agents"
+
 # Default poll interval and timeout (seconds) — module-level so tests can override.
 _K8S_POLL_INTERVAL_S: float = 5.0
 _K8S_JOB_TIMEOUT_S: float = 1800.0  # 30 minutes
@@ -659,9 +667,14 @@ class K8sJobBackend:
              path (_BAKED_CONTRACT_DIR/<basename>) into /workspace/repo/agents/
              so the agent can read it at its expected relative path (#111).
              Fails loudly with a clear error if the contract file is absent.
-          5. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
+          5. Materialises the specialist pack from _BAKED_PACK_DIR (/app/.agents/)
+             into /workspace/repo/.agents/ so agents can read specialist contracts
+             at the workspace-relative ".agents/<AgentRef>" path (AGENTS.md §7.4).
+             Best-effort: skipped with a [ -d ] guard when the pack is absent (dev/CI).
+             Adds /.agents/** to .git/info/exclude — pack must never be committed.
+          6. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
              hook (baked at _BAKED_HOOK_PATH) into /workspace/repo/.claude/.
-          6. cd into /workspace/repo and exec the claude invocation.
+          7. cd into /workspace/repo and exec the claude invocation.
 
         I3 security: GH_TOKEN is referenced as ${GH_TOKEN} in the shell
         command — it is NEVER interpolated as a literal string here.  The
@@ -731,6 +744,24 @@ class K8sJobBackend:
         else:
             contract_step = ""
 
+        # Specialist pack materialisation — best-effort (pack absent in dev/CI).
+        # The agent-runner image bakes the SHA-pinned specialist pack at
+        # _BAKED_PACK_DIR (/app/.agents/).  Copy the pack into /workspace/repo/.agents/
+        # so agents can read ".agents/<AgentRef>" at the workspace-relative path that
+        # orchestration contracts instruct them to use (AGENTS.md §7.4).
+        # The `[ -d ... ]` guard makes this a no-op when the pack is absent (dev/CI
+        # legitimately lacks it — the image build fetches it, not the source tree).
+        # Git-ignore /.agents/** so the pack can never be committed into a PR
+        # (.agents/** is a PROTECTED_PATH per AGENTS.md §3).
+        pack_step = (
+            f"if [ -d {shlex.quote(_BAKED_PACK_DIR)} ]; then\n"
+            "  mkdir -p /workspace/repo/.agents\n"
+            f"  cp -r {shlex.quote(_BAKED_PACK_DIR)}/. /workspace/repo/.agents/\n"
+            "  mkdir -p /workspace/repo/.git/info\n"
+            "  echo '/.agents/**' >> /workspace/repo/.git/info/exclude\n"
+            "fi\n"
+        )
+
         script = (
             "set -e\n"
             # HOME must be writable: the agent-runner user has no home dir
@@ -751,7 +782,11 @@ class K8sJobBackend:
             '"https://github.com/"\n'
             # Step 4: materialise the agent contract into the clone (#111).
             + contract_step
-            # Step 5: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
+            # Step 5: materialise the specialist pack into the clone (best-effort).
+            # The pack at _BAKED_PACK_DIR is absent in dev/CI (the agent-runner image
+            # bakes it); the `[ -d ... ]` guard makes this a clean no-op when absent.
+            + pack_step
+            # Step 6: install I9 hook if ORCHESTRATOR_ALLOWED_AGENT_REFS is set.
             + "if [ -n \"${ORCHESTRATOR_ALLOWED_AGENT_REFS}\" ]; then\n"
             "  mkdir -p /workspace/repo/.claude\n"
             f"  cp {shlex.quote(hook_src)} /workspace/repo/.claude/i9_spawn_hook.py\n"
@@ -764,7 +799,7 @@ class K8sJobBackend:
             "p.write_text(json.dumps(s, indent=2))\n"
             "\"\n"
             "fi\n"
-            # Step 6: run claude in the cloned working tree.
+            # Step 7: run claude in the cloned working tree.
             f"cd /workspace/repo\n"
             f"exec {quoted_claude}\n"
         )
@@ -1222,10 +1257,9 @@ def make_execution_backend(
     k8s:
       Used when HARNESS_EXECUTION_BACKEND=k8s.  The kubernetes package is imported
       lazily so the subprocess path never acquires the dependency.
-      kube_log_client: if None and HARNESS_K8S_STREAM_LOGS is set, the real
-      CoreV1Api log adapter is constructed.  If not set, log streaming is disabled
-      (safe default — K8s prod deployments should set HARNESS_K8S_STREAM_LOGS=1
-      once the agent-runner image is reachable from the control-plane).
+      kube_log_client: if None and HARNESS_K8S_STREAM_LOGS is non-empty, the real
+      CoreV1Api log adapter is constructed.  The chart sets HARNESS_K8S_STREAM_LOGS=1
+      by default (enabled); operators can override to "" to disable.
     """
     backend_name = os.environ.get("HARNESS_EXECUTION_BACKEND", "subprocess").lower()
     if backend_name == "k8s":

@@ -56,6 +56,9 @@ config:
   # Agent-runner image pinned by digest (v0.1.3 release; image tag is 0.1.3 — the release
   # workflow strips the leading "v" via semver). Bump intentionally on a new release.
   HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner@sha256:23591bb8553e54723758e048efda22ee12665b423d61c121c70d00b675b776ae"
+  # Live pod-log streaming enabled by default (issue #118).
+  # Set to "" to disable if CoreV1Api log streaming is unavailable.
+  HARNESS_K8S_STREAM_LOGS: "1"
 
 ingress:
   enabled: true

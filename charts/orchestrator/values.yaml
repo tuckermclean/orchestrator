@@ -79,6 +79,11 @@ config:
   HARNESS_EXECUTION_BACKEND: "subprocess"
   # Agent-runner image used by the k8s backend. Pin by digest in prod (values-prod.yaml).
   HARNESS_K8S_IMAGE: "ghcr.io/tuckermclean/orchestrator-agent-runner:latest"
+  # Live pod-log streaming for the run view (issue #118).  Default: enabled ("1").
+  # Streams the agent's JSONL stdout into RunEventStore so the run page shows a live
+  # transcript.  Set to "" to disable (e.g. if the agent-runner pod is unreachable
+  # from the control-plane or CoreV1Api log streaming is unsupported in the cluster).
+  HARNESS_K8S_STREAM_LOGS: "1"
 
 # -- Service --
 service:
