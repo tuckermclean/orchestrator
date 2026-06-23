@@ -1,4 +1,4 @@
-.PHONY: run-dev stop-dev check-coverage
+.PHONY: run-dev stop-dev check-coverage e2e-verify
 
 SESSION := orchestrator
 
@@ -20,3 +20,11 @@ stop-dev:
 # Mirror of the proposed CI step; run locally before opening a PR.
 check-coverage:
 	python tools/check_coverage_map.py
+
+# Live end-to-end verification against the deployed k8s orchestrator: opens a real
+# issue in the sandbox repo and watches the run pipeline record runs, advance status,
+# and stream transcript events; prints the resulting PR. One self-contained command.
+# Requires kubectl (cluster context) + gh (authed); run from repo root.
+# Override: NS, REPO, PORT, ISSUE_TITLE, ISSUE_BODY, POLL_SECS, NO_ISSUE=1.
+e2e-verify:
+	bash scripts/e2e_live_verify.sh
