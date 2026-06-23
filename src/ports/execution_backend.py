@@ -58,6 +58,7 @@ Live transcript streaming:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import shutil
@@ -77,6 +78,56 @@ from src.ports.harness import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Dedicated thread pool for pod-log streaming reads
+# ---------------------------------------------------------------------------
+#
+# Pod-log streaming keeps a thread occupied for the entire lifetime of the log
+# stream (follow=True): resp.read(N) blocks until N bytes arrive or the stream
+# closes.  Using the default ThreadPoolExecutor (shared with the watcher and
+# other asyncio I/O) causes thread exhaustion under concurrent runs — streaming
+# tasks queue indefinitely and produce zero events with no logged error.
+# The watcher survives because it *polls* (short executor calls between sleeps);
+# the streamer holds its thread continuously.
+#
+# Fix: a dedicated executor sized independently of the default pool.  Each
+# concurrent pod-log stream occupies one worker.  Sized generously at 64 so the
+# pool is never the bottleneck even at max swarm concurrency.
+_LOG_STREAM_MAX_WORKERS: int = 64
+_log_stream_executor: concurrent.futures.ThreadPoolExecutor = (
+    concurrent.futures.ThreadPoolExecutor(
+        max_workers=_LOG_STREAM_MAX_WORKERS,
+        thread_name_prefix="orch-log-stream",
+    )
+)
+
+
+def _make_task_done_callback(
+    task_set: set[asyncio.Task[None]],
+    task_label: str,
+) -> Any:
+    """Return a done-callback that discards the task AND logs any exception.
+
+    Replaces the bare ``task_set.discard`` pattern used previously.  The bare
+    discard silently swallowed task exceptions — a background streamer or watcher
+    that died with an unhandled exception left no trace.  This callback mirrors
+    the pattern in ``src/db/run_store.py`` ``_spawn``.
+
+    task_label: short description for the log message (e.g. "k8s-log-streamer").
+    """
+
+    def _done(t: asyncio.Task[None]) -> None:
+        task_set.discard(t)
+        if not t.cancelled() and (exc := t.exception()) is not None:
+            logger.error(
+                "Background task '%s' raised unhandled exception: %r",
+                task_label,
+                exc,
+            )
+
+    return _done
+
 
 # ---------------------------------------------------------------------------
 # Protocol — the seam
@@ -314,7 +365,9 @@ class SubprocessBackend:
             name=f"subprocess-watch-{run_id[:8]}",
         )
         self._background_tasks.add(watcher)
-        watcher.add_done_callback(self._background_tasks.discard)
+        watcher.add_done_callback(
+            _make_task_done_callback(self._background_tasks, f"subprocess-watch-{run_id[:8]}")
+        )
 
     async def _watch(
         self,
@@ -935,7 +988,9 @@ class K8sJobBackend:
             name=f"k8s-watch-{run_id[:8]}",
         )
         self._background_tasks.add(watcher)
-        watcher.add_done_callback(self._background_tasks.discard)
+        watcher.add_done_callback(
+            _make_task_done_callback(self._background_tasks, f"k8s-watch-{run_id[:8]}")
+        )
 
         # Spawn live transcript streamer when a log client is wired.
         # The label selector matches the run-id label baked into the Job spec.
@@ -946,7 +1001,9 @@ class K8sJobBackend:
                 name=f"k8s-log-{run_id[:8]}",
             )
             self._background_tasks.add(log_streamer)
-            log_streamer.add_done_callback(self._background_tasks.discard)
+            log_streamer.add_done_callback(
+                _make_task_done_callback(self._background_tasks, f"k8s-log-{run_id[:8]}")
+            )
 
     async def _watch(
         self,
@@ -1167,10 +1224,24 @@ class _RealKubeLogClient:
     The kubernetes python SDK's read_namespaced_pod_log with
     _preload_content=False returns a urllib3 HTTPResponse.  urllib3's
     HTTPResponse does NOT have an iter_lines() method (that belongs to
-    requests.Response).  We instead iterate the stream via resp.stream()
+    requests.Response).  We instead iterate the stream via resp.read1()
     in byte chunks, buffer across chunk boundaries, and yield complete
-    newline-delimited lines.  Each chunk read is dispatched via
-    run_in_executor so the blocking I/O does not stall the asyncio event loop.
+    newline-delimited lines.
+
+    Why read1, not read:
+      urllib3 HTTPResponse.read(N) blocks the calling thread until exactly N
+      bytes are available *or* the stream closes.  With follow=True, that means
+      the thread is held continuously for the entire pod lifetime — saturating
+      the default ThreadPoolExecutor under concurrent runs and causing all
+      other streamers to queue indefinitely.  read1(N) returns immediately
+      with whatever bytes are available (up to N), releasing the thread
+      between chunks and allowing the executor to serve other work.
+
+    Dedicated executor:
+      Each run_in_executor call for streaming reads goes to _log_stream_executor
+      (module-level, 64 workers) rather than the default None executor.  This
+      isolates streaming from watcher polls, converge operations, and other
+      asyncio background work so streaming cannot starve the rest.
 
     We select pods by label_selector (run-id=<run_id[:63]>) and wait briefly
     for the pod to appear (the Job scheduler takes a moment to start the pod
@@ -1193,17 +1264,26 @@ class _RealKubeLogClient:
         Each yielded item is one decoded UTF-8 line (no trailing newline).
 
         The urllib3 HTTPResponse returned by read_namespaced_pod_log (with
-        _preload_content=False) exposes resp.stream(amt, decode_content=False)
-        which yields raw byte chunks.  Chunks can split a JSONL line across
-        boundaries; we accumulate a bytes buffer and yield only complete lines.
-        Each blocking chunk read runs in run_in_executor so the asyncio event
-        loop is never blocked.
+        _preload_content=False) exposes resp.read1(amt) which returns
+        immediately with whatever bytes are available (up to amt), releasing
+        the thread between chunks.  This is critical: resp.read(N) blocks
+        until N bytes arrive or the stream closes, holding the thread for the
+        pod's entire lifetime and starving the executor under concurrent runs.
+
+        All blocking calls go to _log_stream_executor (dedicated, 64 workers)
+        rather than the default executor so streaming cannot starve watcher
+        polls or other asyncio background work.
+
+        Chunks can split JSONL lines at any byte boundary; we accumulate a
+        buffer and yield only complete newline-terminated lines.
         """
         import asyncio as _asyncio
 
         loop = _asyncio.get_running_loop()
 
         # Wait up to 30 s for the pod to be created and reach Running.
+        # Pod-list polls use the default executor (short calls) so they don't
+        # compete with the dedicated streaming pool.
         pod_name: str | None = None
         for _ in range(60):
             try:
@@ -1227,7 +1307,8 @@ class _RealKubeLogClient:
 
         # Open the streaming response with follow=True, _preload_content=False.
         # This returns a urllib3.response.HTTPResponse — not a requests.Response.
-        # urllib3.HTTPResponse does NOT have iter_lines(); use .stream() instead.
+        # urllib3.HTTPResponse does NOT have iter_lines(); use .read1() instead.
+        # Opening the response is a short blocking call; use the default executor.
         try:
             resp = await loop.run_in_executor(
                 None,
@@ -1247,7 +1328,11 @@ class _RealKubeLogClient:
             )
             return
 
-        # Line-buffer the urllib3 byte stream.
+        # Line-buffer the urllib3 byte stream using read1.
+        # read1(N) returns immediately with whatever bytes are buffered (up to N),
+        # releasing the executor thread between chunks rather than holding it for
+        # the stream lifetime.  This prevents thread-pool starvation under concurrent
+        # runs where many streamers would otherwise each hold a thread indefinitely.
         # Chunks can split JSONL lines at any byte boundary; we accumulate a
         # buffer and split on b"\n" after each chunk.  A trailing partial line
         # (no newline yet) is kept in the buffer and flushed at stream end.
@@ -1255,8 +1340,8 @@ class _RealKubeLogClient:
         try:
             while True:
                 chunk: bytes | None = await loop.run_in_executor(
-                    None,
-                    lambda: resp.read(self._CHUNK_SIZE),
+                    _log_stream_executor,
+                    lambda: resp.read1(self._CHUNK_SIZE),
                 )
                 if not chunk:
                     # Stream exhausted — flush any final partial line.

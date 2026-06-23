@@ -37,6 +37,7 @@ Security invariants asserted here:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import uuid
@@ -1907,15 +1908,27 @@ def test_backend_factory_k8s_streaming_disabled_when_env_empty() -> None:
 class _FakeUrllib3Response:
     """Minimal urllib3-style HTTPResponse stub for testing _RealKubeLogClient.
 
-    Exposes .read(amt) (the urllib3 API) but deliberately does NOT expose
-    .iter_lines() (the requests.Response API).  This proves the fix does not
-    call the wrong method.
+    Exposes .read1(amt) (the urllib3 non-blocking incremental read) and .read(amt)
+    (for backward compatibility in error-path tests).  Deliberately does NOT expose
+    .iter_lines() (the requests.Response API) — that method does not exist on
+    urllib3.HTTPResponse and calling it would raise AttributeError.
+
+    Tracks which method was called last so tests can assert read1 is preferred.
     """
 
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = list(chunks)
+        self.last_read_method: str = ""
 
     def read(self, amt: int) -> bytes:
+        self.last_read_method = "read"
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    def read1(self, amt: int) -> bytes:
+        """Non-blocking read: returns immediately with whatever is available."""
+        self.last_read_method = "read1"
         if not self._chunks:
             return b""
         return self._chunks.pop(0)
@@ -1928,9 +1941,10 @@ async def test_real_kube_log_client_buffers_chunks_into_complete_lines() -> None
     """_RealKubeLogClient reassembles JSONL lines split across byte chunks.
 
     Root-cause regression: urllib3 HTTPResponse has no iter_lines() — that is a
-    requests.Response method.  The fix uses resp.read(amt) with a line buffer.
-    This test exercises the buffering with chunks that deliberately split JSONL
-    lines at internal byte boundaries, confirming complete lines are reassembled.
+    requests.Response method.  The fix uses resp.read1(amt) (non-blocking) with a
+    line buffer.  This test exercises the buffering with chunks that deliberately
+    split JSONL lines at internal byte boundaries, confirming complete lines are
+    reassembled.  Also asserts that read1() (not read()) is the method used.
     """
     import json as _json
 
@@ -1991,6 +2005,12 @@ async def test_real_kube_log_client_buffers_chunks_into_complete_lines() -> None
     assert parsed1["type"] == "assistant", f"First line wrong: {collected[0]}"
     assert parsed2["type"] == "result", f"Second line wrong: {collected[1]}"
 
+    # The implementation must use read1 (non-blocking), not the blocking read().
+    assert fake_resp.last_read_method == "read1", (
+        f"_RealKubeLogClient must use read1() (non-blocking), not read(). "
+        f"Last call was: {fake_resp.last_read_method!r}"
+    )
+
 
 @pytest.mark.covers("§9.2", "k8s-real-log-client-line-buffering")
 async def test_real_kube_log_client_no_iter_lines_called() -> None:
@@ -2046,7 +2066,7 @@ async def test_real_kube_log_client_no_iter_lines_called() -> None:
 
 @pytest.mark.covers("§9.2", "k8s-real-log-client-stream-error-logged")
 async def test_real_kube_log_client_logs_stream_error(caplog: Any) -> None:
-    """_RealKubeLogClient logs a warning (not silently swallows) when .read() raises.
+    """_RealKubeLogClient logs a warning (not silently swallows) when .read1() raises.
 
     The old code had `except Exception: return` with no logging — failures were
     completely invisible.  The fix logs a warning so the error appears in observability
@@ -2057,9 +2077,9 @@ async def test_real_kube_log_client_logs_stream_error(caplog: Any) -> None:
     from src.ports.execution_backend import _RealKubeLogClient
 
     class _ErrorResponse:
-        """Simulates a urllib3 response whose read() raises mid-stream."""
+        """Simulates a urllib3 response whose read1() raises mid-stream."""
 
-        def read(self, amt: int) -> bytes:
+        def read1(self, amt: int) -> bytes:
             raise RuntimeError("simulated urllib3 stream error")
 
     class _FakeCoreV1Error:
@@ -2147,3 +2167,291 @@ async def test_k8s_backend_stream_pod_log_method_logs_error(caplog: Any) -> None
         "Expected 'pod-log stream failed' warning in log records — "
         f"got: {[r.message for r in caplog.records]}"
     )
+
+
+# ===========================================================================
+# Executor isolation and read1 — dedicated pool prevents thread starvation
+# ===========================================================================
+
+
+@pytest.mark.covers("§9.2", "k8s-log-stream-dedicated-executor")
+async def test_real_kube_log_client_uses_dedicated_executor() -> None:
+    """_RealKubeLogClient uses _log_stream_executor for streaming reads, not the default.
+
+    Root cause of the live starvation bug: the default ThreadPoolExecutor has
+    O(cpu_count) workers.  With follow=True, resp.read(N) blocks its worker for
+    the pod's entire lifetime.  Under concurrent runs the pool fills and additional
+    streamers queue indefinitely, appending zero events with no logged error.
+
+    The fix routes streaming reads to _log_stream_executor (module-level, 64 workers)
+    so streaming cannot saturate the default pool used by the watcher and other work.
+
+    This test asserts that:
+    1. _log_stream_executor is not the default loop executor (None).
+    2. It is a ThreadPoolExecutor with the correct max_workers.
+    3. Its thread_name_prefix is 'orch-log-stream' (identifies it in thread dumps).
+    """
+    from src.ports.execution_backend import (
+        _LOG_STREAM_MAX_WORKERS,
+        _log_stream_executor,
+    )
+
+    # Must not be None (not the default executor)
+    assert _log_stream_executor is not None, (
+        "_log_stream_executor must be a dedicated executor, not None (the default pool)"
+    )
+
+    # Must be a ThreadPoolExecutor
+    assert isinstance(_log_stream_executor, concurrent.futures.ThreadPoolExecutor), (
+        "_log_stream_executor must be a ThreadPoolExecutor"
+    )
+
+    # Must be sized to the declared constant
+    assert _log_stream_executor._max_workers == _LOG_STREAM_MAX_WORKERS, (  # type: ignore[attr-defined]
+        f"_log_stream_executor must have max_workers={_LOG_STREAM_MAX_WORKERS}, "
+        f"got {_log_stream_executor._max_workers}"  # type: ignore[attr-defined]
+    )
+
+    # Thread name prefix must identify these threads in diagnostics
+    assert _log_stream_executor._thread_name_prefix == "orch-log-stream", (  # type: ignore[attr-defined]
+        "Streaming executor threads must be named 'orch-log-stream' for observability"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-stream-read1-not-read")
+async def test_real_kube_log_client_calls_read1_not_blocking_read() -> None:
+    """_RealKubeLogClient calls resp.read1() (non-blocking), not resp.read() (blocking).
+
+    resp.read(N) with follow=True blocks its executor thread until N bytes arrive
+    or the stream closes — the thread is held for the pod's entire lifetime.
+    resp.read1(N) returns immediately with whatever bytes are buffered, releasing
+    the thread between chunks.
+
+    This test provides a response that has BOTH read() and read1() and asserts
+    that only read1() is called (read() must not be called in the streaming loop).
+    """
+    import json as _json
+
+    from src.ports.execution_backend import _RealKubeLogClient
+
+    line = _json.dumps({"type": "result", "subtype": "success", "result": "done"})
+    chunks: list[bytes] = [(line + "\n").encode("utf-8"), b""]
+
+    class _TrackingResponse:
+        """urllib3-style response that tracks which read method is called."""
+
+        def __init__(self) -> None:
+            self._chunks = list(chunks)
+            self.read_calls: list[str] = []
+
+        def read(self, amt: int) -> bytes:
+            self.read_calls.append("read")
+            if not self._chunks:
+                return b""
+            return self._chunks.pop(0)
+
+        def read1(self, amt: int) -> bytes:
+            self.read_calls.append("read1")
+            if not self._chunks:
+                return b""
+            return self._chunks.pop(0)
+
+    tracking_resp = _TrackingResponse()
+
+    class _FakeCoreV1Tracking:
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _Pod:
+                class metadata:
+                    name = "pod-tracking"
+
+            class _List:
+                items = [_Pod()]
+
+            return _List()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            return tracking_resp
+
+    client = _RealKubeLogClient(_FakeCoreV1Tracking())
+
+    collected: list[str] = []
+    async for ln in client.stream_pod_log("test-ns", "run-id=track"):
+        collected.append(ln)
+
+    assert len(collected) == 1, f"Expected 1 line, got {len(collected)}: {collected}"
+
+    # read1 must have been called at least once (non-blocking path used)
+    assert "read1" in tracking_resp.read_calls, (
+        "read1() must be called in the streaming loop — "
+        f"actual calls: {tracking_resp.read_calls}"
+    )
+
+    # blocking read() must NOT have been called in the streaming loop
+    assert "read" not in tracking_resp.read_calls, (
+        "Blocking read() must NOT be called — only non-blocking read1() is acceptable. "
+        f"Actual calls: {tracking_resp.read_calls}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-stream-done-callback-logs-exception")
+async def test_background_task_done_callback_logs_exception(caplog: Any) -> None:
+    """Done callbacks on watcher and streamer tasks log unhandled exceptions.
+
+    Previously, add_done_callback(task_set.discard) swallowed all exceptions
+    silently.  The fix uses _make_task_done_callback which logs task.exception()
+    at ERROR level if the task completed with an unhandled exception.
+
+    This test spawns a task that raises, attaches the done-callback, and asserts
+    the error appears in the log.
+    """
+    import logging as _logging
+
+    from src.ports.execution_backend import _make_task_done_callback
+
+    tasks: set[asyncio.Task[None]] = set()
+
+    async def _failing_task() -> None:
+        raise RuntimeError("injected background task failure")
+
+    task: asyncio.Task[None] = asyncio.create_task(_failing_task(), name="test-failing")
+    tasks.add(task)
+    task.add_done_callback(_make_task_done_callback(tasks, "test-failing"))
+
+    with caplog.at_level(_logging.ERROR, logger="src.ports.execution_backend"):
+        # Wait for the task to complete and the callback to fire.
+        await asyncio.sleep(0.05)
+
+    # Task must be removed from the set by the callback.
+    assert task not in tasks, "Done callback must discard the task from the tracking set"
+
+    # Exception must be logged — not swallowed.
+    assert any(
+        "injected background task failure" in r.message or "test-failing" in r.message
+        for r in caplog.records
+    ), (
+        "Done callback must log the task exception at ERROR level — "
+        f"got log records: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-stream-done-callback-no-log-on-success")
+async def test_background_task_done_callback_no_log_on_success(caplog: Any) -> None:
+    """Done callback does NOT log when the task completes successfully.
+
+    The exception-logging callback must only fire on actual exceptions, not on
+    normal completion or cancellation — no spurious error logs on clean shutdown.
+    """
+    import logging as _logging
+
+    from src.ports.execution_backend import _make_task_done_callback
+
+    tasks: set[asyncio.Task[None]] = set()
+
+    async def _success_task() -> None:
+        pass  # completes without raising
+
+    task: asyncio.Task[None] = asyncio.create_task(_success_task(), name="test-success")
+    tasks.add(task)
+    task.add_done_callback(_make_task_done_callback(tasks, "test-success"))
+
+    with caplog.at_level(_logging.ERROR, logger="src.ports.execution_backend"):
+        await asyncio.sleep(0.05)
+
+    # No error log on successful completion.
+    assert not any(
+        r.levelno >= _logging.ERROR for r in caplog.records
+    ), (
+        "Done callback must NOT log on successful task completion — "
+        f"got error records: {[r.message for r in caplog.records if r.levelno >= _logging.ERROR]}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-stream-concurrent-streamers")
+async def test_multiple_concurrent_streamers_all_receive_events() -> None:
+    """Multiple concurrent K8sJobBackend log streamers all produce events.
+
+    This is the concurrency regression test: with the OLD code (blocking read()
+    on the default executor), concurrent streamers would starve each other and
+    produce zero events.  With the fix (read1 + dedicated executor), all
+    concurrent streamers complete and each appends events to its run's store.
+
+    We simulate N simultaneous dispatches where each has a log client that
+    yields a single JSONL result line.  All N must produce at least one event.
+    """
+    import json as _json
+
+    CONCURRENT_RUNS = 8
+
+    from src.ports.execution_backend import FakeKubeLogClient
+
+    # Each run gets its own store and fake log client with one result line.
+    result_line = _json.dumps({"type": "result", "subtype": "success", "result": "ok"})
+
+    stores: list[RunEventStore] = []
+    backends: list[K8sJobBackend] = []
+    run_ids: list[str] = []
+
+    for _ in range(CONCURRENT_RUNS):
+        run_id = _run_id()
+        run_ids.append(run_id)
+
+        store = RunEventStore()
+        store.register(run_id)
+        stores.append(store)
+
+        log_client = FakeKubeLogClient()
+        log_client.configure_log_lines([result_line])
+
+        fake_kube = FakeKubeClient()
+        job_name = f"orch-agent-{run_id[:16]}"
+        fake_kube.configure_job_outcome(
+            job_name,
+            statuses=[{"metadata": {"name": job_name}, "status": {"succeeded": 1}}],
+        )
+
+        backend = K8sJobBackend(
+            image="ghcr.io/test/runner:test",
+            namespace="test-ns",
+            kube_client=fake_kube,
+            kube_log_client=log_client,
+            poll_interval_s=0.001,
+            job_timeout_s=10.0,
+        )
+        backends.append(backend)
+
+    harness = _make_fake_harness()
+
+    # Dispatch all runs concurrently.
+    await asyncio.gather(*[
+        backend.dispatch(
+            run_id=run_id,
+            repo_owner="acme",
+            repo_name="myrepo",
+            branch=None,
+            claude_args=["claude", "-p", "x"],
+            child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+            allowed_agent_refs=None,
+            contract="agents/implementer.md",
+            event_store=store,
+            harness=harness,
+        )
+        for backend, run_id, store in zip(backends, run_ids, stores)
+    ])
+
+    # Allow background tasks time to run.
+    await asyncio.sleep(0.2)
+
+    # Every run must have received at least one transcript event from the streamer.
+    for i, (run_id, store) in enumerate(zip(run_ids, stores)):
+        events = store.get_events(run_id)
+        transcript_events = [
+            e for e in events
+            if e.event_type in {"agent_message", "agent_tool_use", "agent_result", "agent_thinking"}
+        ]
+        assert transcript_events, (
+            f"Run {i} (run_id={run_id[:8]}) received zero transcript events — "
+            "concurrent streamers must not starve each other. "
+            f"All event types for this run: {[e.event_type for e in events]}"
+        )
