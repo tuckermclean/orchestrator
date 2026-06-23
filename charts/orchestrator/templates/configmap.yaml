@@ -11,6 +11,10 @@ data:
   GITHUB_REPO: {{ .Values.config.GITHUB_REPO | quote }}
   # Comma-separated GitHub login allowlist (empty = owner-only default-deny, issue #48)
   ALLOWLIST: {{ .Values.config.ALLOWLIST | quote }}
+  # Bot's own GitHub login — the @-mention trigger for comment dispatch is "@<this>"
+  # (e.g. "@orecchiette1111"); empty falls back to "@claude". Also used to filter the
+  # bot's own comments (self-trigger loop prevention). SPEC §11.1.
+  GITHUB_BOT_LOGIN: {{ .Values.config.GITHUB_BOT_LOGIN | quote }}
   # Reconciler schedule (must match RECONCILER_CRON constant in SPEC §7)
   RECONCILE_CRON: {{ .Values.config.RECONCILE_CRON | quote }}
   # delivery-ID dedup LRU window size
