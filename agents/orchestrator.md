@@ -123,8 +123,14 @@ a failing gate will receive a blocker from the converge reviewer (`TESTING.md §
 
 When the gate is fully green:
 
-1. Add the `LABEL_CONVERGE` (`"converge"`) label to the PR (`SPEC.md §7`).
-2. Call `gh pr ready` to convert the draft to ready-for-review.
+1. Verify the implementer has updated the PR body (implementer Step 6). The body must
+   contain `Closes #N` plus the substantive summary. If the body is still the initial
+   one-liner placeholder, the implementer did not complete Step 6 — do not mark the PR
+   ready; instead, iterate with the implementer to produce the required body.
+   The PR body is the operator's primary record of what was built; a one-liner body is
+   a handoff failure. Do NOT post chatty progress comments yourself on the success path.
+2. Add the `LABEL_CONVERGE` (`"converge"`) label to the PR (`SPEC.md §7`).
+3. Call `gh pr ready` to convert the draft to ready-for-review.
 
 This is transition P2 (`SPEC.md §3`). Both the `pull_request:ready_for_review` event and
 `labeled:converge` fire; having the label present first ensures idempotency.

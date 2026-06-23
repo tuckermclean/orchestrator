@@ -62,6 +62,13 @@ Notes: `agent:implementing` is not removed when a PR is marked ready. A ready/co
 0-diff PR always escalates (D4). A stale draft 0-diff (crashed agent) is RC-1-eligible
 when `is_draft AND agent:converge ∉ labels AND stale`.
 
+> **PR body content (P2 handoff).** The initial draft PR body (P1) contains only
+> `Closes #N`. Before marking the PR ready (P2), the implementer agent must update the
+> body to include a substantive summary: what was implemented, key decisions/assumptions,
+> and notable files changed. `Closes #N` must remain present. See `agents/implementer.md
+> Step 6` for the required format. The engine's `get_closing_issue` parser reads only the
+> `Closes #N` token and is unaffected by additional body content.
+
 ---
 
 ## §3 Transition Tables
