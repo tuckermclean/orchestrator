@@ -34,7 +34,7 @@ Fail-closed semantics (SECURITY.md §3 I9):
   - Only if all checks pass                                 → ALLOW (exit 0).
 
 Allow-set is injected as a comma-separated env var:
-  ORCHESTRATOR_ALLOWED_AGENT_REFS=engineering-security-engineer.md,engineering-code-reviewer.md
+  ORCHESTRATOR_ALLOWED_AGENT_REFS=security-appsec-engineer.md,engineering-code-reviewer.md
 
 The env var is populated by the harness from DispatchContext.allowed_agent_refs at
 dispatch time.  An empty string ("") means an empty allow-set (deny all Task spawns).
@@ -62,7 +62,7 @@ def _parse_agent_ref(prompt: str) -> str | None:
     """Extract the AgentRef from the prompt string.
 
     Looks for the first ".agents/<ref>" occurrence.  Returns the ref
-    (e.g. "engineering-security-engineer.md") or None if absent.
+    (e.g. "security-appsec-engineer.md") or None if absent.
     """
     m = _AGENT_REF_RE.search(prompt)
     if m:
@@ -107,14 +107,19 @@ def main() -> int:
     # 5. Require subagent_type == "general-purpose" — any other type is DENIED.
     # Specialist spawns per AGENTS.md §7.4 ALWAYS use "general-purpose"; a different
     # subagent_type is either a misconfigured spawn or an injection attempt.
+    _ACTIONABLE_RETRY_HINT = (
+        "I9 hook: spawn DENIED — specialist spawns MUST call the Task tool with\n"
+        'subagent_type: "general-purpose" and embed the AgentRef in the prompt as\n'
+        '".agents/<agent_ref>" (e.g. "Act as the agent defined in '
+        '.agents/engineering-code-reviewer.md. Read that file first.").\n'
+        'Retry this spawn with subagent_type="general-purpose".\n'
+    )
     subagent_type = tool_input.get("subagent_type")
     if subagent_type is None:
-        sys.stderr.write("I9 hook: subagent_type absent from tool_input — spawn DENIED\n")
+        sys.stderr.write(_ACTIONABLE_RETRY_HINT)
         return 2
     if subagent_type != _REQUIRED_SUBAGENT_TYPE:
-        sys.stderr.write(
-            f"I9 hook: subagent_type '{subagent_type}' is not 'general-purpose' — spawn DENIED\n"
-        )
+        sys.stderr.write(_ACTIONABLE_RETRY_HINT)
         return 2
 
     # 6. Parse the AgentRef from the prompt's ".agents/<AgentRef>" marker.

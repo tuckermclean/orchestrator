@@ -171,7 +171,7 @@ def test_decide_specialists_auth_path() -> None:
     """Auth path → security via base set, no duplicate, no extra routing addition."""
     result = decide_specialists(["auth/login.py"], 1)
     assert result == _BASE
-    assert result.count("engineering-security-engineer.md") == 1
+    assert result.count("security-appsec-engineer.md") == 1
 
 
 @pytest.mark.covers("§8.12", "security-base-dedup")
@@ -209,7 +209,7 @@ def test_decide_specialists_components_subdir_path() -> None:
 def test_decide_specialists_security_not_duplicated() -> None:
     """A security-bearing path plus an unrelated path → security appears exactly once."""
     result = decide_specialists(["auth/crypto.py", "src/main.py"], 1)
-    assert result.count("engineering-security-engineer.md") == 1
+    assert result.count("security-appsec-engineer.md") == 1
 
 
 @pytest.mark.covers("§8.12", "security-base-dedup")

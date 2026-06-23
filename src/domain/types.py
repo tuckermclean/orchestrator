@@ -248,7 +248,7 @@ PROTECTED_PATHS = [
 # ---------------------------------------------------------------------------
 
 CONVERGE_REVIEW_BASE = [
-    "engineering-security-engineer.md",
+    "security-appsec-engineer.md",
     "engineering-code-reviewer.md",
 ]
 

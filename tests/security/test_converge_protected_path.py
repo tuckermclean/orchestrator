@@ -42,7 +42,7 @@ _MATCHING_PATHS = [
     "ARCHITECTURE.md",  # bare filename at root
     "SECURITY.md",  # bare filename at root
     "COMPLIANCE.md",  # bare filename at root
-    ".agents/engineering-security-engineer.md",  # .agents/**
+    ".agents/security-appsec-engineer.md",  # .agents/**
     "agents/converge-reviewer.md",  # agents/**
 ]
 
