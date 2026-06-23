@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, type RunSummary } from "../api";
+import { api, modelLabel, type RunSummary } from "../api";
 
 const statusColor: Record<string, string> = {
   completed: "#3fb950",
@@ -79,8 +79,23 @@ export default function Runs() {
           <Link key={run.run_id} to={`/runs/${run.run_id}`} style={card}>
             <div>
               <div style={{ fontWeight: 600, marginBottom: "4px" }}>{run.run_id}</div>
-              <div style={{ fontSize: "13px", color: "#8b949e" }}>
-                {run.type} · {run.repo.owner}/{run.repo.name}
+              <div style={{ fontSize: "13px", color: "#8b949e", display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>{run.type} · {run.repo.owner}/{run.repo.name}</span>
+                {modelLabel(run.model) && (
+                  <span
+                    style={{
+                      background: "#21262d",
+                      border: "1px solid #30363d",
+                      borderRadius: "4px",
+                      color: "#b1bac4",
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      padding: "1px 6px",
+                    }}
+                  >
+                    {modelLabel(run.model)}
+                  </span>
+                )}
               </div>
               <div style={{ fontSize: "12px", color: "#6e7681", marginTop: "4px" }}>
                 Started: {new Date(run.started_at).toLocaleString()}

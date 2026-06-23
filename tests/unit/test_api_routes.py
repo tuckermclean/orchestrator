@@ -188,6 +188,45 @@ def test_list_runs_empty_registry_returns_empty_list() -> None:
     assert resp.json() == []
 
 
+def test_runs_surface_dispatched_model() -> None:
+    """GET /api/runs and /api/runs/{id} include the per-run dispatched model.
+
+    The orchestrator entry run is recorded with ADJUDICATION_MODEL (Opus) and a
+    swarm role with DEFAULT_SWARM_MODEL (Sonnet); both must reflect on the API
+    response models (RunSummary / RunDetail) — the gap this change closes is that
+    the model column was stored in the DB but dropped by the response models.
+    """
+    from datetime import UTC, datetime
+
+    from src.domain.types import ADJUDICATION_MODEL, DEFAULT_SWARM_MODEL
+
+    reg = FakeRepoRegistry([RepoConfig(repo=_PROD_REPO_REF)])
+    client, service = _make_client(reg)
+
+    now = datetime.now(tz=UTC)
+    service._run_store.record(
+        "run-opus", _PROD_REPO_REF, type="orchestrator", model=ADJUDICATION_MODEL, started_at=now
+    )
+    service._run_store.record(
+        "run-sonnet", _PROD_REPO_REF, type="triager", model=DEFAULT_SWARM_MODEL, started_at=now
+    )
+
+    with patch.dict(os.environ, {"OPERATOR_SECRET_KEY": _TEST_OPERATOR_SECRET}):
+        list_resp = client.get("/api/runs", headers=_auth_headers())
+        opus_resp = client.get("/api/runs/run-opus", headers=_auth_headers())
+        sonnet_resp = client.get("/api/runs/run-sonnet", headers=_auth_headers())
+
+    assert list_resp.status_code == 200
+    by_id = {r["run_id"]: r for r in list_resp.json()}
+    assert by_id["run-opus"]["model"] == ADJUDICATION_MODEL
+    assert by_id["run-sonnet"]["model"] == DEFAULT_SWARM_MODEL
+
+    assert opus_resp.status_code == 200
+    assert opus_resp.json()["model"] == ADJUDICATION_MODEL
+    assert sonnet_resp.status_code == 200
+    assert sonnet_resp.json()["model"] == DEFAULT_SWARM_MODEL
+
+
 # ---------------------------------------------------------------------------
 # GET /api/triage — resolves from registry
 # ---------------------------------------------------------------------------

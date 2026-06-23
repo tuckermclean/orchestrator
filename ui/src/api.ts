@@ -20,12 +20,24 @@ export interface RunSummary {
   status: string;
   started_at: string;
   completed_at: string | null;
+  model?: string | null;
 }
 
 export interface RunEvent {
   event_type: string;
   data: Record<string, unknown>;
   timestamp: string;
+}
+
+// Map a raw dispatch model id to a short friendly label for display.
+// Unmapped / empty / null ids fall back to the raw string (or "" for null),
+// so the UI never crashes on an unknown or missing model.
+export function modelLabel(model: string | null | undefined): string {
+  if (!model) return "";
+  if (model === "claude-opus-4-8") return "Opus 4.8";
+  if (model === "claude-sonnet-4-6") return "Sonnet 4.6";
+  if (model.startsWith("claude-haiku-4-5")) return "Haiku 4.5";
+  return model;
 }
 
 export interface RunDetail extends RunSummary {

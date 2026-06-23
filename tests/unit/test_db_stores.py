@@ -8,7 +8,9 @@ Covers requirements from issue #80:
 
 from __future__ import annotations
 
+import asyncio
 import os
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -310,3 +312,36 @@ async def test_sqlite_counter_store_close_idempotent() -> None:
     await store.init()
     await store.close()
     await store.close()  # must not raise
+
+
+async def test_sqlite_run_store_model_round_trips() -> None:
+    """SQLiteRunStore persists the dispatched model and surfaces it on list/get.
+
+    The empty-string default (unknown model) is normalised to None so the API
+    never reports a bogus empty model string.
+    """
+    from src.db.run_store import SQLiteRunStore
+    from src.domain.types import ADJUDICATION_MODEL, RepoRef
+
+    store = SQLiteRunStore(":memory:")
+    await store.init()
+    try:
+        repo = RepoRef(owner="acme", name="service")
+        now = datetime.now(tz=UTC)
+        store.record(
+            "run-opus", repo, type="orchestrator", model=ADJUDICATION_MODEL, started_at=now
+        )
+        store.record("run-unknown", repo, type="triager", model="", started_at=now)
+        # Flush the fire-and-forget async writes scheduled by record().
+        await asyncio.gather(*store._tasks)
+
+        runs = await store.list_runs(repo)
+        by_id = {r.run_id: r for r in runs}
+        assert by_id["run-opus"].model == ADJUDICATION_MODEL
+        assert by_id["run-unknown"].model is None
+
+        detail = await store.get_run("run-opus")
+        assert detail is not None
+        assert detail.model == ADJUDICATION_MODEL
+    finally:
+        await store.close()

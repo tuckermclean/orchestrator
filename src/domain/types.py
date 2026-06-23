@@ -171,6 +171,7 @@ class RunSummary(BaseModel):
     status: str
     started_at: datetime
     completed_at: datetime | None = None
+    model: str | None = None  # dispatched model id (e.g. "claude-opus-4-8"); None on older rows
 
 
 class RunEvent(BaseModel):
@@ -186,6 +187,7 @@ class RunDetail(BaseModel):
     status: str
     started_at: datetime
     completed_at: datetime | None = None
+    model: str | None = None  # dispatched model id (e.g. "claude-opus-4-8"); None on older rows
     events: list[RunEvent] = []
     # Optional forge-enriched fields (populated by OrchestratorService.get_run)
     pr_ref: PRRef | None = None
