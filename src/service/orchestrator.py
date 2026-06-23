@@ -30,6 +30,7 @@ from src.domain.types import (
     RunStatus,
     RunSummary,
     TriageItem,
+    Verdict,
 )
 from src.engine.dispatch import Engine
 from src.engine.intake import IntakeEngine
@@ -164,6 +165,9 @@ class RunRecordingHarness:
 
     async def cancel(self, handle: RunHandle) -> None:
         await self._harness.cancel(handle)
+
+    async def get_run_verdict(self, handle: RunHandle) -> Verdict | None:
+        return await self._harness.get_run_verdict(handle)
 
 
 def _extract_repo(payload: dict[str, object]) -> RepoRef | None:

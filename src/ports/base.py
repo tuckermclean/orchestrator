@@ -21,6 +21,7 @@ from src.domain.types import (
     RunHandle,
     RunStatus,
     RunSummary,
+    Verdict,
 )
 
 
@@ -114,6 +115,14 @@ class HarnessPort(Protocol):
     async def get_run_status(self, handle: RunHandle) -> RunStatus: ...
 
     async def cancel(self, handle: RunHandle) -> None: ...
+
+    async def get_run_verdict(self, handle: RunHandle) -> Verdict | None:
+        """Return the structured verdict extracted from a completed reviewer run.
+
+        Returns None when the run produced no parseable verdict (crash fail-safe).
+        The engine treats None as "unknown" blockers (SPEC §5).
+        """
+        ...
 
 
 @runtime_checkable

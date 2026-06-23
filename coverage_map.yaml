@@ -14,14 +14,14 @@
     tests: ["test_route_entry_empty_string"]
 
 "§8.2":  # resolve_blockers
-  "row-1-file-present-not-sentinel":
-    tests: ["test_resolve_blockers_row1_from_json", "test_resolve_blockers_row1_zero", "test_resolve_blockers_row1_non_numeric_blockers_unknown", "test_resolve_blockers_json_blockers_null", "test_resolve_blockers_json_blockers_string", "test_resolve_blockers_json_blockers_false"]
+  "row-1-verdict-present-not-sentinel":
+    tests: ["test_resolve_blockers_row1_from_json", "test_resolve_blockers_row1_zero", "test_resolve_blockers_row1_bool_blockers_unknown"]
   "row-2-sentinel-round-started":
     tests: ["test_resolve_blockers_row2_footer_in_round", "test_resolve_blockers_row2_filters_stale_footer"]
   "row-3-sentinel-no-round-started":
     tests: ["test_resolve_blockers_row3_footer_any_age", "test_resolve_blockers_sentinel_unscoped_fallback"]
   "row-4-no-footer-unknown":
-    tests: ["test_resolve_blockers_row4_no_footer_unknown", "test_resolve_blockers_row4_comment_without_footer"]
+    tests: ["test_resolve_blockers_row4_no_footer_unknown", "test_resolve_blockers_row4_comment_without_footer", "test_resolve_blockers_no_verdict_no_footer_unknown"]
 
 "§8.2a":  # CounterStore — counter reads and increments (SPEC §8.2a)
   "get-increment-reset":

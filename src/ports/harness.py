@@ -72,6 +72,7 @@ from src.domain.types import (
     RunEvent,
     RunHandle,
     RunStatus,
+    Verdict,
 )
 
 _log = logging.getLogger(__name__)
@@ -199,6 +200,13 @@ class RunEventStore:
       invoked synchronously (the sink must not block the event loop).
       RunRecordingHarness uses this to propagate live status into the run_store
       so list_runs/get_run always reflect the real run state.
+
+    Verdict storage (SPEC §5, §8.2):
+      When a converge reviewer run completes, the backend watcher calls
+      store_verdict(run_id, verdict) with the Verdict extracted from the run's
+      event stream.  Engine.converge reads it via get_verdict(run_id).  None
+      means no parseable verdict was found (reviewer crashed — engine treats
+      this as "unknown" blockers).
     """
 
     def __init__(self) -> None:
@@ -208,12 +216,15 @@ class RunEventStore:
         self._queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
         # Per-run status sinks registered by RunRecordingHarness (issue #101).
         self._status_sinks: dict[str, StatusSink] = {}
+        # Per-run structured verdicts extracted from reviewer output (SPEC §5).
+        self._verdicts: dict[str, Verdict | None] = {}
 
     def register(self, run_id: str) -> None:
         """Initialise storage for a new run."""
         self._events[run_id] = []
         self._statuses[run_id] = RunStatus(state="queued")
         self._queues[run_id] = asyncio.Queue()
+        self._verdicts[run_id] = None
 
     def register_status_sink(self, run_id: str, sink: StatusSink) -> None:
         """Register a callback that is invoked synchronously on every set_status call.
@@ -265,6 +276,25 @@ class RunEventStore:
     def get_queue(self, run_id: str) -> asyncio.Queue[RunEvent | None] | None:
         """Return the live event queue for SSE streaming (Step 9)."""
         return self._queues.get(run_id)
+
+    def store_verdict(self, run_id: str, verdict: Verdict | None) -> None:
+        """Store the structured verdict extracted from a reviewer run's output.
+
+        Called by the backend watcher after the run completes.  ``None`` means
+        no parseable verdict block was found (reviewer crashed or omitted it).
+        The engine reads the verdict via ``get_verdict`` to avoid committing
+        scratch state to the PR branch (SPEC §5, §8.2).
+        """
+        self._verdicts[run_id] = verdict
+
+    def get_verdict(self, run_id: str) -> Verdict | None:
+        """Return the stored verdict for a completed run, or None if absent.
+
+        Returns ``None`` both when the run is unknown and when no verdict was
+        extracted (crash fail-safe — the engine treats None as ``"unknown"``
+        blockers per SPEC §5).
+        """
+        return self._verdicts.get(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +901,18 @@ class ClaudeCodeHarnessPort:
         if handle.run_id not in self._event_store._statuses:
             return RunStatus(state="completed", conclusion="failure")
         return self._event_store.get_status(handle.run_id)
+
+    async def get_run_verdict(self, handle: RunHandle) -> Verdict | None:
+        """Return the structured verdict extracted from a completed reviewer run.
+
+        Returns ``None`` when the run produced no parseable verdict block (the
+        reviewer crashed or omitted its output).  The engine treats ``None`` as
+        ``"unknown"`` blockers (SPEC §5 crash fail-safe).
+
+        Must only be called after the run reaches a completed state; calling it
+        on an in-progress run returns ``None`` (no verdict extracted yet).
+        """
+        return self._event_store.get_verdict(handle.run_id)
 
     async def cancel(self, handle: RunHandle) -> None:
         """Terminate the run and clean up (idempotent).

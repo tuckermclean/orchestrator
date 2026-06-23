@@ -4,6 +4,17 @@ Implements the complete converge loop: happy-path approve, fix (R1/R2), and all 
 paths: no-progress (E2), no-verdict (E3), ci-red (E4), cap-reached (E5), fixer-timeout (E11).
 Protected-path (E1) and empty-diff (E6) gates are also implemented.
 
+Verdict channel (SPEC §5, §8.2)
+--------------------------------
+The reviewer emits its ``Verdict`` as a fenced JSON block in its final message.  The harness
+captures it from the run's event stream (``RunEventStore``); the engine reads it via
+``harness.get_run_verdict(reviewer_handle)`` — no file is committed to the PR branch.
+
+If no parseable verdict is found (reviewer crashed / omitted output), ``get_run_verdict``
+returns ``None``.  ``resolve_blockers`` treats ``None`` as the absent-verdict case and falls
+back to the comment-footer heuristic; if no footer exists either, it returns ``"unknown"``,
+which routes to the P11 no-verdict retry path or E3 escalation (crash fail-safe, SPEC §5).
+
 CI green definition (SPEC §7)
 ------------------------------
 ``ci_green`` is true iff every check run present on the PR is completed and green
@@ -40,8 +51,6 @@ from src.domain.types import (
     NO_VERDICT_RETRY_CAP,
     POLL_INTERVAL_S,
     PROTECTED_PATHS,
-    SENTINEL_SIGNATURE,
-    SENTINEL_VERDICT,
     CheckRun,
     DispatchContext,
     PRRef,
@@ -52,7 +61,6 @@ from src.domain.types import (
 if TYPE_CHECKING:
     from src.engine.dispatch import Engine
 
-_VERDICT_PATH = ".converge-verdict.json"
 _CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
 _CONVERGE_FIXER_CONTRACT = "agents/converge-fixer.md"
 _REVIEWER_MAX_TURNS = 60
@@ -87,20 +95,11 @@ def _any_checks_pending(checks: list[CheckRun]) -> bool:
 
 
 def _normalize_sigs(sigs: list[str]) -> list[str]:
+    """Strip the sentinel signature so prev/curr comparison is against real slugs."""
+    from src.domain.types import SENTINEL_SIGNATURE
     if sigs == [SENTINEL_SIGNATURE]:
         return []
     return sigs
-
-
-async def _read_verdict(engine: Engine, pr_ref: PRRef) -> Verdict:
-    """Read .converge-verdict.json from the PR branch; sentinel if absent/unparseable."""
-    raw = await engine.forge.get_file_contents(pr_ref, _VERDICT_PATH)
-    if raw is None:
-        return SENTINEL_VERDICT
-    try:
-        return Verdict.model_validate_json(raw)
-    except ValueError:
-        return SENTINEL_VERDICT
 
 
 async def _poll_checks_until_complete(
@@ -147,6 +146,10 @@ async def converge(
     present check must be completed and green (SPEC §7 CI green definition).
     Pending checks are awaited (up to ``CI_WAIT_S``) before the approve/escalate
     decision is made.  A PR with no check runs at all is vacuously green.
+
+    The reviewer's ``Verdict`` is read from the harness run result via
+    ``harness.get_run_verdict(reviewer_handle)`` — no file is committed to the PR
+    branch (SPEC §5 structured-output channel).
     """
     assert engine.converge_state is not None, "converge requires a ConvergeStateStore"
     forge = engine.forge
@@ -181,19 +184,13 @@ async def converge(
     # Step 4 — converge loop.
     start = await converge_state.get_converge_round(pr_ref) + 1
     accumulated_nits: list[str] = []
+    # prev_sigs is tracked in-memory across rounds; no branch files needed.
+    prev_sigs: list[str] = []
 
     for r in range(start, CONVERGE_ROUNDS + 1):
         round_literal = cast("Literal[1, 2, 3]", r)
         round_started = datetime.now(tz=UTC)
         await converge_state.set_round_started(pr_ref, round_started)
-
-        # Seed init sentinel BEFORE dispatching the reviewer (crash fail-safe).
-        await forge.put_file_on_branch(
-            pr_ref,
-            _VERDICT_PATH,
-            SENTINEL_VERDICT.model_dump_json().encode(),
-            "chore: init converge sentinel",
-        )
 
         specialist_refs = decide_specialists(changed_paths, r)
         model = ADJUDICATION_MODEL if r == CONVERGE_ROUNDS else DEFAULT_SWARM_MODEL
@@ -213,26 +210,27 @@ async def converge(
         await converge_state.set_last_run_handle(pr_ref, reviewer_handle)
         await engine._await_run(reviewer_handle)
 
+        # Read the verdict from the run result (structured output channel, SPEC §5).
+        # get_run_verdict returns None when the reviewer crashed or omitted the block.
+        verdict: Verdict | None = await engine.harness.get_run_verdict(reviewer_handle)
+
         # Wait for any pending checks to complete before computing ci_green (SPEC §7).
         checks = await _poll_checks_until_complete(engine, pr_ref)
         ci_green = _all_checks_green(checks)
 
-        blockers = await resolve_blockers(forge, pr_ref, r, round_started)
-        verdict = await _read_verdict(engine, pr_ref)
-        curr_sigs = _normalize_sigs(verdict.blocker_signatures)
-        prev_sigs: list[str] = []
-        if r > 1:
-            prev_raw = await forge.get_file_contents(
-                pr_ref, f".converge-verdict-r{r - 1}.json"
-            )
-            if prev_raw is not None:
-                try:
-                    prev_sigs = _normalize_sigs(
-                        Verdict.model_validate_json(prev_raw).blocker_signatures
-                    )
-                except ValueError:
-                    prev_sigs = []
-        accumulated_nits.extend(verdict.nits)
+        # resolve_blockers reads blockers from the verdict (Row 1) or falls back to
+        # the comment-footer heuristic when verdict is None (Rows 2–4, SPEC §8.2).
+        blockers = await resolve_blockers(forge, pr_ref, r, round_started, verdict)
+
+        # Extract signatures for no-progress detection.
+        # prev_sigs is carried in-memory from the previous round; r==1 → [].
+        if verdict is not None:
+            curr_sigs = _normalize_sigs(verdict.blocker_signatures)
+        else:
+            curr_sigs = []
+
+        if verdict is not None:
+            accumulated_nits.extend(verdict.nits)
 
         token = decide_round(round_literal, blockers, ci_green, prev_sigs, curr_sigs)
 
@@ -246,9 +244,8 @@ async def converge(
         if not is_no_verdict_retry:
             await converge_state.set_converge_round(pr_ref, r)
 
-        await forge.copy_file_on_branch(
-            pr_ref, _VERDICT_PATH, f".converge-verdict-r{r}.json"
-        )
+        # Advance prev_sigs for the next round (in-memory, not committed to branch).
+        prev_sigs = curr_sigs
 
         # Act on token.
         if token == "approve":

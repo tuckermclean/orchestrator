@@ -438,10 +438,11 @@ class FakeHarnessPort:
         self._event_queues: dict[str, asyncio.Queue[RunEvent | None]] = {}
         self._last_context: DispatchContext | None = None
         self._session: FakeSessionPort | None = session
-        # When wired, reviewer dispatches write a verdict to the forge branch (and post
-        # the footer comment) so Engine.converge can read a real round outcome.
+        # Kept for tests that still wire a forge (e.g. comment-footer tests).
         self._forge: FakeForgePort | None = forge
+        # Per-reviewer-dispatch verdicts: stored by run_id (structured-output channel).
         self._verdict_script: list[Verdict] = []
+        self._verdicts: dict[str, Verdict | None] = {}
         # When True, dispatched runs stay "in_progress" (never auto-complete) so the
         # Engine's _await_run hits its CI_WAIT_S timeout — exercises the cancel path.
         self.never_completes: bool = False
@@ -460,13 +461,13 @@ class FakeHarnessPort:
         self.cancel_calls: list[RunHandle] = []
 
     def script_reviewer_verdicts(self, *verdicts: Verdict) -> None:
-        """Queue verdicts emitted (one per reviewer dispatch) to the wired forge branch.
+        """Queue verdicts emitted (one per reviewer dispatch) via the structured-output channel.
 
-        Each reviewer-contract dispatch consumes the next queued verdict, overwriting the
-        init sentinel on `.converge-verdict.json` and posting the matching footer comment.
+        Each reviewer-contract dispatch consumes the next queued verdict and stores it
+        in the per-run verdict map (``_verdicts[run_id]``) so ``get_run_verdict`` returns
+        it.  When a forge is wired, the matching footer comment is also posted so tests
+        that exercise the comment-footer fallback path (SPEC §8.2 rows 2–4) still work.
         """
-        if self._forge is None:
-            raise ValueError("script_reviewer_verdicts requires a wired FakeForgePort")
         self._verdict_script = list(verdicts)
 
     def script_fixer_timeout(self, *, after_n_dispatches: int = 0) -> None:
@@ -491,31 +492,42 @@ class FakeHarnessPort:
             raise ValueError("script_trigger_ci_checks requires a wired FakeForgePort")
         self._trigger_ci_check_scripts = list(check_lists)
 
-    def _emit_verdict(self, context: DispatchContext) -> None:
-        """If this is a reviewer dispatch and a verdict is queued, write it to the forge."""
-        if self._forge is None or not self._verdict_script:
-            return
+    def _emit_verdict(self, run_id: str, context: DispatchContext) -> None:
+        """If this is a reviewer dispatch, store the next queued verdict by run_id.
+
+        Stores the verdict in ``_verdicts[run_id]`` so ``get_run_verdict`` can
+        return it — this is the structured-output channel (SPEC §5, §8.2).
+
+        When a forge is wired, the matching footer comment is also posted so tests
+        that exercise the comment-footer fallback path (SPEC §8.2 rows 2–4) still work.
+        Non-reviewer dispatches leave ``_verdicts[run_id]`` as ``None``.
+        """
         if context.contract != _CONVERGE_REVIEWER_CONTRACT or context.pr_ref is None:
+            # Non-reviewer dispatch: no verdict.
+            self._verdicts[run_id] = None
+            return
+        if not self._verdict_script:
+            # Reviewer dispatch with empty script: no verdict (simulates crash).
+            self._verdicts[run_id] = None
             return
         verdict = self._verdict_script.pop(0)
-        pr_ref = context.pr_ref
-        key = self._forge._pr_key(pr_ref)
-        self._forge._files.setdefault(key, {})[".converge-verdict.json"] = (
-            verdict.model_dump_json().encode()
-        )
-        footer = (
-            f"🔴 {verdict.blockers} blockers | 🟡 {verdict.suggestions} suggestions | "
-            f"💬 {len(verdict.nits)} nits"
-        )
-        comment_key = self._forge._entity_key(pr_ref)
-        self._forge._comments.setdefault(comment_key, []).append(
-            Comment(
-                id=str(len(self._forge._comments.get(comment_key, [])) + 1),
-                body=f"## Converge Review\n{footer}",
-                created_at=datetime.now(tz=UTC),
-                author="converge-reviewer",
+        self._verdicts[run_id] = verdict
+        # Also post the footer comment when a forge is wired (supports fallback tests).
+        if self._forge is not None and context.pr_ref is not None:
+            pr_ref = context.pr_ref
+            footer = (
+                f"🔴 {verdict.blockers} blockers | 🟡 {verdict.suggestions} suggestions | "
+                f"💬 {len(verdict.nits)} nits"
             )
-        )
+            comment_key = self._forge._entity_key(pr_ref)
+            self._forge._comments.setdefault(comment_key, []).append(
+                Comment(
+                    id=str(len(self._forge._comments.get(comment_key, [])) + 1),
+                    body=f"## Converge Review\n{footer}",
+                    created_at=datetime.now(tz=UTC),
+                    author="converge-reviewer",
+                )
+            )
 
     def seed_run(
         self,
@@ -534,8 +546,8 @@ class FakeHarnessPort:
         self.dispatch_calls.append(context)
         self._last_context = context
 
-        # Reviewer dispatches write their queued verdict to the forge branch.
-        self._emit_verdict(context)
+        # Reviewer dispatches store their queued verdict by run_id (structured-output channel).
+        self._emit_verdict(run_id, context)
 
         # Determine whether this dispatch should time out (stay in_progress).
         # `never_completes` is a global flag; `_timeout_next_n` is a countdown: once
@@ -612,6 +624,14 @@ class FakeHarnessPort:
             handle.run_id,
             RunStatus(state="queued"),
         )
+
+    async def get_run_verdict(self, handle: RunHandle) -> Verdict | None:
+        """Return the verdict stored for this run (structured-output channel, SPEC §5).
+
+        Returns None for non-reviewer dispatches or when no verdict was queued
+        (simulates a reviewer crash — engine treats None as "unknown" blockers).
+        """
+        return self._verdicts.get(handle.run_id)
 
     async def cancel(self, handle: RunHandle) -> None:
         # Idempotent — any already-terminal run (any conclusion) is a no-op (SPEC §9.2)

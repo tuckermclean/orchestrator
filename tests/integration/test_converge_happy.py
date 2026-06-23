@@ -75,8 +75,12 @@ async def test_converge_approve_round1() -> None:
     assert any(event == "APPROVE" for _ref, event, _body in forge.create_review_calls)
 
 
-async def test_converge_sentinel_seeded_before_reviewer_dispatch() -> None:
-    """Sentinel is written to .converge-verdict.json before the reviewer is dispatched."""
+async def test_converge_no_sentinel_written_to_branch() -> None:
+    """No sentinel commit is written to the PR branch (SPEC §5 anti-pattern fix).
+
+    The verdict channel is now the reviewer's structured output via the harness
+    RunEventStore — no file is committed to the PR branch before or after the round.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
@@ -87,15 +91,19 @@ async def test_converge_sentinel_seeded_before_reviewer_dispatch() -> None:
 
     await engine.converge(_PR)
 
-    # put_file_on_branch(sentinel) must precede the reviewer dispatch.
-    assert len(forge.put_file_on_branch_calls) >= 1
-    sentinel_call = forge.put_file_on_branch_calls[0]
-    assert sentinel_call[1] == ".converge-verdict.json"
-    assert b"verdict-file-not-written" in sentinel_call[2]
+    # No put_file_on_branch calls — the sentinel seed is removed (SPEC §5).
+    assert forge.put_file_on_branch_calls == [], (
+        "Engine must NOT commit sentinel or verdict files to the PR branch"
+    )
+    # No copy_file_on_branch archival — per-round history is in the RunEventStore,
+    # not on the PR branch (SPEC §10.2).
+    assert forge.copy_file_on_branch_calls == [], (
+        "Engine must NOT archive verdict files on the PR branch"
+    )
 
 
-async def test_converge_verdict_copied_per_round() -> None:
-    """After the round, .converge-verdict.json is copied to .converge-verdict-r1.json (B3)."""
+async def test_converge_verdict_read_from_run_result() -> None:
+    """The verdict is read from harness.get_run_verdict, not from a forge file (SPEC §5)."""
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
@@ -104,10 +112,18 @@ async def test_converge_verdict_copied_per_round() -> None:
     )
     engine = _engine(forge, harness)
 
-    await engine.converge(_PR)
+    state = await engine.converge(_PR)
 
-    assert (_PR, ".converge-verdict.json", ".converge-verdict-r1.json") in (
-        forge.copy_file_on_branch_calls
+    # Engine reads verdict from the run result → approves (0 blockers, CI green).
+    assert state == "APPROVED"
+    # No verdict file was read from the forge branch.
+    verdict_reads = [
+        (pr, path)
+        for pr, path in forge.get_file_contents_calls
+        if "converge-verdict" in path
+    ]
+    assert verdict_reads == [], (
+        "Engine must NOT read verdict from forge branch file"
     )
 
 
