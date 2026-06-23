@@ -16,6 +16,7 @@ from src.domain.types import (
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
     LABEL_READY,
+    NITPICKER_MODEL,
     NO_VERDICT_RETRY_CAP,
     CheckRun,
     PRRef,
@@ -98,32 +99,39 @@ def _zero_verdict(*, nits: list[str] | None = None) -> Verdict:
 @pytest.mark.covers("§8.3-integration", "row-2-fix-r1-engine-wired")
 @pytest.mark.covers("§8.3-integration", "row-4-fix-r2-engine-wired")
 async def test_converge_r1_blocker_fix_r2_approve() -> None:
-    """R1 reviewer finds blockers → fixer dispatched → R2 reviewer approves → APPROVED."""
+    """R1 reviewer finds blockers → fixer → R2 reviewer spotless → adjudicator → APPROVED.
+
+    New 3-tier flow: all reviewer rounds use Sonnet; adjudicator uses Opus (terminal gate).
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge)
 
-    # R1 reviewer: 1 blocker; R2 reviewer: 0 blockers
+    # R1 reviewer: 1 blocker; R2 reviewer: 0 blockers, 0 suggestions (spotless → adjudicate)
     harness.script_reviewer_verdicts(
         _blocker_verdict(["type:missing-annotation"]),
         _zero_verdict(),
     )
+    # Adjudicator approves by default.
     engine = _engine(forge, harness)
 
     state = await engine.converge(_PR)
 
     assert state == "APPROVED"
-    # Reviewer R1, fixer, reviewer R2 = 3 dispatches
-    assert len(harness.dispatch_calls) == 3
+    # reviewer-R1, fixer-R1, reviewer-R2 (spotless), adjudicator = 4 dispatches
+    assert len(harness.dispatch_calls) == 4
     reviewer_r1 = harness.dispatch_calls[0]
     fixer = harness.dispatch_calls[1]
     reviewer_r2 = harness.dispatch_calls[2]
+    adjudicator = harness.dispatch_calls[3]
     assert reviewer_r1.contract == "agents/converge-reviewer.md"
     assert reviewer_r1.model == DEFAULT_SWARM_MODEL
     assert fixer.contract == "agents/converge-fixer.md"
     assert fixer.model == DEFAULT_SWARM_MODEL
     assert reviewer_r2.contract == "agents/converge-reviewer.md"
     assert reviewer_r2.model == DEFAULT_SWARM_MODEL
+    assert adjudicator.contract == "agents/adjudicator.md"
+    assert adjudicator.model == ADJUDICATION_MODEL
     # Approved labels applied.
     assert (_PR, LABEL_READY) in forge.add_label_calls
     assert (_PR, LABEL_CONVERGE) in forge.remove_label_calls
@@ -151,27 +159,33 @@ async def test_converge_r1_fixer_allowed_refs_match_specialists() -> None:
 
 @pytest.mark.covers("§8.3-integration", "row-4-fix-r2-engine-wired")
 async def test_converge_r3_adjudication_model() -> None:
-    """R3 reviewer uses ADJUDICATION_MODEL (Opus); R1/R2 use DEFAULT_SWARM_MODEL."""
+    """All reviewer rounds (R1/R2/R3) use Sonnet; adjudicator uses Opus (terminal gate).
+
+    3-tier model: Opus is no longer the R3 reviewer — it is the adjudicator that runs
+    after the round loop completes via the ``adjudicate`` token.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge)
-    # R1: fix, R2: fix, R3: approve (need 2 fixers too)
+    # R1: fix, R2: fix, R3: spotless (adjudicate)
     harness.script_reviewer_verdicts(
         _blocker_verdict(["sig-a"]),
         _blocker_verdict(["sig-b"]),  # different sigs so not no-progress
         _zero_verdict(),
     )
+    # Adjudicator approves by default.
     engine = _engine(forge, harness)
 
     await engine.converge(_PR)
 
-    # dispatches: reviewer-r1, fixer-r1, reviewer-r2, fixer-r2, reviewer-r3
-    assert len(harness.dispatch_calls) == 5
+    # dispatches: reviewer-r1, fixer-r1, reviewer-r2, fixer-r2, reviewer-r3, adjudicator
+    assert len(harness.dispatch_calls) == 6
     assert harness.dispatch_calls[0].model == DEFAULT_SWARM_MODEL  # reviewer R1
     assert harness.dispatch_calls[1].model == DEFAULT_SWARM_MODEL  # fixer R1
     assert harness.dispatch_calls[2].model == DEFAULT_SWARM_MODEL  # reviewer R2
     assert harness.dispatch_calls[3].model == DEFAULT_SWARM_MODEL  # fixer R2
-    assert harness.dispatch_calls[4].model == ADJUDICATION_MODEL   # reviewer R3
+    assert harness.dispatch_calls[4].model == DEFAULT_SWARM_MODEL  # reviewer R3 (Sonnet!)
+    assert harness.dispatch_calls[5].model == ADJUDICATION_MODEL   # adjudicator (Opus)
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +555,11 @@ async def test_converge_fixer_timeout_r2_e11(monkeypatch: pytest.MonkeyPatch) ->
 
 
 async def test_converge_nit_issue_created_on_approve_with_nits() -> None:
-    """Accumulated nits from multiple rounds are deduped and posted as a follow-up issue."""
+    """Nits trigger nitpicker dispatch (not follow-up issue) in the 3-tier model.
+
+    Accumulated nits are handled by the nitpicker in the adjudication phase.
+    No follow-up issue is created — SPEC §5 (3-tier model): nits fixed in-loop.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge)
@@ -552,18 +570,23 @@ async def test_converge_nit_issue_created_on_approve_with_nits() -> None:
     )
     engine = _engine(forge, harness)
 
-    await engine.converge(_PR)
+    state = await engine.converge(_PR)
 
-    assert len(forge.create_issue_calls) == 1
-    _repo, title, body = forge.create_issue_calls[0]
-    assert title == "Converge follow-up nits"
-    assert "nit-from-r1" in body
-    assert "nit-from-r2" in body
-    assert body.count("nit-dup") == 1  # deduplicated
+    assert state == "APPROVED"
+    # No follow-up issue: nits are handled by the nitpicker in-loop.
+    assert forge.create_issue_calls == [], (
+        "Engine must NOT open a follow-up nits issue in the 3-tier model"
+    )
+    # Nitpicker dispatched on Haiku (nits present), then adjudicator on Opus.
+    nitpicker_dispatches = [
+        ctx for ctx in harness.dispatch_calls if ctx.contract == "agents/nitpicker.md"
+    ]
+    assert len(nitpicker_dispatches) == 1
+    assert nitpicker_dispatches[0].model == NITPICKER_MODEL
 
 
 async def test_converge_nit_issue_omitted_when_empty() -> None:
-    """No nit follow-up issue created when accumulated nits are empty."""
+    """No nitpicker dispatched when accumulated nits are empty (nothing to polish)."""
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge)
@@ -573,6 +596,10 @@ async def test_converge_nit_issue_omitted_when_empty() -> None:
     await engine.converge(_PR)
 
     assert forge.create_issue_calls == []
+    nitpicker_dispatches = [
+        ctx for ctx in harness.dispatch_calls if ctx.contract == "agents/nitpicker.md"
+    ]
+    assert nitpicker_dispatches == [], "Nitpicker must NOT be dispatched when nits are empty"
 
 
 # ---------------------------------------------------------------------------
@@ -601,7 +628,12 @@ async def test_converge_round_state_persisted_after_fix() -> None:
 
 
 async def test_converge_resumes_from_persisted_round() -> None:
-    """Engine resumes at R2 when ConvergeStateStore reports last completed round = 1."""
+    """Engine resumes at R2 when ConvergeStateStore reports last completed round = 1.
+
+    After resuming at R2 with a spotless verdict, the engine enters the adjudication
+    phase: adjudicator (Opus) approves → APPROVED.  Two dispatches total: reviewer R2
+    (Sonnet) + adjudicator (Opus).
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge)
@@ -615,6 +647,9 @@ async def test_converge_resumes_from_persisted_round() -> None:
     state = await engine.converge(_PR)
 
     assert state == "APPROVED"
-    # Only 1 reviewer dispatch (R2 only).
-    assert len(harness.dispatch_calls) == 1
-    assert harness.dispatch_calls[0].model == DEFAULT_SWARM_MODEL
+    # 2 dispatches: reviewer R2 (Sonnet) + adjudicator (Opus).
+    assert len(harness.dispatch_calls) == 2
+    assert harness.dispatch_calls[0].model == DEFAULT_SWARM_MODEL  # reviewer R2
+    assert harness.dispatch_calls[0].contract == "agents/converge-reviewer.md"
+    assert harness.dispatch_calls[1].model == ADJUDICATION_MODEL   # adjudicator
+    assert harness.dispatch_calls[1].contract == "agents/adjudicator.md"

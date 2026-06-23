@@ -98,7 +98,7 @@ when `is_draft AND agent:converge ∉ labels AND stale`.
 | P5 | BUILDING | ESCALATED | Reconciler `escalate` / `needs-human` | stale + cap reached or no issue |
 | P6 | CONVERGING | ESCALATED | Converge protected-path check | diff touches PROTECTED_PATHS |
 | P7 | CONVERGING | CONVERGING (loop) | Converge job | non-draft, has `converge` label, idempotency gate passes |
-| P8 | CONVERGING | APPROVED | Converge finalize | `approve` token: 0 blockers + CI green |
+| P8 | CONVERGING | APPROVED | Converge finalize | `adjudicate` token → adjudicator approves (0 blockers) |
 | P9 | CONVERGING | APPROVED | Converge finalize (`ci-red` recovery) | CI re-triggered and recovers within CI_WAIT_S |
 | P10 | CONVERGING | ESCALATED | Converge finalize | `no-progress` / `cap-reached` / `ci-red` / `no-verdict` after retries |
 | P11 | CONVERGING | CONVERGING | Converge finalize (`no-verdict`) | retry_count < `NO_VERDICT_RETRY_CAP` |
@@ -144,26 +144,58 @@ RC-1 priority order (first match wins): redispatch_count ≥ `RECONCILER_STALE_R
 
 ---
 
-## §5 Converge Sub-Machine (3-Round Loop)
+## §5 Converge Sub-Machine (3-Round Loop + Adjudication Phase)
 
-Triggered on CONVERGING PR entry (P7). Each round: Seed → Review → Check-CI → Decide → Fix.
+Triggered on CONVERGING PR entry (P7). Three model tiers:
+- **Reviewers (R1/R2/R3):** `DEFAULT_SWARM_MODEL` (Sonnet) — iterative review
+- **Nitpicker (adjudication phase):** `NITPICKER_MODEL` (Haiku) — light-touch polish
+- **Adjudicator (terminal gate):** `ADJUDICATION_MODEL` (Opus) — final ship/no-ship verdict
+
+Each round: Seed → Review → Check-CI → Decide → Fix (or early-exit to adjudication).
 
 ### Round rules
 
 | Round | Fixer addresses | Fix step? |
 |---|---|---|
-| R1 | Blockers + suggestions | Yes |
-| R2 | Blockers only | Yes |
+| R1 | Blockers + suggestions | Yes (unless spotless) |
+| R2 | Blockers only | Yes (unless spotless) |
 | R3 | Blockers only — final review | **No** |
 
-Nits are never fixed in-loop; accumulated nits are opened as one follow-up issue at
-finalize time.
+### Spotless early-exit
+
+If at **any round** `blockers == 0 AND ci_green AND suggestions == 0` (fully clean),
+`decide_round` returns `adjudicate` — the remaining fix rounds are skipped and the
+adjudication phase runs immediately. This is row 1 of the §8.3 truth table.
+
+### Adjudication phase
+
+Entered whenever `decide_round` returns `adjudicate` (row 1 spotless OR row 1b R3-no-blockers).
+
+**Step 1 — Nitpicker (`NITPICKER_MODEL`, `agents/nitpicker.md`):**
+If accumulated nits or residual suggestions exist, dispatch the nitpicker to apply
+light-touch polish (rename, reword, minor style). Nitpicker is depth-1: it may NOT
+spawn sub-agents. After nitpicker commits, poll CI until green (up to `CI_WAIT_S`).
+If CI fails → `terminal_escalate` (human investigates). If no nits/suggestions → skip.
+
+**Step 2 — Adjudicator (`ADJUDICATION_MODEL`, `agents/adjudicator.md`):**
+Dispatch Opus to read the PR + CI state and emit a `Verdict`. Adjudicator may spawn
+read-only specialists from its allow-set (I9/D2) but does NOT fix code.
+- `blockers == 0` → FINALIZE → `APPROVED` (P8).
+- `blockers >= 1` (reject) → bounded re-converge:
+  - Check `counter("adjudicator-reconverge")`. If `< RECONVERGE_CAP`:
+    increment counter, `clear_converge_state`, re-enter `converge()` from R1.
+  - If `>= RECONVERGE_CAP` → `terminal_escalate(E12)` → `ESCALATED`.
+
+**FINALIZE** (on adjudicator approve): `add_label(LABEL_READY)`, `remove_label(LABEL_CONVERGE)`,
+`counter.reset("converge-retry")`, `counter.reset("adjudicator-reconverge")`,
+`clear_converge_state`. **No** `create_review("APPROVE")` (I9 no-self-review, §140).
+**No** follow-up nits issue — nits are resolved in-loop by the nitpicker.
 
 ### Verdict schema
 
-Each converge round produces a `Verdict` emitted by the reviewer as **structured output**
-(a fenced ` ```json … ``` ` block in the reviewer's final message), captured by the
-harness in `RunEventStore` and read by the Engine via `harness.get_run_verdict(reviewer_handle)`.
+Each converge round produces a `Verdict` emitted by the reviewer (and adjudicator) as
+**structured output** (a fenced ` ```json … ``` ` block in the final message), captured by the
+harness in `RunEventStore` and read by the Engine via `harness.get_run_verdict(handle)`.
 The verdict is **never committed to the PR branch** — the branch stays free of bot scratch state.
 
 ```json
@@ -189,11 +221,12 @@ line numbers. The engine compares consecutive rounds to detect no-progress.
 
 | Token | Condition | Edge |
 |---|---|---|
-| `approve` | `blockers == 0` AND `ci_green == true` (any round; see §7 CI green definition) | → APPROVED (P8) |
-| `fix` | R1 (always); R2 (if not stuck) | → Fix phase, next round |
+| `adjudicate` | Row 1: `blockers==0 AND ci_green AND suggestions==0` (any round) | → Adjudication phase (Step 1 nitpicker if nits, Step 2 adjudicator) |
+| `adjudicate` | Row 1b: `round==3 AND blockers==0 AND ci_green` (suggestions may remain) | → Adjudication phase |
+| `fix` | R1 (always, when not adjudicate); R2 (if not stuck) | → Fix phase, next round |
 | `escalate:no-progress` | R2/R3: same non-empty signatures two consecutive rounds | → ESCALATED (P10, E2) |
 | `escalate:no-verdict` | R3: `blockers == "unknown"` | → retry < NO_VERDICT_RETRY_CAP (P11) else ESCALATED (P10, E3) |
-| `escalate:ci-red` | R3: `blockers == 0` but CI not green | → CI re-trigger; recover→APPROVED (P9) or ESCALATED (P10, E4) |
+| `escalate:ci-red` | R3: `blockers == 0` but CI not green | → CI re-trigger → adjudication phase (P9) or ESCALATED (P10, E4) |
 | `escalate:cap-reached` | R3: blockers remain (≥1) | → ESCALATED (P10, E5). Work is never discarded — a stuck converge is a human problem (D3). |
 
 ---
@@ -213,6 +246,7 @@ line numbers. The engine compares consecutive rounds to detect no-progress.
 | E9 | **stale no-issue** | Reconciler RC-1 | stale draft, CI failing or empty, no closing issue | Change Set |
 | E10 | **issue redispatch-cap** | Reconciler RC-4 | `agent-work` issue, no PR, re-dispatched ≥ 3 times | Work Item |
 | E11 | **fixer-timeout** | `Engine.converge` | fixer did not complete within `CI_WAIT_S`; harness job cancelled | Change Set |
+| E12 | **adjudicator-reconverge-cap** | `Engine.converge` adjudication phase | adjudicator rejected after `RECONVERGE_CAP` re-converge attempts | Change Set |
 
 ---
 
@@ -236,21 +270,26 @@ Single-source home. All implementation code must import from this table; never h
 | `PARALLEL_SPECIALIST_CAP` | `4` | Max concurrent specialist agents per converge round |
 | `AT_RISK_THRESHOLD` | `5` | `in_flight >= 5` → AT_RISK verdict |
 | `AWAITING_PROMOTION_NUDGE_S` | `86400` | 24 h; RC-5 fires push notification if issue sits in PENDING longer than this; does not auto-promote |
-| `DEFAULT_SWARM_MODEL` | `"claude-sonnet-4-6"` | Default model for all routine swarm dispatches: implementer, converge reviewer (R1/R2), converge fixer, and specialist sub-agents (inherited from parent context). Overridable per-slot via `RepoConfig.model_config`. |
-| `ADJUDICATION_MODEL` | `"claude-opus-4-8"` | Model for the terminal-verdict dispatch: converge reviewer at R3 (`CONVERGE_ROUNDS`) — the final approval gate before a PR is handed to a human to merge, and the escalation-to-`needs-human` decision. Overridable via `RepoConfig.model_config.adjudication`. |
+| `DEFAULT_SWARM_MODEL` | `"claude-sonnet-4-6"` | Default model for all routine swarm dispatches: implementer, converge reviewers (R1/R2/R3), converge fixer, and specialist sub-agents (inherited from parent context). Overridable per-slot via `RepoConfig.model_config`. |
+| `ADJUDICATION_MODEL` | `"claude-opus-4-8"` | Model for the adjudicator dispatch (§5 adjudication phase, Step 2) — the terminal ship/no-ship verdict. Overridable via `RepoConfig.model_config.adjudication`. |
+| `NITPICKER_MODEL` | `"claude-haiku-4-5-20251001"` | Model for the nitpicker dispatch (§5 adjudication phase, Step 1) — light-touch in-loop polish (nits + suggestions). Depth-1: nitpicker may NOT spawn sub-agents. |
+| `RECONVERGE_CAP` | `1` | Maximum adjudicator-triggered re-converge attempts. A second adjudicator rejection after one re-converge → E12 → `needs-human`. Counter channel: `"adjudicator-reconverge"`. D3: work is never discarded. |
+| `ADJUDICATOR_CONTRACT` | `"agents/adjudicator.md"` | Agent contract path for the adjudicator (Opus). Read-only terminal gate — does NOT fix code. |
+| `NITPICKER_CONTRACT` | `"agents/nitpicker.md"` | Agent contract path for the nitpicker (Haiku). Applies light polish; commits; exits. Depth-1. |
 | `HARNESS_COOLDOWN_S` | `300` | 5 min; cooldown duration after a harness signals quota/rate-limit exhaustion. During this window the harness is skipped by `decide_harness`; after expiry it becomes eligible again. Single-sourced here; never hardcode `300`. |
 | `HARNESSES_JSON_ENV` | `"HARNESSES_JSON"` | Name of the environment variable that carries the JSON harness configuration array. Referenced by `PortProvider.from_env`; never hardcode the string `"HARNESSES_JSON"`. |
 
-### Model tier
+### Model tier (§251)
 
-Two tiers govern which model each converge dispatch uses:
+Three tiers govern which model each converge dispatch uses:
 
 | Tier | Constant | Dispatches |
 |---|---|---|
-| Swarm | `DEFAULT_SWARM_MODEL` | Implementer · converge reviewer R1 and R2 · converge fixer (all rounds) · specialist sub-agents (inherit from parent dispatch context) |
-| Adjudication | `ADJUDICATION_MODEL` | Converge reviewer at round R3 (`CONVERGE_ROUNDS`) — the terminal round that produces either the final approval gate (→ `agent:ready`) or the escalation-to-`needs-human` decision |
+| Swarm | `DEFAULT_SWARM_MODEL` (Sonnet) | Implementer · converge reviewers R1/R2/R3 (all rounds) · converge fixer (all rounds) · specialist sub-agents (inherit from parent dispatch context) |
+| Nitpicker | `NITPICKER_MODEL` (Haiku) | Adjudication phase Step 1: nitpicker — applied only when nits or suggestions remain; depth-1 (no sub-agents) |
+| Adjudication | `ADJUDICATION_MODEL` (Opus) | Adjudication phase Step 2: adjudicator — terminal ship/no-ship gate. Adjudicator may spawn read-only specialists from its allow-set (I9/D2) but does not fix code. |
 
-`route_entry` (§8.1) is **unchanged**: it pins `claude-opus-4-8` for the `issues`/orchestrator entry (Opus plans and orchestrates) and `claude-sonnet-4-6` for comment iteration. These are event-level model assignments that exist independently of the swarm/adjudication tier.
+`route_entry` (§8.1) is **unchanged**: it pins `claude-opus-4-8` for the `issues`/orchestrator entry (Opus plans and orchestrates) and `claude-sonnet-4-6` for comment iteration. These are event-level model assignments that exist independently of the converge tier.
 
 All model string values must originate from the constants above or from `RepoConfig.model_config` (§11.2). Never construct a model string from contributor-supplied text (I9).
 
@@ -447,7 +486,8 @@ Each counter increment also posts an audit marker comment (human-visible; DB is 
 Decides the convergence action for one round.
 
 **Inputs**: `round: Literal[1, 2, 3]`, `blockers: int | Literal["unknown"]`,
-`ci_green: bool`, `prev_sigs: list[str]`, `curr_sigs: list[str]`
+`ci_green: bool`, `prev_sigs: list[str]`, `curr_sigs: list[str]`,
+`suggestions: int = 0`
 
 `round` is typed as `Literal[1, 2, 3]`; a value outside this set is a `TypeError` (Python)
 or compile error (Rust). Implementations must not accept arbitrary integers.
@@ -464,18 +504,20 @@ comparing. This ensures no-progress detection is stable regardless of reviewer o
 
 | # | Condition | Output |
 |---|---|---|
-| 1 | `blockers == 0 and ci_green` | `approve` |
+| 1 | `blockers == 0 AND ci_green AND suggestions == 0` (any round) | `adjudicate` |
+| 1b | `round == 3 AND blockers == 0 AND ci_green` (suggestions may remain) | `adjudicate` |
 | 2 | `round == 1` | `fix` |
-| 3 | `curr_sigs == prev_sigs and curr_sigs != [] and blockers not in (0, "unknown")` | `escalate:no-progress` |
+| 3 | `curr_sigs == prev_sigs AND curr_sigs != [] AND blockers not in (0, "unknown")` | `escalate:no-progress` |
 | 4 | `round == 2` | `fix` |
-| 5 | `round == 3 and blockers == "unknown"` | `escalate:no-verdict` |
-| 6 | `round == 3 and blockers == 0` (ci not green, else row 1) | `escalate:ci-red` |
+| 5 | `round == 3 AND blockers == "unknown"` | `escalate:no-verdict` |
+| 6 | `round == 3 AND blockers == 0` (ci not green, else row 1/1b) | `escalate:ci-red` |
 | 7 | `round == 3` else (blockers ≥ 1) | `escalate:cap-reached` |
 
-Key edges: `"unknown"` never produces `approve`. `prev==curr==[]` is NOT no-progress
+Key edges: `"unknown"` never produces `adjudicate`. `prev==curr==[]` is NOT no-progress
 (row 3 requires non-empty `curr_sigs`). Row 3 fires before rows 5–7 in R3.
-R1/R2 `unknown` falls through to `fix` (not approve) — fixer dispatches so reviewer
-can try again; row 1 requires integer 0.
+R1/R2 `unknown` falls through to `fix` (not adjudicate) — fixer dispatches so reviewer
+can try again; row 1 requires integer 0 for blockers AND 0 for suggestions.
+Row 1b catches R3 with residual suggestions (nitpicker handles them in the adjudication phase).
 
 ### §8.4 `decide_cap_action`
 
@@ -978,16 +1020,15 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
    a. Determine start round: `start = converge_state.get_converge_round(pr_ref) + 1`
       (returns `0` if unset → `start = 1`).
       Initialize `accumulated_nits: list[str] = []` — collects nits across all rounds for
-      the finalize-time follow-up issue.
+      the nitpicker in the adjudication phase (NOT a follow-up issue; nits resolved in-loop).
    b. For each round `r` from `start` to `CONVERGE_ROUNDS`:
       - Record `round_started = now()` and persist: `converge_state.set_round_started(pr_ref, round_started)`.
       - Compute `specialist_refs = decide_specialists(changed_paths, r)`.
       - Build reviewer `DispatchContext` with `allowed_agent_refs = specialist_refs` (I9/D2)
-        and `model = ADJUDICATION_MODEL if r == CONVERGE_ROUNDS else repo_config.model_config.swarm`.
-        Round R3 uses `ADJUDICATION_MODEL` (Opus) — it is the terminal round whose verdict is
-        either the final approval gate or the escalation-to-`needs-human` decision. R1/R2 use
-        `DEFAULT_SWARM_MODEL` (Sonnet) — routine iterative rounds. Specialist sub-agents
-        spawned by the reviewer inherit the reviewer's model via the harness parent context.
+        and `model = repo_config.model_config.swarm` (Sonnet) for **all** rounds R1/R2/R3.
+        The terminal verdict is now produced by the adjudicator (Opus) in the adjudication
+        phase — not by the R3 reviewer. Specialist sub-agents spawned by the reviewer
+        inherit the reviewer's model via the harness parent context.
       - **Dispatch reviewer**: `harness.dispatch(reviewer_context)` → `reviewer_handle`.
       - **Await reviewer**: poll `harness.get_run_status(reviewer_handle)` until `completed`
         or `CI_WAIT_S` elapses. On timeout: `await harness.cancel(reviewer_handle)` before
@@ -1008,7 +1049,8 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
           compares against the prior-numbered round, not a prior attempt of the same round.
       - Append nits from this round: `accumulated_nits.extend(verdict.nits)` when `verdict`
         is not None.
-      - `decide_round(r, blockers, ci_green, prev_sigs, curr_sigs)` → token.
+      - `decide_round(r, blockers, ci_green, prev_sigs, curr_sigs, suggestions=residual_suggestions)` → token.
+        (`residual_suggestions` = `verdict.suggestions` when `verdict` is not None, else `0`.)
       - **Conditionally persist round** (only for advancing decisions, NOT P11 re-arm):
         if token is NOT `escalate:no-verdict` with `retry_count < NO_VERDICT_RETRY_CAP`:
         `converge_state.set_converge_round(pr_ref, r)`.
@@ -1023,15 +1065,22 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
    > before it, RC-3 re-arms and the engine re-enters and re-escalates. A stale
    > `ConvergeState` left by a partial escalation is recovered by `deescalate_pr` (§11.3).
 
-      - `approve` → add `LABEL_READY`, remove `LABEL_CONVERGE`
-        (**no** `forge.create_review("APPROVE", ...)` — the GitHub App authored the PR;
-        GitHub returns HTTP 422 on self-approval; the `agent:ready` label IS the approval
-        signal and the reviewer's `## Converge Review` comment is the human-readable
-        summary; a formal GitHub APPROVE review is both redundant and forbidden here);
-        `forge.create_issue(repo, "Converge follow-up nits", body)` where `body` is
-        `accumulated_nits` deduplicated by exact string equality, first-seen order (omit
-        if empty); `await counter.reset(pr_ref, "converge-retry")`;
-        `converge_state.clear_converge_state(pr_ref)` → `APPROVED` (P8).
+      - `adjudicate` → enter the **adjudication phase** (§5):
+        **Step 1 — Nitpicker** (`NITPICKER_MODEL`, `NITPICKER_CONTRACT`): if
+        `accumulated_nits` (deduped) or `residual_suggestions > 0`, dispatch nitpicker;
+        await completion (up to `CI_WAIT_S`); on timeout → `terminal_escalate(E11)`;
+        after nitpicker commits, poll CI until all green; if CI fails → `terminal_escalate`.
+        Skip entirely if no nits/suggestions.
+        **Step 2 — Adjudicator** (`ADJUDICATION_MODEL`, `ADJUDICATOR_CONTRACT`): dispatch
+        Opus; await; read verdict; if `blockers == 0` → **FINALIZE**:
+        `add_label(LABEL_READY)`, `remove_label(LABEL_CONVERGE)`,
+        `counter.reset("converge-retry")`, `counter.reset("adjudicator-reconverge")`,
+        `clear_converge_state` → `APPROVED` (P8).
+        (**No** `forge.create_review("APPROVE")` — self-review forbidden, §140, I9.)
+        (**No** follow-up nits issue — nits resolved in-loop by nitpicker.)
+        If `blockers >= 1` (adjudicator rejects) → check `counter("adjudicator-reconverge")`:
+        if `< RECONVERGE_CAP` → increment, `clear_converge_state`, re-enter `converge()`;
+        else → `terminal_escalate_reconverge_cap(E12)` (resets both counters + state) → `ESCALATED`.
       - `fix` (R1/R2) → build fixer `DispatchContext` (`allowed_agent_refs = specialist_refs`,
         `forge_token_scope = "repo-branch"`, `model = repo_config.model_config.swarm`);
         `harness.dispatch(fixer_context)` → `fixer_handle`;
@@ -1052,10 +1101,8 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         else `terminal_escalate(E3)`.
       - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll until **all present checks
         complete** (up to `CI_WAIT_S`) and are green (§7 CI green definition); if all
-        green → execute full `approve` token actions (P9: add `LABEL_READY`, remove
-        `LABEL_CONVERGE`, nit issue if non-empty, counter.reset,
-        clear_converge_state — same as the `approve` path, no GitHub APPROVE review)
-        → `APPROVED`; else `terminal_escalate(E4)`.
+        green → enter the **adjudication phase** (same as `adjudicate` token: nitpicker if
+        nits, then adjudicator → `APPROVED` P9 or re-converge/E12); else `terminal_escalate(E4)`.
       - `escalate:cap-reached` → `terminal_escalate(E5)`. _(D3: work never discarded.)_
 
 ### §10.3 `Engine.reconcile`
@@ -1219,8 +1266,8 @@ SwarmLimits { max_concurrent_runs_global: int, max_concurrent_runs_per_repo: int
 # sane defaults: global=10, per_repo=4, reconciles=4
 
 ModelConfig { swarm: string = DEFAULT_SWARM_MODEL, adjudication: string = ADJUDICATION_MODEL }
-# swarm       — model used for implementer, converge reviewer R1/R2, fixer, and specialist sub-agents
-# adjudication — model used for converge reviewer R3 (terminal verdict: approve gate + escalation)
+# swarm       — model used for implementer, converge reviewers R1/R2/R3, fixer, and specialist sub-agents
+# adjudication — model used for the adjudicator (§5 adjudication phase Step 2 — terminal ship/no-ship gate)
 # UI exposes a per-slot model selector; "Default" resolves to the value in ModelConfig.
 
 RepoConfig { repo: RepoRef, enabled: bool, intake_enabled: bool = true, allowlist: list<string>,

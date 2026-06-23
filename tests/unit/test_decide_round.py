@@ -1,4 +1,9 @@
-"""Unit tests for decide_round — SPEC §8.3 / TESTING.md §2."""
+"""Unit tests for decide_round — SPEC §8.3 / TESTING.md §2.
+
+Updated for the 3-tier model (SPEC §5/§8.3/§251): the old ``approve`` token is now
+``adjudicate`` (proceed to adjudication phase — NOT final approval).  The adjudicator
+(Opus) makes the terminal ship/no-ship judgment.
+"""
 
 from __future__ import annotations
 
@@ -7,35 +12,68 @@ import pytest
 from src.decisions.decide_round import decide_round
 
 # ---------------------------------------------------------------------------
-# Row 1 — approve: blockers == 0 and ci_green (any round)
+# Row 1 — adjudicate (spotless): blockers == 0 AND ci_green AND suggestions == 0
+# Row 1b — adjudicate (R3): blockers == 0 AND ci_green (suggestions may remain)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.covers("§8.3", "row-1-approve")
-def test_decide_round_approve_r1() -> None:
-    assert decide_round(1, 0, True, [], []) == "approve"
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_adjudicate_r1_spotless() -> None:
+    """Spotless at R1 (0 blockers, 0 suggestions, CI green) → adjudicate."""
+    assert decide_round(1, 0, True, [], [], suggestions=0) == "adjudicate"
 
 
-@pytest.mark.covers("§8.3", "row-1-approve")
-def test_decide_round_approve_r2() -> None:
-    assert decide_round(2, 0, True, [], []) == "approve"
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_adjudicate_r2_spotless() -> None:
+    """Spotless at R2 → adjudicate (early-exit, skip R3)."""
+    assert decide_round(2, 0, True, [], [], suggestions=0) == "adjudicate"
 
 
-@pytest.mark.covers("§8.3", "row-1-approve")
-def test_decide_round_approve_r3() -> None:
-    assert decide_round(3, 0, True, [], []) == "approve"
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_adjudicate_r3_spotless() -> None:
+    """Spotless at R3 → adjudicate."""
+    assert decide_round(3, 0, True, [], [], suggestions=0) == "adjudicate"
 
 
-@pytest.mark.covers("§8.3", "row-1-approve")
-def test_decide_round_zero_blockers_ci_red_not_approve_r1() -> None:
-    """CI-green guard: 0 blockers but CI red → R1 falls through to fix, not approve."""
+@pytest.mark.covers("§8.3", "row-1b-adjudicate-r3")
+def test_decide_round_adjudicate_r3_with_residual_suggestions() -> None:
+    """R3 with 0 blockers, CI green, but residual suggestions → adjudicate (row 1b).
+
+    Suggestions may remain at R3 — the nitpicker handles them in the adjudication phase.
+    """
+    assert decide_round(3, 0, True, [], [], suggestions=2) == "adjudicate"
+
+
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_zero_blockers_ci_red_not_adjudicate_r1() -> None:
+    """CI-green guard: 0 blockers but CI red → R1 falls through to fix, not adjudicate."""
     assert decide_round(1, 0, False, [], []) == "fix"
 
 
-@pytest.mark.covers("§8.3", "row-1-approve")
-def test_decide_round_unknown_never_approves_even_ci_green() -> None:
-    """'unknown' blockers never produce approve (row 1 needs integer 0)."""
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_unknown_never_adjudicates_even_ci_green() -> None:
+    """'unknown' blockers never produce adjudicate (row 1 needs integer 0)."""
     assert decide_round(3, "unknown", True, [], []) == "escalate:no-verdict"
+
+
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_r1_suggestions_present_not_spotless() -> None:
+    """R1 with suggestions > 0 is NOT spotless (row 1 requires suggestions == 0)."""
+    assert decide_round(1, 0, True, [], [], suggestions=1) == "fix"
+
+
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_r2_suggestions_present_not_spotless() -> None:
+    """R2 with suggestions > 0 is NOT spotless (row 1 requires suggestions==0).
+
+    Row 1b requires round==3. So R2 with suggestions falls to row 4 (fix).
+    """
+    # Row 1: blockers==0, ci_green, suggestions==1 → NO (suggestions!=0)
+    # Row 1b: blockers==0, ci_green → NO (round!=3)
+    # Row 2: round==1 → NO
+    # Row 3: curr_sigs==prev_sigs==[] → NO (empty)
+    # Row 4: round==2 → fix
+    assert decide_round(2, 0, True, [], [], suggestions=1) == "fix"
 
 
 # ---------------------------------------------------------------------------

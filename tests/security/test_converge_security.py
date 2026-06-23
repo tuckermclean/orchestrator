@@ -9,8 +9,12 @@ import pytest
 
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
+    ADJUDICATION_MODEL,
+    ADJUDICATOR_CONTRACT,
     CONVERGE_REVIEW_BASE,
     LABEL_CONVERGE,
+    NITPICKER_CONTRACT,
+    NITPICKER_MODEL,
     PRRef,
     RepoRef,
     Verdict,
@@ -164,12 +168,16 @@ def test_security_fixer_allowed_refs_from_decide_specialists_only() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Nit follow-up issue — created when nits accumulate (SPEC §10.2)
+# Adjudication phase — nits dispatched to nitpicker (SPEC §10.2 / §251)
 # ---------------------------------------------------------------------------
 
 
-async def test_converge_nit_followup_issue_created_on_escalation_approve() -> None:
-    """Nit follow-up issue is created after a multi-round approve with nits."""
+async def test_converge_nits_dispatched_to_nitpicker_not_issue() -> None:
+    """Nits from review rounds are handled by the nitpicker (Haiku) in-loop — NOT a follow-up issue.
+
+    3-tier model (SPEC §251): nits/suggestions → nitpicker (Haiku) → adjudicator (Opus).
+    No ``create_issue`` call is made; nits are resolved before the PR is approved.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
@@ -182,16 +190,22 @@ async def test_converge_nit_followup_issue_created_on_escalation_approve() -> No
     state = await engine.converge(_PR)
 
     assert state == "APPROVED"
-    assert len(forge.create_issue_calls) == 1
-    _repo, title, body = forge.create_issue_calls[0]
-    assert title == "Converge follow-up nits"
-    # nit-1 deduplicated (appeared in both rounds).
-    assert body.count("nit-1") == 1
-    assert "nit-2" in body
+    # No follow-up issue — nits resolved in-loop by nitpicker.
+    assert forge.create_issue_calls == []
+    # 4 dispatches: reviewer-R1, fixer-R1, reviewer-R2, nitpicker, adjudicator.
+    contracts = [d.contract for d in harness.dispatch_calls]
+    assert NITPICKER_CONTRACT in contracts
+    assert ADJUDICATOR_CONTRACT in contracts
+    # Nitpicker uses Haiku.
+    nitpicker_ctx = next(d for d in harness.dispatch_calls if d.contract == NITPICKER_CONTRACT)
+    assert nitpicker_ctx.model == NITPICKER_MODEL
+    # Adjudicator uses Opus.
+    adjudicator_ctx = next(d for d in harness.dispatch_calls if d.contract == ADJUDICATOR_CONTRACT)
+    assert adjudicator_ctx.model == ADJUDICATION_MODEL
 
 
 async def test_converge_nit_issue_not_created_when_no_nits() -> None:
-    """No nit follow-up issue when nits list is empty on approve."""
+    """No nitpicker dispatch and no follow-up issue when nits/suggestions are empty on approve."""
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
@@ -203,3 +217,7 @@ async def test_converge_nit_issue_not_created_when_no_nits() -> None:
     await engine.converge(_PR)
 
     assert forge.create_issue_calls == []
+    # Spotless: only reviewer + adjudicator dispatched (no nitpicker).
+    contracts = [d.contract for d in harness.dispatch_calls]
+    assert NITPICKER_CONTRACT not in contracts
+    assert ADJUDICATOR_CONTRACT in contracts
