@@ -11,19 +11,34 @@ This contract is injected by `Engine.converge`. The harness is single-shot. Comm
 every fix before terminating.
 
 
-## Step 1 — Read the Current Verdict
+## Step 1 — Read the Current Blockers from the Reviewer's Comment
 
-Read `.converge-verdict.json`. This file contains the blockers you must address. If the
-file contains the sentinel value:
+The reviewer posts a `## Converge Review — Round N` comment on the PR before the engine
+dispatches you. That comment is your authoritative source of blockers. There is no verdict
+file on the branch — the verdict channel is structured output captured by the harness, not
+a file commit (`SPEC.md §5`).
 
-```json
-{"blockers": 1, "suggestions": 0, "nits": [], "blocker_signatures": ["verdict-file-not-written"]}
-```
+**Find the latest review comment:**
 
-then the reviewer did not successfully write a verdict this round. Do not attempt to fix
-a sentinel verdict. Terminate immediately without making changes. The engine will handle
-the no-verdict path via `resolve_blockers` and `decide_round` (`SPEC.md §8.2`,
-`SPEC.md §8.3` row 5).
+1. List all comments on this PR (`gh pr view <PR_NUMBER> --comments` or
+   `gh api repos/<owner>/<repo>/issues/<PR_NUMBER>/comments`).
+2. Select the most recent comment whose body starts with `## Converge Review — Round`.
+   This is guaranteed to be from the current round: the engine awaited the reviewer's run
+   before dispatching you, so the comment already exists.
+3. Extract the blockers section — look for `### 🔴 Blockers` entries. Each blocker has a
+   `BLOCKER: <signature>` line followed by a description. The `### 🔴 Blockers` section
+   immediately precedes the footer line `🔴 N blockers | 🟡 ...`.
+
+**Guard — no review comment or no blockers found:**
+
+If no `## Converge Review` comment exists on the PR, or the latest such comment has no
+`### 🔴 Blockers` section (blocker count is zero in the footer), terminate immediately
+without making any changes. This mirrors the empty-verdict guard: the engine's
+`resolve_blockers` and `decide_round` paths handle the no-blockers case
+(`SPEC.md §8.2`, `SPEC.md §8.3`).
+
+Do not read or write any `.converge-verdict*.json` file. Those files no longer exist
+(`SPEC.md §5` structured-output channel, PR #125).
 
 
 ## Step 2 — Determine the Current Round
@@ -195,7 +210,7 @@ After committing all fixes and confirming the gate is green, terminate. The engi
 re-invoke the converge reviewer for the next round.
 
 Do not:
-- Write or modify `.converge-verdict.json`
+- Write any verdict file to the PR branch (the verdict channel is the harness run output, not a file)
 - Add labels to the PR
 - Mark the PR ready or draft
 - Post a review on the PR
