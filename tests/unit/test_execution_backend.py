@@ -1972,9 +1972,13 @@ async def test_real_kube_log_client_buffers_chunks_into_complete_lines() -> None
         def list_namespaced_pod(
             self, namespace: str, label_selector: str
         ) -> Any:
+            class _FakePodStatus:
+                phase = "Running"
+
             class _FakePod:
                 class metadata:
                     name = "test-pod-abc"
+                status = _FakePodStatus()
 
             class _FakeList:
                 items = [_FakePod()]
@@ -2037,9 +2041,13 @@ async def test_real_kube_log_client_no_iter_lines_called() -> None:
 
     class _FakeCoreV1NoIterLines:
         def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
             class _Pod:
                 class metadata:
                     name = "pod-no-iter-lines"
+                status = _PodStatus()
 
             class _List:
                 items = [_Pod()]
@@ -2084,9 +2092,13 @@ async def test_real_kube_log_client_logs_stream_error(caplog: Any) -> None:
 
     class _FakeCoreV1Error:
         def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
             class _Pod:
                 class metadata:
                     name = "pod-error"
+                status = _PodStatus()
 
             class _List:
                 items = [_Pod()]
@@ -2260,9 +2272,13 @@ async def test_real_kube_log_client_calls_read1_not_blocking_read() -> None:
 
     class _FakeCoreV1Tracking:
         def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
             class _Pod:
                 class metadata:
                     name = "pod-tracking"
+                status = _PodStatus()
 
             class _List:
                 items = [_Pod()]
@@ -2455,3 +2471,439 @@ async def test_multiple_concurrent_streamers_all_receive_events() -> None:
             "concurrent streamers must not starve each other. "
             f"All event types for this run: {[e.event_type for e in events]}"
         )
+
+
+# ===========================================================================
+# _RealKubeLogClient — container readiness gate + log-open retry (Bug fix)
+# The live bug: stream_pod_log broke on pod existence, not container readiness,
+# then gave up permanently on the first ApiException (ContainerCreating).
+# ===========================================================================
+
+
+class _FastRealKubeLogClient:
+    """Test-friendly _RealKubeLogClient subclass with near-zero sleep constants.
+
+    Overrides the class-level timing constants so unit tests run in milliseconds
+    rather than the 30-60 s production timeouts.
+    """
+
+    _READINESS_POLL_SECONDS: float = 0.001
+    _READINESS_TIMEOUT_POLLS: int = 20  # 20 × 0.001 s = 20 ms total
+    _LOG_OPEN_RETRY_SLEEP: float = 0.001
+    _LOG_OPEN_MAX_RETRIES: int = 10  # up to ~10 ms of retries
+
+
+# Inject into _RealKubeLogClient as a mixin so we reuse all real code:
+def _fast_client(core_v1: Any) -> Any:
+    """Return a _RealKubeLogClient with fast test timeouts."""
+    from src.ports.execution_backend import _RealKubeLogClient
+
+    class _FastClient(_RealKubeLogClient):
+        _READINESS_POLL_SECONDS = 0.001
+        _READINESS_TIMEOUT_POLLS = 20
+        _LOG_OPEN_RETRY_SLEEP = 0.001
+        _LOG_OPEN_MAX_RETRIES = 10
+
+    return _FastClient(core_v1)
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-container-readiness-gate")
+async def test_real_kube_log_client_waits_for_running_phase_not_just_existence() -> None:
+    """_RealKubeLogClient waits for Running phase, not just pod existence.
+
+    Regression lock for the live bug:
+      Old code: broke the wait loop as soon as the pod OBJECT existed, even if
+      it was still in Pending/ContainerCreating.
+      New code: keeps polling until pod.status.phase is Running/Succeeded/Failed.
+
+    This test reports the pod as Pending for the first N polls, then Running.
+    The streamer must NOT give up early — it must wait, then yield the lines.
+    """
+    import json as _json
+
+    result_line = _json.dumps({"type": "result", "subtype": "success", "result": "done"})
+
+    PENDING_POLLS = 3  # Pod is Pending for 3 polls, then Running.
+
+    class _SlowStartCoreV1:
+        """Pod appears immediately but stays Pending for the first PENDING_POLLS calls."""
+
+        def __init__(self) -> None:
+            self._poll_count = 0
+
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            self._poll_count += 1
+
+            class _PodStatusPending:
+                phase = "Pending"
+
+            class _PodStatusRunning:
+                phase = "Running"
+
+            class _Pod:
+                class metadata:
+                    name = "slow-start-pod"
+                status = (
+                    _PodStatusPending()
+                    if self._poll_count <= PENDING_POLLS
+                    else _PodStatusRunning()
+                )
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            class _FakeResp:
+                _chunks = [(result_line + "\n").encode(), b""]
+
+                def read1(self, amt: int) -> bytes:
+                    if not self._chunks:
+                        return b""
+                    return self._chunks.pop(0)
+
+            return _FakeResp()
+
+    api = _SlowStartCoreV1()
+    client = _fast_client(api)
+
+    collected: list[str] = []
+    async for line in client.stream_pod_log("test-ns", "run-id=slow-start"):
+        collected.append(line)
+
+    assert len(collected) == 1, (
+        f"Expected 1 line after pod became Running; got {len(collected)}: {collected}. "
+        "Regression: old code would exit before pod reached Running."
+    )
+    assert _json.loads(collected[0])["type"] == "result"
+    # The pod-list must have been called at least PENDING_POLLS+1 times
+    assert api._poll_count >= PENDING_POLLS + 1, (
+        f"Expected at least {PENDING_POLLS + 1} polls (pending + running); "
+        f"got {api._poll_count}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-container-readiness-gate")
+async def test_real_kube_log_client_streams_succeeded_pod_log() -> None:
+    """_RealKubeLogClient streams logs from a pod whose phase is Succeeded.
+
+    A fast pod may complete before the streamer polls.  The fix allows
+    Succeeded/Failed as valid phases and falls back to follow=False for
+    terminated containers so the buffered log is retrieved.
+    """
+    import json as _json
+
+    result_line = _json.dumps({"type": "result", "subtype": "success", "result": "fast-done"})
+
+    class _SucceededCoreV1:
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Succeeded"
+
+            class _Pod:
+                class metadata:
+                    name = "fast-pod"
+                status = _PodStatus()
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            # For a Succeeded pod, follow must be False (fast pods terminate before streamer)
+            assert follow is False, (
+                f"For Succeeded pod, follow must be False — got follow={follow}"
+            )
+
+            class _FakeResp:
+                _chunks = [(result_line + "\n").encode(), b""]
+
+                def read1(self, amt: int) -> bytes:
+                    if not self._chunks:
+                        return b""
+                    return self._chunks.pop(0)
+
+            return _FakeResp()
+
+    client = _fast_client(_SucceededCoreV1())
+
+    collected: list[str] = []
+    async for line in client.stream_pod_log("test-ns", "run-id=fast-pod"):
+        collected.append(line)
+
+    assert len(collected) == 1, (
+        f"Expected 1 line from Succeeded pod; got {len(collected)}: {collected}"
+    )
+    assert _json.loads(collected[0])["result"] == "fast-done"
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-log-open-retry")
+async def test_real_kube_log_client_retries_log_open_on_api_exception() -> None:
+    """_RealKubeLogClient retries read_namespaced_pod_log on ApiException.
+
+    Regression lock for the live bug:
+      Old code: returned permanently on the FIRST ApiException from log-open.
+      New code: retries until the budget elapses.
+
+    This test makes the first M log-open calls raise RuntimeError (standing in
+    for kubernetes.client.rest.ApiException, which has the same base class), then
+    returns a valid stream.  The streamer must retry and eventually yield lines.
+    """
+    import json as _json
+
+    result_line = _json.dumps({"type": "result", "subtype": "success", "result": "retry-ok"})
+    FAIL_OPENS = 2  # First 2 log-open attempts raise.
+
+    class _RetryableCoreV1:
+        def __init__(self) -> None:
+            self._open_count = 0
+
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
+            class _Pod:
+                class metadata:
+                    name = "retry-pod"
+                status = _PodStatus()
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            self._open_count += 1
+            if self._open_count <= FAIL_OPENS:
+                # Simulate ApiException (ContainerCreating) — same exception hierarchy
+                raise RuntimeError(
+                    "ApiException: container in pod is waiting to start"
+                    f" (attempt {self._open_count})"
+                )
+
+            class _FakeResp:
+                _chunks = [(result_line + "\n").encode(), b""]
+
+                def read1(self, amt: int) -> bytes:
+                    if not self._chunks:
+                        return b""
+                    return self._chunks.pop(0)
+
+            return _FakeResp()
+
+    api = _RetryableCoreV1()
+    client = _fast_client(api)
+
+    collected: list[str] = []
+    async for line in client.stream_pod_log("test-ns", "run-id=retry"):
+        collected.append(line)
+
+    assert len(collected) == 1, (
+        f"Expected 1 line after retry; got {len(collected)}: {collected}. "
+        "Regression: old code gave up on the first ApiException."
+    )
+    assert _json.loads(collected[0])["result"] == "retry-ok"
+    assert api._open_count == FAIL_OPENS + 1, (
+        f"Expected {FAIL_OPENS + 1} log-open attempts; got {api._open_count}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-pod-never-starts-deadline")
+async def test_real_kube_log_client_pod_never_starts_returns_cleanly(
+    caplog: Any,
+) -> None:
+    """_RealKubeLogClient returns cleanly (no hang, no crash) when pod never starts.
+
+    If the pod exists but never reaches Running/Succeeded/Failed within the
+    readiness deadline, stream_pod_log must log a warning and return — not hang
+    forever, not crash, and NOT open the log stream.
+    """
+    import logging as _logging
+
+    log_open_called = False
+
+    class _NeverReadyCoreV1:
+        """Pod exists immediately but phase stays Pending indefinitely."""
+
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Pending"  # never becomes Running
+
+            class _Pod:
+                class metadata:
+                    name = "never-ready-pod"
+                status = _PodStatus()
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            nonlocal log_open_called
+            log_open_called = True
+            raise AssertionError("read_namespaced_pod_log must NOT be called when pod never starts")
+
+    client = _fast_client(_NeverReadyCoreV1())
+
+    collected: list[str] = []
+    with caplog.at_level(_logging.WARNING, logger="src.ports.execution_backend"):
+        async for line in client.stream_pod_log("test-ns", "run-id=never-ready"):
+            collected.append(line)
+
+    # Must yield no lines — pod never started.
+    assert collected == [], f"Expected no lines when pod never starts; got: {collected}"
+
+    # Must NOT open the log stream.
+    assert not log_open_called, (
+        "read_namespaced_pod_log must NOT be called when the pod never reaches Running"
+    )
+
+    # Must log a warning about the deadline.
+    assert any(
+        "never-ready-pod" in r.message or "never-ready" in r.message or "deadline" in r.message
+        for r in caplog.records
+    ), (
+        "Expected a warning log when pod never starts — "
+        f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-log-open-retry")
+async def test_real_kube_log_client_log_open_all_retries_exhausted_logs_warning(
+    caplog: Any,
+) -> None:
+    """_RealKubeLogClient logs a warning after all log-open retries are exhausted.
+
+    When the pod is Running but read_namespaced_pod_log keeps failing across all
+    retry attempts, the streamer must log the failure and return cleanly.
+    """
+    import logging as _logging
+
+    class _AlwaysFailLogOpenCoreV1:
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
+            class _Pod:
+                class metadata:
+                    name = "log-open-fail-pod"
+                status = _PodStatus()
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            raise RuntimeError("persistent ApiException: container not ready")
+
+    client = _fast_client(_AlwaysFailLogOpenCoreV1())
+
+    collected: list[str] = []
+    with caplog.at_level(_logging.WARNING, logger="src.ports.execution_backend"):
+        async for line in client.stream_pod_log("test-ns", "run-id=open-fail"):
+            collected.append(line)
+
+    assert collected == [], f"Expected no lines when log-open always fails; got: {collected}"
+
+    assert any(
+        "pod-log open failed" in r.message and "log-open-fail-pod" in r.message
+        for r in caplog.records
+    ), (
+        "Expected 'pod-log open failed' warning after exhausting retries — "
+        f"got: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-log-client-container-readiness-gate")
+async def test_real_kube_log_client_events_land_in_store_after_retry() -> None:
+    """Transcript events reach the RunEventStore even when log-open requires retries.
+
+    End-to-end regression: the consumer (_stream_pod_log in K8sJobBackend)
+    calls stream_pod_log and appends parsed events to the store.  Confirm that
+    when log-open succeeds after 1 retry, the parsed result event lands in the
+    store — i.e., both the retry fix AND the consumer wiring are intact.
+    """
+    import json as _json
+
+    result_line = _json.dumps({"type": "result", "subtype": "success", "result": "stored"})
+
+    class _OneRetryThenSucceedsCoreV1:
+        def __init__(self) -> None:
+            self._open_count = 0
+
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _PodStatus:
+                phase = "Running"
+
+            class _Pod:
+                class metadata:
+                    name = "retry-store-pod"
+                status = _PodStatus()
+
+            class _PodList:
+                items = [_Pod()]
+
+            return _PodList()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            self._open_count += 1
+            if self._open_count == 1:
+                raise RuntimeError("ApiException: ContainerCreating")
+
+            class _FakeResp:
+                _chunks = [(result_line + "\n").encode(), b""]
+
+                def read1(self, amt: int) -> bytes:
+                    if not self._chunks:
+                        return b""
+                    return self._chunks.pop(0)
+
+            return _FakeResp()
+
+    from src.ports.harness import RunEventStore
+
+    fake_log_client = _fast_client(_OneRetryThenSucceedsCoreV1())
+
+    # Wire a K8sJobBackend with this log client and a FakeKubeClient that
+    # immediately succeeds, then call _stream_pod_log directly to assert
+    # the event lands in the store.
+    run_id = _run_id()
+    store = RunEventStore()
+    store.register(run_id)
+
+    label_selector = f"run-id={run_id[:63]}"
+
+    backend = K8sJobBackend(
+        image="ghcr.io/test/runner:test",
+        namespace="test-ns",
+        kube_client=FakeKubeClient(),
+        kube_log_client=fake_log_client,  # type: ignore[arg-type]
+        poll_interval_s=0.001,
+        job_timeout_s=10.0,
+    )
+
+    # Drive _stream_pod_log directly (it calls fake_log_client.stream_pod_log).
+    await backend._stream_pod_log(run_id, label_selector, store)
+
+    events = store.get_events(run_id)
+    result_events = [e for e in events if e.event_type == "agent_result"]
+    assert result_events, (
+        "Expected at least one agent_result event after log-open retry; "
+        f"got event types: {[e.event_type for e in events]}"
+    )
