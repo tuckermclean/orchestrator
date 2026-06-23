@@ -1897,3 +1897,253 @@ def test_backend_factory_k8s_streaming_disabled_when_env_empty() -> None:
     assert isinstance(backend, K8sJobBackend)
     # _make_real_kube_log_client must NOT have been called
     mock_factory.assert_not_called()
+
+
+# ===========================================================================
+# _RealKubeLogClient — urllib3 stream buffering (fix: iter_lines() AttributeError)
+# ===========================================================================
+
+
+class _FakeUrllib3Response:
+    """Minimal urllib3-style HTTPResponse stub for testing _RealKubeLogClient.
+
+    Exposes .read(amt) (the urllib3 API) but deliberately does NOT expose
+    .iter_lines() (the requests.Response API).  This proves the fix does not
+    call the wrong method.
+    """
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    def read(self, amt: int) -> bytes:
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0)
+
+    # Deliberately absent: no iter_lines() method.
+
+
+@pytest.mark.covers("§9.2", "k8s-real-log-client-line-buffering")
+async def test_real_kube_log_client_buffers_chunks_into_complete_lines() -> None:
+    """_RealKubeLogClient reassembles JSONL lines split across byte chunks.
+
+    Root-cause regression: urllib3 HTTPResponse has no iter_lines() — that is a
+    requests.Response method.  The fix uses resp.read(amt) with a line buffer.
+    This test exercises the buffering with chunks that deliberately split JSONL
+    lines at internal byte boundaries, confirming complete lines are reassembled.
+    """
+    import json as _json
+
+    from src.ports.execution_backend import _RealKubeLogClient
+
+    line1 = _json.dumps(
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hello"}]}}
+    )
+    line2 = _json.dumps({"type": "result", "subtype": "success", "result": "done"})
+    full_stream = (line1 + "\n" + line2 + "\n").encode("utf-8")
+
+    # Split the stream at a position that falls inside line1 — simulates a chunk
+    # boundary that lands in the middle of a JSONL object.
+    split_at = len(line1) // 2
+    chunks: list[bytes] = [
+        full_stream[:split_at],
+        full_stream[split_at:],
+        b"",  # EOF sentinel
+    ]
+
+    fake_resp = _FakeUrllib3Response(chunks)
+
+    # Build a minimal fake CoreV1Api that returns our stub response.
+    class _FakeCoreV1:
+        def list_namespaced_pod(
+            self, namespace: str, label_selector: str
+        ) -> Any:
+            class _FakePod:
+                class metadata:
+                    name = "test-pod-abc"
+
+            class _FakeList:
+                items = [_FakePod()]
+
+            return _FakeList()
+
+        def read_namespaced_pod_log(
+            self,
+            name: str,
+            namespace: str,
+            follow: bool,
+            _preload_content: bool,
+        ) -> Any:
+            return fake_resp
+
+    client = _RealKubeLogClient(_FakeCoreV1())
+
+    collected: list[str] = []
+    async for line in client.stream_pod_log("test-ns", "run-id=test"):
+        collected.append(line)
+
+    # Both complete JSONL lines must be yielded intact.
+    assert len(collected) == 2, (
+        f"Expected 2 complete lines from chunk-split stream, got {len(collected)}: {collected}"
+    )
+    parsed1 = _json.loads(collected[0])
+    parsed2 = _json.loads(collected[1])
+    assert parsed1["type"] == "assistant", f"First line wrong: {collected[0]}"
+    assert parsed2["type"] == "result", f"Second line wrong: {collected[1]}"
+
+
+@pytest.mark.covers("§9.2", "k8s-real-log-client-line-buffering")
+async def test_real_kube_log_client_no_iter_lines_called() -> None:
+    """_RealKubeLogClient does NOT call iter_lines() on the urllib3 response.
+
+    Regression test: the old code called resp.iter_lines() which raises
+    AttributeError on urllib3.HTTPResponse (iter_lines is a requests.Response
+    method).  The surrounding except-Exception swallowed the error silently,
+    yielding nothing.  This test proves a response that has NO iter_lines()
+    is consumed without AttributeError and yields all lines correctly.
+    """
+    import json as _json
+
+    from src.ports.execution_backend import _RealKubeLogClient
+
+    line = _json.dumps({"type": "result", "subtype": "success", "result": "ok"})
+    chunks: list[bytes] = [(line + "\n").encode("utf-8"), b""]
+
+    fake_resp = _FakeUrllib3Response(chunks)
+    # Belt-and-suspenders: verify our fake truly has no iter_lines attribute.
+    assert not hasattr(fake_resp, "iter_lines"), (
+        "Test precondition: _FakeUrllib3Response must NOT have iter_lines()"
+    )
+
+    class _FakeCoreV1NoIterLines:
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _Pod:
+                class metadata:
+                    name = "pod-no-iter-lines"
+
+            class _List:
+                items = [_Pod()]
+
+            return _List()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            return fake_resp
+
+    client = _RealKubeLogClient(_FakeCoreV1NoIterLines())
+
+    collected: list[str] = []
+    # This must NOT raise AttributeError — the old code would raise here because
+    # iter_lines() does not exist on urllib3.HTTPResponse (or _FakeUrllib3Response).
+    async for line_out in client.stream_pod_log("test-ns", "run-id=test"):
+        collected.append(line_out)
+
+    assert len(collected) == 1, f"Expected 1 line, got {len(collected)}: {collected}"
+    parsed = _json.loads(collected[0])
+    assert parsed["type"] == "result"
+
+
+@pytest.mark.covers("§9.2", "k8s-real-log-client-stream-error-logged")
+async def test_real_kube_log_client_logs_stream_error(caplog: Any) -> None:
+    """_RealKubeLogClient logs a warning (not silently swallows) when .read() raises.
+
+    The old code had `except Exception: return` with no logging — failures were
+    completely invisible.  The fix logs a warning so the error appears in observability
+    tooling while remaining non-fatal (the job-status watcher is authoritative).
+    """
+    import logging as _logging
+
+    from src.ports.execution_backend import _RealKubeLogClient
+
+    class _ErrorResponse:
+        """Simulates a urllib3 response whose read() raises mid-stream."""
+
+        def read(self, amt: int) -> bytes:
+            raise RuntimeError("simulated urllib3 stream error")
+
+    class _FakeCoreV1Error:
+        def list_namespaced_pod(self, namespace: str, label_selector: str) -> Any:
+            class _Pod:
+                class metadata:
+                    name = "pod-error"
+
+            class _List:
+                items = [_Pod()]
+
+            return _List()
+
+        def read_namespaced_pod_log(
+            self, name: str, namespace: str, follow: bool, _preload_content: bool
+        ) -> Any:
+            return _ErrorResponse()
+
+    client = _RealKubeLogClient(_FakeCoreV1Error())
+
+    collected: list[str] = []
+    with caplog.at_level(_logging.WARNING, logger="src.ports.execution_backend"):
+        async for line in client.stream_pod_log("test-ns", "run-id=error-test"):
+            collected.append(line)
+
+    # No lines yielded (stream errored immediately).
+    assert collected == [], f"Expected no lines on stream error, got: {collected}"
+
+    # The error MUST appear in the log — it must not be silently swallowed.
+    assert any(
+        "pod-log stream failed" in r.message and "pod-error" in r.message
+        for r in caplog.records
+    ), (
+        "Expected 'pod-log stream failed' warning in logs — stream errors must be visible, "
+        f"got log records: {[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-stream-pod-log-error-logged")
+async def test_k8s_backend_stream_pod_log_method_logs_error(caplog: Any) -> None:
+    """K8sJobBackend._stream_pod_log() logs a warning when the log client raises.
+
+    Previously, the except-Exception in _stream_pod_log had no logging, so any
+    failure was completely invisible.  The fix adds logger.warning so the run_id
+    and label_selector appear in observability tooling.
+    """
+    import logging as _logging
+
+    from src.ports.harness import RunEventStore
+
+    class _RaisingLogClient:
+        """KubeLogPort double that always raises."""
+
+        async def stream_pod_log(  # type: ignore[override]
+            self, namespace: str, label_selector: str
+        ) -> Any:
+            raise RuntimeError("injected log-stream failure")
+            # unreachable yield makes this an async generator so the return type matches.
+            yield  # noqa: RET504
+
+    fake_kube = FakeKubeClient()
+    run_id = _run_id()
+    backend = K8sJobBackend(
+        image="ghcr.io/test/runner:test",
+        namespace="test-ns",
+        kube_client=fake_kube,
+        kube_log_client=_RaisingLogClient(),
+        poll_interval_s=0.001,
+        job_timeout_s=10.0,
+    )
+
+    store = RunEventStore()
+    store.register(run_id)
+
+    label_selector = f"run-id={run_id[:63]}"
+
+    with caplog.at_level(_logging.WARNING, logger="src.ports.execution_backend"):
+        await backend._stream_pod_log(run_id, label_selector, store)
+
+    # The warning must be present — failure must NOT be swallowed silently.
+    assert any(
+        "pod-log stream failed" in r.message
+        for r in caplog.records
+    ), (
+        "Expected 'pod-log stream failed' warning in log records — "
+        f"got: {[r.message for r in caplog.records]}"
+    )
