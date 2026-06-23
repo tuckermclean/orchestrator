@@ -56,6 +56,10 @@ config:
   # allowlist admits ONLY the repo owner (GITHUB_OWNER); set logins to widen it.
   # (The repo owner is always admitted regardless.)
   ALLOWLIST: ""
+  # Bot's own GitHub login. The comment @-mention trigger becomes "@<GITHUB_BOT_LOGIN>"
+  # (e.g. "@orecchiette1111"); empty falls back to "@claude". Set to your GitHub App's
+  # bot login so humans can invoke it by mention. SPEC §11.1.
+  GITHUB_BOT_LOGIN: ""
   # Reconciler cron schedule (must match RECONCILER_CRON constant)
   RECONCILE_CRON: "*/15 * * * *"
   # delivery-ID LRU ring buffer size

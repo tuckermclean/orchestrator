@@ -41,6 +41,9 @@ config:
   # Default-deny (issue #48): ALLOWLIST: "" admits ONLY the repo owner (GITHUB_OWNER);
   # set comma-separated logins to widen. The owner is always admitted.
   ALLOWLIST: ""
+  # Bot's own GitHub login → comment mention trigger "@orecchiette1111"; also filters
+  # the bot's own comments (self-trigger loop prevention). SPEC §11.1.
+  GITHUB_BOT_LOGIN: "orecchiette1111"
   RECONCILE_CRON: "*/15 * * * *"
   DEDUP_WINDOW: "1000"
   SWARM_LIMITS_GLOBAL: "10"
