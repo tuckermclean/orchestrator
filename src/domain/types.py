@@ -278,7 +278,8 @@ SPECIALIST_ROUTING: tuple[SpecialistRoute, ...] = (
 _CI_GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 
 # ---------------------------------------------------------------------------
-# Verdict — converge-round result, written to .converge-verdict.json (SPEC §5, §7)
+# Verdict — converge-round result, emitted by the reviewer as a fenced JSON block in its
+# final output and read via harness.get_run_verdict (no file committed) (SPEC §5, §7)
 # ---------------------------------------------------------------------------
 
 # Reserved sentinel signature; never a real blocker slug (SPEC §5, §7).

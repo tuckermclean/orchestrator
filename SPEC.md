@@ -803,8 +803,8 @@ async cancel(handle: RunHandle) -> void
 `cancel(handle)` requests termination of a running harness job. Idempotent: calling
 `cancel` on an already-terminal run is a no-op (no error raised). The Engine calls
 `cancel` whenever a poll loop exits due to `CI_WAIT_S` timeout, for both reviewer and
-fixer handles, to prevent a timed-out agent from completing later and overwriting the
-next round's init sentinel or verdict file. The harness adapter's actual cancellation
+fixer handles, to prevent a timed-out agent from completing later and emitting a stale
+verdict into a subsequent round's run. The harness adapter's actual cancellation
 semantics (graceful signal vs hard kill) are implementation-defined; the Engine treats
 the post-cancel state as "no longer in-flight" and proceeds immediately.
 
