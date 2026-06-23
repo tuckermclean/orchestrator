@@ -125,9 +125,10 @@ async def test_handle_event_ready_for_review_drives_converge_pr() -> None:
     await _drain_converge(service)
 
     assert result == {"handled": True}
-    # Reviewer was dispatched — converge actually ran.
-    assert len(harness.dispatch_calls) == 1
+    # Reviewer + adjudicator were dispatched — converge actually ran.
+    assert len(harness.dispatch_calls) == 2
     assert harness.dispatch_calls[0].contract == "agents/converge-reviewer.md"
+    assert harness.dispatch_calls[-1].contract == "agents/adjudicator.md"
     # PR ended in APPROVED state (label swap confirms).
     assert (_PR, LABEL_READY) in forge.add_label_calls
     assert (_PR, LABEL_CONVERGE) in forge.remove_label_calls
@@ -159,8 +160,9 @@ async def test_handle_event_labeled_converge_drives_converge_pr() -> None:
     await _drain_converge(service)
 
     assert result == {"handled": True}
-    assert len(harness.dispatch_calls) == 1
+    assert len(harness.dispatch_calls) == 2
     assert harness.dispatch_calls[0].contract == "agents/converge-reviewer.md"
+    assert harness.dispatch_calls[-1].contract == "agents/adjudicator.md"
     assert (_PR, LABEL_READY) in forge.add_label_calls
 
 
@@ -191,8 +193,9 @@ async def test_handle_event_synchronize_drives_converge_pr() -> None:
     await _drain_converge(service)
 
     assert result == {"handled": True}
-    assert len(harness.dispatch_calls) == 1
+    assert len(harness.dispatch_calls) == 2
     assert harness.dispatch_calls[0].contract == "agents/converge-reviewer.md"
+    assert harness.dispatch_calls[-1].contract == "agents/adjudicator.md"
 
 
 # ---------------------------------------------------------------------------
@@ -257,9 +260,9 @@ async def test_handle_event_ready_for_review_routes_converge_regardless_of_label
     )
     await _drain_converge(service)
 
-    # Routing reached converge_pr — reviewer was dispatched.
+    # Routing reached converge_pr — reviewer + adjudicator were dispatched.
     assert result == {"handled": True}
-    assert len(harness.dispatch_calls) == 1
+    assert len(harness.dispatch_calls) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -397,8 +400,9 @@ async def test_handle_event_converge_duplicate_delivery_id_deduped() -> None:
 
     assert result1 == {"handled": True}
     assert result2 == {"handled": False, "reason": "duplicate_delivery_id"}
-    # Only one reviewer was dispatched (first call) — second was deduped before converge_pr.
-    assert len(harness.dispatch_calls) == 1
+    # Only one converge ran (first call) — second was deduped before converge_pr.
+    # Each converge dispatches reviewer + adjudicator = 2 calls.
+    assert len(harness.dispatch_calls) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +438,9 @@ async def test_handle_event_converge_runs_in_background_not_inline() -> None:
     assert harness.dispatch_calls == []
     assert len(service._converge_tasks) == 1
 
-    # Once drained, the background converge completes and the reviewer is dispatched.
+    # Once drained, the background converge completes: reviewer + adjudicator dispatched.
     await _drain_converge(service)
-    assert len(harness.dispatch_calls) == 1
+    assert len(harness.dispatch_calls) == 2
 
 
 @pytest.mark.covers("§11.1-converge-trigger", "converge-runs-in-background")
@@ -463,5 +467,5 @@ async def test_spawn_converge_dedupes_concurrent_same_pr() -> None:
     assert len(service._converge_tasks) == 1
 
     await _drain_converge(service)
-    # Exactly one converge ran → exactly one reviewer dispatched.
-    assert len(harness.dispatch_calls) == 1
+    # Exactly one converge ran → reviewer + adjudicator dispatched (2 total).
+    assert len(harness.dispatch_calls) == 2

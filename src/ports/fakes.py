@@ -29,6 +29,8 @@ from src.domain.types import (
 
 # Converge reviewer contract path — reviewer dispatches emit verdicts (SPEC §10.2).
 _CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
+# Adjudicator contract path — adjudicator dispatches emit verdicts (SPEC §5, §10.2).
+_ADJUDICATOR_CONTRACT = "agents/adjudicator.md"
 
 
 class SpawnDenied(Exception):
@@ -467,6 +469,9 @@ class FakeHarnessPort:
         # Per-reviewer-dispatch verdicts: stored by run_id (structured-output channel).
         self._verdict_script: list[Verdict] = []
         self._verdicts: dict[str, Verdict | None] = {}
+        # Adjudicator verdicts: scripted separately; consumed one per adjudicator dispatch.
+        # Default (empty script): adjudicator approves (Verdict with blockers=0).
+        self._adjudicator_verdict_script: list[Verdict] | None = None
         # When True, dispatched runs stay "in_progress" (never auto-complete) so the
         # Engine's _await_run hits its CI_WAIT_S timeout — exercises the cancel path.
         self.never_completes: bool = False
@@ -494,6 +499,18 @@ class FakeHarnessPort:
         """
         self._verdict_script = list(verdicts)
 
+    def script_adjudicator_verdict(self, *verdicts: Verdict) -> None:
+        """Queue verdicts emitted (one per adjudicator dispatch) via structured-output channel.
+
+        When the adjudicator contract is dispatched, it consumes the next verdict from
+        this queue.  When the queue is empty or not set, the adjudicator defaults to an
+        approve verdict (blockers=0) — the common test case.
+
+        Use this to test adjudicator rejection → bounded re-converge, and to verify the
+        adjudicator model is ``ADJUDICATION_MODEL`` (Opus).
+        """
+        self._adjudicator_verdict_script = list(verdicts)
+
     def script_fixer_timeout(self, *, after_n_dispatches: int = 0) -> None:
         """Make the next dispatch (after `after_n_dispatches` normal completions) time out.
 
@@ -517,17 +534,34 @@ class FakeHarnessPort:
         self._trigger_ci_check_scripts = list(check_lists)
 
     def _emit_verdict(self, run_id: str, context: DispatchContext) -> None:
-        """If this is a reviewer dispatch, store the next queued verdict by run_id.
+        """Store the next queued verdict by run_id for reviewer or adjudicator dispatches.
 
         Stores the verdict in ``_verdicts[run_id]`` so ``get_run_verdict`` can
         return it — this is the structured-output channel (SPEC §5, §8.2).
 
-        When a forge is wired, the matching footer comment is also posted so tests
-        that exercise the comment-footer fallback path (SPEC §8.2 rows 2–4) still work.
-        Non-reviewer dispatches leave ``_verdicts[run_id]`` as ``None``.
+        Reviewer dispatches: consume from ``_verdict_script``; post footer comment when
+        a forge is wired (supports comment-footer fallback tests, SPEC §8.2 rows 2–4).
+
+        Adjudicator dispatches: consume from ``_adjudicator_verdict_script``; default to
+        approve (blockers=0) when the script is empty/not set (common test default).
+
+        Non-reviewer/adjudicator dispatches (fixer, nitpicker) leave ``_verdicts[run_id]``
+        as ``None``.
         """
+        if context.contract == _ADJUDICATOR_CONTRACT:
+            # Adjudicator dispatch: consume from adjudicator script or default approve.
+            if self._adjudicator_verdict_script:
+                verdict = self._adjudicator_verdict_script.pop(0)
+            else:
+                # Default: approve (blockers=0) — the normal case in most tests.
+                verdict = Verdict(
+                    blockers=0, suggestions=0, nits=[], blocker_signatures=[]
+                )
+            self._verdicts[run_id] = verdict
+            return
+
         if context.contract != _CONVERGE_REVIEWER_CONTRACT or context.pr_ref is None:
-            # Non-reviewer dispatch: no verdict.
+            # Non-reviewer/adjudicator dispatch (fixer, nitpicker): no verdict.
             self._verdicts[run_id] = None
             return
         if not self._verdict_script:

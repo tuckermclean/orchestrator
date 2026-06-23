@@ -32,8 +32,10 @@
     tests: ["test_counter_atomic_increment_concurrent"]
 
 "§8.3":  # decide_round
-  "row-1-approve":
-    tests: ["test_decide_round_approve_r1", "test_decide_round_approve_r2", "test_decide_round_approve_r3", "test_decide_round_zero_blockers_ci_red_not_approve_r1", "test_decide_round_unknown_never_approves_even_ci_green"]
+  "row-1-adjudicate":  # spotless (blockers==0, ci_green, suggestions==0) at any round
+    tests: ["test_decide_round_adjudicate_r1_spotless", "test_decide_round_adjudicate_r2_spotless", "test_decide_round_adjudicate_r3_spotless", "test_decide_round_zero_blockers_ci_red_not_adjudicate_r1", "test_decide_round_unknown_never_adjudicates_even_ci_green", "test_decide_round_r1_suggestions_present_not_spotless", "test_decide_round_r2_suggestions_present_not_spotless"]
+  "row-1b-adjudicate-r3":  # R3 with 0 blockers + ci_green (suggestions may remain)
+    tests: ["test_decide_round_adjudicate_r3_with_residual_suggestions"]
   "row-2-r1-fix":
     tests: ["test_decide_round_fix_r1_with_blockers", "test_decide_round_fix_r1_unknown"]
   "row-3-no-progress":
@@ -80,6 +82,32 @@
     tests: ["test_converge_cap_reached_e5"]
   "E11-fixer-timeout":
     tests: ["test_converge_fixer_timeout_e11", "test_converge_fixer_timeout_r2_e11"]
+  "E12-adjudicator-reconverge-cap":  # adjudicator reject after RECONVERGE_CAP → needs-human
+    tests: ["test_adjudication_second_reject_cap_reached_needs_human"]
+
+"§5-adjudication":  # Adjudication phase: nitpicker (Haiku) + adjudicator (Opus) — SPEC §5, §10.2, §251
+  "spotless-early-exit-r1":
+    tests: ["test_adjudication_spotless_r1_no_nitpicker_adjudicator_approves"]
+  "nits-trigger-nitpicker":
+    tests: ["test_adjudication_nits_dispatch_nitpicker_on_haiku"]
+  "suggestions-trigger-nitpicker":
+    tests: ["test_adjudication_suggestions_dispatch_nitpicker"]
+  "adjudicator-reject-reconverge":
+    tests: ["test_adjudication_reject_triggers_one_reconverge"]
+  "adjudicator-reject-cap-reached-e12":
+    tests: ["test_adjudication_second_reject_cap_reached_needs_human"]
+  "reconverge-counter-channel":
+    tests: ["test_adjudication_reconverge_uses_separate_counter_channel"]
+  "no-followup-issue":
+    tests: ["test_adjudication_no_create_issue_on_approve", "test_converge_nit_issue_created_on_approve_with_nits", "test_converge_nit_issue_omitted_when_empty", "test_converge_nits_dispatched_to_nitpicker_not_issue", "test_converge_nit_issue_not_created_when_no_nits"]
+
+"§251":  # Model tiering: Sonnet reviewers, Haiku nitpicker, Opus adjudicator
+  "adjudicator-always-opus":
+    tests: ["test_adjudication_adjudicator_always_uses_opus", "test_converge_r3_adjudication_model"]
+  "nitpicker-always-haiku":
+    tests: ["test_adjudication_nits_dispatch_nitpicker_on_haiku", "test_converge_nit_issue_created_on_approve_with_nits", "test_converge_nits_dispatched_to_nitpicker_not_issue"]
+  "reviewers-always-sonnet":
+    tests: ["test_converge_r1_blocker_fix_r2_approve", "test_converge_r3_adjudication_model", "test_converge_resumes_from_persisted_round"]
 
 "§8.12":  # decide_specialists
   "base-set-only":

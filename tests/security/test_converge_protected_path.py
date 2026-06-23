@@ -104,9 +104,9 @@ async def test_converge_protected_path_non_matching_proceeds() -> None:
 
     state = await engine.converge(_PR)
 
-    # Proceeds past the gate and reaches the reviewer.
+    # Proceeds past the gate and reaches the reviewer, then adjudicator.
     assert state == "APPROVED"
-    assert len(harness.dispatch_calls) == 1
+    assert len(harness.dispatch_calls) == 2
 
 
 @pytest.mark.covers("§8.12", "i9-closure")

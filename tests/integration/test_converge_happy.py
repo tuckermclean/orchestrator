@@ -6,6 +6,7 @@ import pytest
 
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
+    ADJUDICATION_MODEL,
     DEFAULT_SWARM_MODEL,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
@@ -49,23 +50,31 @@ def _engine(
 
 
 async def test_converge_approve_round1() -> None:
-    """R1: reviewer emits 0-blocker verdict, CI green → APPROVED with label swap."""
+    """R1: reviewer spotless (0-blocker, 0-suggestion), CI green → adjudicate → APPROVED.
+
+    New 3-tier flow: R1 reviewer (Sonnet) finds spotless → adjudicator (Opus) approves
+    → APPROVED.  Two dispatches total: reviewer + adjudicator (no nitpicker — 0 nits).
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
     harness.script_reviewer_verdicts(
         Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
     )
+    # Adjudicator defaults to approve (blockers=0) when no script provided.
     engine = _engine(forge, harness)
 
     state = await engine.converge(_PR)
 
     assert state == "APPROVED"
-    # Reviewer dispatched at R1 with Sonnet / DEFAULT_SWARM_MODEL.
-    assert len(harness.dispatch_calls) == 1
+    # Two dispatches: reviewer R1 (Sonnet) + adjudicator (Opus).
+    assert len(harness.dispatch_calls) == 2
     reviewer_ctx = harness.dispatch_calls[0]
+    adjudicator_ctx = harness.dispatch_calls[1]
     assert reviewer_ctx.model == DEFAULT_SWARM_MODEL
     assert reviewer_ctx.contract == "agents/converge-reviewer.md"
+    assert adjudicator_ctx.model == ADJUDICATION_MODEL
+    assert adjudicator_ctx.contract == "agents/adjudicator.md"
     # allowed_agent_refs matches decide_specialists exactly (I9/D2).
     assert reviewer_ctx.allowed_agent_refs == decide_specialists(["src/foo.py"], 1)
     # Label swap.
@@ -173,7 +182,12 @@ async def test_converge_idempotency_gate_approved() -> None:
 
 
 async def test_converge_nit_followup_issue() -> None:
-    """Approve with nits opens a deduplicated follow-up issue."""
+    """Nits trigger nitpicker dispatch (not follow-up issue) — new 3-tier model.
+
+    Under the 3-tier model, accumulated nits are handled by the nitpicker in the
+    adjudication phase — no follow-up issue is created.  The nitpicker is dispatched
+    as dispatch #2 (after reviewer R1), then the adjudicator as dispatch #3.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort(forge=forge)
     _green_pr(forge, changed_files=["src/foo.py"])
@@ -182,11 +196,19 @@ async def test_converge_nit_followup_issue() -> None:
     )
     engine = _engine(forge, harness)
 
-    await engine.converge(_PR)
+    state = await engine.converge(_PR)
 
-    assert len(forge.create_issue_calls) == 1
-    _repo, _title, body = forge.create_issue_calls[0]
-    assert body.count("nit-a") == 1
+    assert state == "APPROVED"
+    # No follow-up issue — nits are handled by the nitpicker in-loop.
+    assert forge.create_issue_calls == [], (
+        "Engine must NOT open a follow-up nits issue in the 3-tier model; "
+        "the nitpicker handles nits in-loop (adjudication phase)"
+    )
+    # Nitpicker dispatched (nits present) then adjudicator.
+    assert len(harness.dispatch_calls) == 3
+    assert harness.dispatch_calls[0].contract == "agents/converge-reviewer.md"
+    assert harness.dispatch_calls[1].contract == "agents/nitpicker.md"
+    assert harness.dispatch_calls[2].contract == "agents/adjudicator.md"
 
 
 async def test_converge_reviewer_timeout_cancels_handle(
