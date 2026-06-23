@@ -65,7 +65,7 @@
   "row-5-no-verdict-engine-wired":
     tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
   "row-6-ci-red-engine-wired":
-    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks", "test_converge_ci_red_docker_still_red_escalates"]
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_any_failing_check_escalates", "test_converge_ci_red_some_checks_still_red_escalates"]
   "row-7-cap-reached-engine-wired":
     tests: ["test_converge_cap_reached_e5"]
 
@@ -75,7 +75,7 @@
   "E3-no-verdict":
     tests: ["test_converge_no_verdict_retry_then_cap_e3", "test_converge_no_verdict_retry_below_cap_returns_converging"]
   "E4-ci-red":
-    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_polls_all_six_blocking_checks", "test_converge_ci_red_docker_still_red_escalates"]
+    tests: ["test_converge_ci_red_recovery_approve", "test_converge_ci_red_retrigger_fails_e4", "test_converge_ci_red_any_failing_check_escalates", "test_converge_ci_red_some_checks_still_red_escalates"]
   "E5-cap-reached":
     tests: ["test_converge_cap_reached_e5"]
   "E11-fixer-timeout":
@@ -319,17 +319,21 @@
   "lock-asyncio-serializes":
     tests: ["test_asyncio_lock_provider_serializes_same_entity", "test_asyncio_lock_provider_different_entities_parallel"]
 
-"§7-converge-gate":  # SPEC §7 BLOCKING_CI_CHECKS — per-repo required_checks gate (closes #71)
-  "narrowed-subset-approves":
-    tests: ["test_converge_narrowed_subset_approves_when_subset_green"]
-  "narrowed-subset-full-still-required":
-    tests: ["test_converge_narrowed_subset_escalates_when_subset_red"]
-  "default-behaviour-unchanged":
-    tests: ["test_converge_default_checks_all_six_required"]
-  "no-registry-fallback":
-    tests: ["test_engine_converge_no_required_checks_uses_blocking_ci_checks"]
-  "service-layer-resolves-registry":
-    tests: ["test_service_converge_pr_resolves_per_repo_required_checks", "test_service_converge_pr_no_registry_uses_global_constant", "test_service_converge_pr_unregistered_repo_uses_global_constant"]
+"§7-converge-gate":  # SPEC §7 CI green definition — trust the repo's actual checks
+  "no-checks-green":
+    tests: ["test_converge_no_check_runs_is_green"]
+  "all-checks-green":
+    tests: ["test_converge_all_present_checks_green_approves"]
+  "skipped-neutral-green":
+    tests: ["test_converge_all_successful_checks_green"]
+  "any-check-failing":
+    tests: ["test_converge_one_failing_check_is_not_green", "test_converge_cancelled_check_is_not_green"]
+  "pending-check-approves-when-all-complete":
+    tests: ["test_converge_pending_check_waits_then_approves"]
+  "ci-red-recovery-all-green":
+    tests: ["test_converge_ci_red_recovery_all_checks_green"]
+  "service-layer-passthrough":
+    tests: ["test_service_converge_pr_no_registry", "test_service_converge_pr_with_registry_no_per_repo_override"]
 
 "§3.2":  # ForgePort contract suite (TESTING.md §3.2) — parametrized over [fake, real]
   "forge-get-issue":

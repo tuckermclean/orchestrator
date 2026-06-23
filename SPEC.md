@@ -188,7 +188,7 @@ line numbers. The engine compares consecutive rounds to detect no-progress.
 
 | Token | Condition | Edge |
 |---|---|---|
-| `approve` | `blockers == 0` AND `ci_green == true` (any round) | → APPROVED (P8) |
+| `approve` | `blockers == 0` AND `ci_green == true` (any round; see §7 CI green definition) | → APPROVED (P8) |
 | `fix` | R1 (always); R2 (if not stuck) | → Fix phase, next round |
 | `escalate:no-progress` | R2/R3: same non-empty signatures two consecutive rounds | → ESCALATED (P10, E2) |
 | `escalate:no-verdict` | R3: `blockers == "unknown"` | → retry < NO_VERDICT_RETRY_CAP (P11) else ESCALATED (P10, E3) |
@@ -321,26 +321,33 @@ RunConclusion ∈ { "success", "failure", "cancelled" }  # present only when sta
 RunStatus   = { state: RunState, conclusion: RunConclusion | None }
 ```
 
-### `BLOCKING_CI_CHECKS`
+### CI green definition — trust the repo's actual checks
 
-The ordered list of CI check names that must all be green before a converge `approve`
-(P8, P9). All 6 are re-polled on the `ci-red` recovery path (see §10.2 step 4g).
+`ci_green == true` iff **every check run present on the PR is in a passing terminal
+state** (`state == "completed"` AND `conclusion ∈ {"success", "skipped", "neutral"}`).
+A PR with **no check runs at all is `ci_green`** (vacuously; the repo has no CI or
+none apply to this PR).  Any check that has not yet reached `"completed"` state is
+pending — the converge loop must **poll** (up to `CI_WAIT_S`) until all present
+checks complete before computing `ci_green`.
 
-| # | Name | Blocker signature slug |
-|---|---|---|
-| 1 | Type Check | `ci-fail:type-check` |
-| 2 | Lint | `ci-fail:lint` |
-| 3 | Integration Tests | `ci-fail:integration-tests` |
-| 4 | Docker Build & Scan | `ci-fail:docker-build` |
-| 5 | Helm Lint | `ci-fail:helm-lint` |
-| 6 | Helm Kubeconform | `ci-fail:helm-kubeconform` |
+| Condition | `ci_green` |
+|---|---|
+| All present checks are `completed` + green conclusion | `true` |
+| No check runs present | `true` (vacuous — repo has no CI) |
+| Any check `conclusion ∈ {failure, cancelled, timed_out, action_required, …}` | `false` |
+| Any check not yet `completed` (queued / in_progress) | `false` (pending; poll and wait) |
 
-A check is green when its state is `success`, `skipped`, or `neutral`.
+There is **no named allow-list and no per-repo `required_checks` config**.  The gate
+trusts every check the repo actually runs, whatever those checks are named.
 
-Per-repo override: `RepoConfig.required_checks` (from the registry, issue #49) may
-narrow this set for a specific repo.  The converge approve gate uses that narrowed
-set when available, falling back to the full `BLOCKING_CI_CHECKS` when no per-repo
-config exists.  The `ci-red` recovery re-poll uses the same set (closes #71).
+**Security note (B1 / I2 / E1 / PROTECTED_PATHS).**  The obvious risk of "no checks →
+green" is a PR that deletes or disables the CI workflow to fake-green.  This is already
+covered by the protected-path check (E1): `.github/workflows/**` is a PROTECTED_PATH,
+so any PR that changes a workflow file — including deleting one — appears as a changed
+path and trips the E1 gate, escalating to human before any review round.  The
+protected-path check operates on changed paths (files added, modified, or deleted in
+the diff), so a workflow *deletion* triggers it exactly as an edit does.  No allow-list
+is needed for this defense; E1 is the correct and sufficient guard.
 
 ---
 
@@ -760,7 +767,7 @@ overwrites. All paths are repo-root-relative POSIX.
 
 ```
 CheckRun {
-  name:       string        # check name matching BLOCKING_CI_CHECKS entries
+  name:       string        # check name as reported by the forge
   state:      RunState      # see §7 RunState
   conclusion: RunConclusion | None   # non-None when state == "completed"
 }
@@ -768,8 +775,8 @@ CheckRun {
 
 A check is green when `state == "completed"` AND `conclusion ∈ {"success", "skipped",
 "neutral"}`. A check is red when `state == "completed"` AND `conclusion` is any other value.
-A check that has never run is absent from the list; the Engine treats an absent check as red
-(conservative: not yet green).
+A check is pending when `state ∈ {"queued", "in_progress"}`; the Engine waits for it
+(see §7 CI green definition). A PR with no check runs at all is `ci_green` (vacuous).
 
 `last_dispatch_run_at` — placed on `ForgePort` because GitHub exposes it via the Actions
 Workflow Runs API (a forge-native endpoint), not the harness. Do not move to `HarnessPort`
@@ -1003,10 +1010,11 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         `await counter.increment(pr_ref, "converge-retry")`; do NOT persist round;
         return — RC-3 or a direct trigger resumes at the same round (P11);
         else `terminal_escalate(E3)`.
-      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll **all `BLOCKING_CI_CHECKS`**
-        up to `CI_WAIT_S`; if all green → execute full `approve` token actions (P9:
-        add `LABEL_READY`, remove `LABEL_CONVERGE`, post review, nit issue if non-empty,
-        counter.reset, clear_converge_state) → `APPROVED`; else `terminal_escalate(E4)`.
+      - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll until **all present checks
+        complete** (up to `CI_WAIT_S`) and are green (§7 CI green definition); if all
+        green → execute full `approve` token actions (P9: add `LABEL_READY`, remove
+        `LABEL_CONVERGE`, post review, nit issue if non-empty, counter.reset,
+        clear_converge_state) → `APPROVED`; else `terminal_escalate(E4)`.
       - `escalate:cap-reached` → `terminal_escalate(E5)`. _(D3: work never discarded.)_
 
 ### §10.3 `Engine.reconcile`

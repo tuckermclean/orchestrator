@@ -274,19 +274,6 @@ SPECIALIST_ROUTING: tuple[SpecialistRoute, ...] = (
     ),
 )
 
-# ---------------------------------------------------------------------------
-# BLOCKING_CI_CHECKS — ordered; all must be green before approve (SPEC §7)
-# ---------------------------------------------------------------------------
-
-BLOCKING_CI_CHECKS: tuple[str, ...] = (
-    "Type Check",
-    "Lint",
-    "Integration Tests",
-    "Docker Build & Scan",
-    "Helm Lint",
-    "Helm Kubeconform",
-)
-
 # A CI check counts as green when its conclusion is one of these (SPEC §7).
 _CI_GREEN_CONCLUSIONS: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 

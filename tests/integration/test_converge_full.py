@@ -12,7 +12,6 @@ import pytest
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
     ADJUDICATION_MODEL,
-    BLOCKING_CI_CHECKS,
     DEFAULT_SWARM_MODEL,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
@@ -40,18 +39,21 @@ _CHANGED_FILES = ["src/foo.py"]
 
 
 def _green_pr(forge: FakeForgePort, *, changed_files: list[str] | None = None) -> None:
+    """PR with all present CI checks green (generic set — no named allow-list)."""
     files = changed_files if changed_files is not None else _CHANGED_FILES
     forge.seed_pr(_PR, draft=False, labels=[LABEL_CONVERGE], changed_files=len(files))
     forge._changed_files[forge._pr_key(_PR)] = files
-    for name in BLOCKING_CI_CHECKS:
-        forge.seed_check_run(_PR, name, "completed", "success")
+    forge.seed_check_run(_PR, "Type Check", "completed", "success")
+    forge.seed_check_run(_PR, "Lint", "completed", "success")
+    forge.seed_check_run(_PR, "Tests", "completed", "success")
 
 
 def _red_pr(forge: FakeForgePort, *, changed_files: list[str] | None = None) -> None:
-    """PR with CI failing (no passing CI checks seeded)."""
+    """PR with CI failing (a failing check seeded)."""
     files = changed_files if changed_files is not None else _CHANGED_FILES
     forge.seed_pr(_PR, draft=False, labels=[LABEL_CONVERGE], changed_files=len(files))
     forge._changed_files[forge._pr_key(_PR)] = files
+    forge.seed_check_run(_PR, "Tests", "completed", "failure")
 
 
 def _engine(
@@ -321,10 +323,11 @@ async def test_converge_ci_red_recovery_approve(
         _blocker_verdict(["sig-b"]),  # R2
         _zero_verdict(),              # R3 → ci-red (CI not green at time of decide_round)
     )
-    # After trigger_ci, script green checks — synchronously updates forge's check_runs.
+    # After trigger_ci, script green checks so the recovery poll sees them.
     green_checks = [
-        CheckRun(name=name, state="completed", conclusion="success")
-        for name in BLOCKING_CI_CHECKS
+        CheckRun(name="Type Check", state="completed", conclusion="success"),
+        CheckRun(name="Lint", state="completed", conclusion="success"),
+        CheckRun(name="Tests", state="completed", conclusion="success"),
     ]
     harness.script_trigger_ci_checks(green_checks)
     engine = _engine(forge, harness)
@@ -365,10 +368,14 @@ async def test_converge_ci_red_retrigger_fails_e4(
 
 @pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
 @pytest.mark.covers("§6-escalations", "E4-ci-red")
-async def test_converge_ci_red_polls_all_six_blocking_checks(
+async def test_converge_ci_red_any_failing_check_escalates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OQ-1: ci-red recovery re-polls ALL 6 BLOCKING_CI_CHECKS (not a subset)."""
+    """ci-red recovery: any failing check after trigger_ci → ESCALATED (E4).
+
+    New semantics: all present checks must pass — no named allow-list.  Two checks
+    are green but one ("Deploy") is failing; the gate must escalate (E4), not approve.
+    """
     monkeypatch.setattr(converge_mod, "CI_WAIT_S", 0)
 
     forge = FakeForgePort()
@@ -380,36 +387,34 @@ async def test_converge_ci_red_polls_all_six_blocking_checks(
         _blocker_verdict(["sig-b"]),
         _zero_verdict(),
     )
-    # Script checks: only 5 of 6 green (one still failing) → CI not green → E4.
+    # Script: 2 checks green, 1 still failing → CI not green → E4.
     partial_checks = [
-        CheckRun(name=name, state="completed", conclusion="success")
-        for name in list(BLOCKING_CI_CHECKS)[:5]
-    ] + [
-        CheckRun(
-            name=BLOCKING_CI_CHECKS[5], state="completed", conclusion="failure"
-        )
+        CheckRun(name="Type Check", state="completed", conclusion="success"),
+        CheckRun(name="Lint", state="completed", conclusion="success"),
+        CheckRun(name="Deploy", state="completed", conclusion="failure"),
     ]
     harness.script_trigger_ci_checks(partial_checks)
     engine = _engine(forge, harness)
 
     state = await engine.converge(_PR)
 
-    # 5/6 green is not enough → ESCALATED (E4).
+    # One failing check is enough → ESCALATED (E4).
     assert state == "ESCALATED"
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls
 
 
 @pytest.mark.covers("§8.3-integration", "row-6-ci-red-engine-wired")
 @pytest.mark.covers("§6-escalations", "E4-ci-red")
-async def test_converge_ci_red_docker_still_red_escalates(
+async def test_converge_ci_red_some_checks_still_red_escalates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """OQ-1 regression guard: code checks recover but Docker/Helm tier stays RED → E4.
+    """OQ-1 regression guard (adapted): partial CI recovery is insufficient → E4.
 
-    At R3 with 0 blockers, CI re-trigger recovers indices 0-2 (Type Check, Lint,
-    Integration Tests) to green, but indices 3-5 (Docker Build & Scan, Helm Lint,
-    Helm Kubeconform) stay red.  _poll_ci_until_green must return False because all
-    6 BLOCKING_CI_CHECKS are required → ESCALATED (E4), not APPROVED (P9).
+    At R3 with 0 blockers, CI re-trigger recovers some checks to green but leaves
+    others (e.g. a deploy check) still red.  The gate must return False because
+    ALL present checks must pass (SPEC §7 CI green definition) → ESCALATED (E4),
+    not APPROVED (P9).  Tests the same invariant as the old OQ-1 guard, now using
+    the repo's actual checks rather than the hardcoded BLOCKING_CI_CHECKS list.
 
     SPEC §13 (OQ-1), TESTING.md §4.3.
     """
@@ -424,20 +429,20 @@ async def test_converge_ci_red_docker_still_red_escalates(
         _blocker_verdict(["sig-b"]),  # R2
         _zero_verdict(),              # R3 → ci-red (CI still not green at decide_round)
     )
-    # After trigger_ci: code-check tier (indices 0-2) recovers; Docker/Helm tier stays red.
+    # After trigger_ci: code checks recover but deploy tier stays red.
     partial_recovery_checks = [
-        CheckRun(name=BLOCKING_CI_CHECKS[i], state="completed", conclusion="success")
-        for i in range(3)  # Type Check, Lint, Integration Tests → green
-    ] + [
-        CheckRun(name=BLOCKING_CI_CHECKS[i], state="completed", conclusion="failure")
-        for i in range(3, 6)  # Docker Build & Scan, Helm Lint, Helm Kubeconform → red
+        CheckRun(name="Type Check", state="completed", conclusion="success"),
+        CheckRun(name="Lint", state="completed", conclusion="success"),
+        CheckRun(name="Tests", state="completed", conclusion="success"),
+        CheckRun(name="Deploy", state="completed", conclusion="failure"),
+        CheckRun(name="Helm Lint", state="completed", conclusion="failure"),
     ]
     harness.script_trigger_ci_checks(partial_recovery_checks)
     engine = _engine(forge, harness)
 
     state = await engine.converge(_PR)
 
-    # Docker/Helm checks still red → _poll_ci_until_green returns False → ESCALATED (E4).
+    # Deploy/Helm checks still red → poll returns False → ESCALATED (E4).
     assert state == "ESCALATED"
     assert len(harness.trigger_ci_calls) == 1
     assert (_PR, LABEL_NEEDS_HUMAN) in forge.add_label_calls

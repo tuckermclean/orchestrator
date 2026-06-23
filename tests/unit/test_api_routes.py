@@ -105,7 +105,7 @@ def test_list_repos_single_repo() -> None:
     assert data[0]["name"] == _PROD_REPO
     assert data[0]["enabled"] is True
     assert data[0]["intake_enabled"] is True
-    assert "required_checks" in data[0]
+    assert "required_checks" not in data[0]  # field removed — CI gate trusts actual checks
 
 
 def test_list_repos_multiple_repos() -> None:

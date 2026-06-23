@@ -4,14 +4,16 @@ Implements the complete converge loop: happy-path approve, fix (R1/R2), and all 
 paths: no-progress (E2), no-verdict (E3), ci-red (E4), cap-reached (E5), fixer-timeout (E11).
 Protected-path (E1) and empty-diff (E6) gates are also implemented.
 
-Per-repo required_checks (§7, closes #71)
------------------------------------------
-The approve gate uses the *caller-supplied* ``required_checks`` tuple rather than the
-module-level ``BLOCKING_CI_CHECKS`` constant.  Callers that know the PR's repo config
-(e.g. ``OrchestratorService.converge_pr``) resolve the per-repo override from the
-registry and pass it in; callers that don't (direct ``Engine.converge`` calls in tests or
-legacy paths) omit the argument and receive the existing ``BLOCKING_CI_CHECKS`` default —
-so backward compatibility is fully preserved.
+CI green definition (SPEC §7)
+------------------------------
+``ci_green`` is true iff every check run present on the PR is completed and green
+(``conclusion ∈ {"success", "skipped", "neutral"}``).  A PR with no check runs at
+all is also green (vacuously — the repo has no CI or none apply).
+
+Any pending check (``state ∈ {"queued", "in_progress"}``) keeps ``ci_green`` false;
+the converge loop polls until all checks complete (up to ``CI_WAIT_S``) before making
+the approve/escalate decision.  There is no named allow-list and no per-repo
+``required_checks`` config — the gate trusts whatever checks the managed repo runs.
 """
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ from src.decisions.resolve_blockers import resolve_blockers
 from src.domain.types import (
     _CI_GREEN_CONCLUSIONS,
     ADJUDICATION_MODEL,
-    BLOCKING_CI_CHECKS,
     CI_WAIT_S,
     CONVERGE_ROUNDS,
     DEFAULT_SWARM_MODEL,
@@ -65,23 +66,24 @@ def _touches_protected_path(changed_paths: list[str]) -> bool:
     return any(spec.match_file(path) for path in changed_paths)
 
 
-def _all_checks_green(
-    checks: list[CheckRun],
-    required_checks: tuple[str, ...] = BLOCKING_CI_CHECKS,
-) -> bool:
-    """All *required_checks* present and green (success/skipped/neutral) — SPEC §7.
+def _all_checks_green(checks: list[CheckRun]) -> bool:
+    """True iff every present check is completed and green (SPEC §7 CI green definition).
 
-    Uses the caller-supplied ``required_checks`` so per-repo overrides take effect.
-    Defaults to ``BLOCKING_CI_CHECKS`` for callers that do not specify a subset.
+    - Empty list → True (no CI / no applicable checks — vacuously green).
+    - Any check not yet ``"completed"`` → False (pending; poll and wait).
+    - Any check ``conclusion`` outside the green set → False (failing).
     """
-    by_name = {c.name: c for c in checks}
-    for name in required_checks:
-        check = by_name.get(name)
-        if check is None or check.state != "completed":
+    for check in checks:
+        if check.state != "completed":
             return False
         if check.conclusion not in _CI_GREEN_CONCLUSIONS:
             return False
     return True
+
+
+def _any_checks_pending(checks: list[CheckRun]) -> bool:
+    """True iff at least one check is not yet in a terminal state."""
+    return any(check.state != "completed" for check in checks)
 
 
 def _normalize_sigs(sigs: list[str]) -> list[str]:
@@ -101,23 +103,24 @@ async def _read_verdict(engine: Engine, pr_ref: PRRef) -> Verdict:
         return SENTINEL_VERDICT
 
 
-async def _poll_ci_until_green(
+async def _poll_checks_until_complete(
     engine: Engine,
     pr_ref: PRRef,
-    required_checks: tuple[str, ...] = BLOCKING_CI_CHECKS,
-) -> bool:
-    """Poll *required_checks* up to CI_WAIT_S after a trigger_ci.
+) -> list[CheckRun]:
+    """Poll check runs up to CI_WAIT_S until all present checks reach a terminal state.
 
-    Returns True if all required checks become green within the deadline, False otherwise.
+    Returns the final list of check runs (all completed, or deadline expired).
     Yields to the event loop between polls so async tasks are not starved.
+    Called both before computing ``ci_green`` at each review round and during the
+    ``ci-red`` recovery path after ``trigger_ci`` (SPEC §7, §10.2 step 4g).
     """
     deadline = time.monotonic() + CI_WAIT_S
     while True:
         checks = await engine.forge.get_check_runs(pr_ref)
-        if _all_checks_green(checks, required_checks):
-            return True
+        if not _any_checks_pending(checks):
+            return checks
         if time.monotonic() >= deadline:
-            return False
+            return checks
         await asyncio.sleep(POLL_INTERVAL_S)
 
 
@@ -137,14 +140,13 @@ async def _terminal_escalate(engine: Engine, pr_ref: PRRef) -> PRState:
 async def converge(
     engine: Engine,
     pr_ref: PRRef,
-    required_checks: tuple[str, ...] = BLOCKING_CI_CHECKS,
 ) -> PRState:
     """Run the converge sub-machine for one PR (SPEC §10.2).
 
-    ``required_checks`` names the CI checks that must be green before the gate
-    can approve.  Pass ``RepoConfig.required_checks`` from the registry to enable
-    per-repo narrowing; omit (or pass ``BLOCKING_CI_CHECKS``) for the default
-    behaviour (closes #71).
+    ``ci_green`` is computed by trusting the repo's actual check runs — every
+    present check must be completed and green (SPEC §7 CI green definition).
+    Pending checks are awaited (up to ``CI_WAIT_S``) before the approve/escalate
+    decision is made.  A PR with no check runs at all is vacuously green.
     """
     assert engine.converge_state is not None, "converge requires a ConvergeStateStore"
     forge = engine.forge
@@ -211,8 +213,9 @@ async def converge(
         await converge_state.set_last_run_handle(pr_ref, reviewer_handle)
         await engine._await_run(reviewer_handle)
 
-        checks = await forge.get_check_runs(pr_ref)
-        ci_green = _all_checks_green(checks, required_checks)
+        # Wait for any pending checks to complete before computing ci_green (SPEC §7).
+        checks = await _poll_checks_until_complete(engine, pr_ref)
+        ci_green = _all_checks_green(checks)
 
         blockers = await resolve_blockers(forge, pr_ref, r, round_started)
         verdict = await _read_verdict(engine, pr_ref)
@@ -285,10 +288,10 @@ async def converge(
             return await _terminal_escalate(engine, pr_ref)
 
         if token == "escalate:ci-red":
-            # OQ-1: trigger CI, then re-poll required_checks up to CI_WAIT_S.
+            # Trigger CI, then poll until all present checks complete (SPEC §10.2 4g).
             await engine.harness.trigger_ci(pr_ref)
-            recovered = await _poll_ci_until_green(engine, pr_ref, required_checks)
-            if recovered:
+            final_checks = await _poll_checks_until_complete(engine, pr_ref)
+            if _all_checks_green(final_checks):
                 # P9: full approve actions.
                 return await _finalize_approve(engine, pr_ref, accumulated_nits)
             return await _terminal_escalate(engine, pr_ref)

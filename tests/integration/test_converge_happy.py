@@ -6,7 +6,6 @@ import pytest
 
 from src.decisions.decide_specialists import decide_specialists
 from src.domain.types import (
-    BLOCKING_CI_CHECKS,
     DEFAULT_SWARM_MODEL,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
@@ -30,10 +29,10 @@ _PR = PRRef(repo=_REPO, number=11)
 
 
 def _green_pr(forge: FakeForgePort, *, changed_files: list[str]) -> None:
+    """Seed a non-draft converge PR with a generic green CI check (no named allow-list)."""
     forge.seed_pr(_PR, draft=False, labels=[LABEL_CONVERGE], changed_files=len(changed_files))
     forge._changed_files[forge._pr_key(_PR)] = changed_files
-    for name in BLOCKING_CI_CHECKS:
-        forge.seed_check_run(_PR, name, "completed", "success")
+    forge.seed_check_run(_PR, "CI", "completed", "success")
 
 
 def _engine(
