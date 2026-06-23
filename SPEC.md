@@ -1170,8 +1170,10 @@ adds exactly one of `LABEL_AGENT_WORK` or `LABEL_AWAITING_PROMOTION` onto `[LABE
 |---|---|---|---|
 | `issues` | `opened` / `reopened` | `intake_enabled == true` | `Engine.intake` (Gate 1: trust check + triager dispatch; Gate 2 runs deferred — see §10.4) |
 | `issues` | `labeled` | `label == LABEL_AGENT_WORK` | `Engine.dispatch` (fires when Gate 2 applies `LABEL_AGENT_WORK` after actionable triager verdict, or when a human promotes via `promote()`) |
-| `issue_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
-| `pull_request_review_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
+| `issue_comment` on a **PR** | `created` | base gates AND `payload.issue.pull_request` present AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` (routed as a PR — `pr_ref` synthesized from the issue/PR number) |
+| `issue_comment` on an **issue** | `created` | base gates AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
+| `issue_comment` on an **issue** | `created` | base gates AND issue NOT `closed` AND issue does NOT carry `LABEL_AGENT_WORK` | **`promote()`** — human override applies `LABEL_AGENT_WORK` (I7 swap) → `Engine.dispatch` |
+| `pull_request_review_comment` | `created` | base gates AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
 | `pull_request` | `ready_for_review` | — | `Engine.converge` |
 | `pull_request` | `labeled` | `label == LABEL_CONVERGE` | `Engine.converge` |
 | `pull_request` | `synchronize` | — | `Engine.converge` |
@@ -1186,6 +1188,27 @@ condition filters comments whose author `user.type == "Bot"` (and the bot's own
 breaks the self-trigger loop where an agent's comment would spawn another orchestrator
 run. Comment events route only on `action == created` (not `edited`/`deleted`) and are
 guarded by the per-entity in-flight claim so rapid duplicate commands dispatch once.
+The **base gates** for any comment event are: `action == created` AND body contains the
+bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`).
+
+**`issue_comment` on a PR.** GitHub delivers a comment on a PR's *conversation* as an
+`issue_comment` event whose `payload.issue` carries a `pull_request` key and the PR's
+labels (e.g. `LABEL_IMPLEMENTING`, never `LABEL_AGENT_WORK`). `handle_event` detects this
+`pull_request` key and treats the subject as a PR: it requires `LABEL_IMPLEMENTING` (not
+`LABEL_AGENT_WORK`) and routes the dispatch as a PR — synthesizing `pr_ref` from the
+issue/PR number and dispatching via the `pull_request_review_comment` engine path so the
+orchestrator iterates on the PR. Without this detection, every `@mention` on a PR
+conversation was wrongly gated out (PRs never carry `agent-work`).
+
+**Comment-to-promote (human override).** An authorized, non-bot `created` `@mention`
+comment on an **open issue** that does NOT yet carry `LABEL_AGENT_WORK` is treated as an
+explicit human promotion: `handle_event` calls `OrchestratorService.promote()`, which
+atomically applies `LABEL_AGENT_WORK` (swapping out `LABEL_AWAITING_PROMOTION` per I7),
+dispatches the orchestrator, and writes the I6 promotion audit record. Because the human
+explicitly asked, this intentionally bypasses the triager content-gate. Restricted to
+authorized actors (allowlist/owner — never a bot author) and never applied to `closed`
+issues. All comment dispatch routes — PR, agent-work issue, and promote — are guarded by
+the per-entity in-flight claim.
 
 `synchronize` is safe: the idempotency gate returns immediately for draft PRs (§3, §10.2).
 
