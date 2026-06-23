@@ -175,17 +175,31 @@
   "row-unlisted-queue":
     tests: ["test_intake_unlisted", "test_intake_single_nomatch", "test_intake_case_sensitive_upper_in_list", "test_intake_case_sensitive_lower_in_list"]
 
-"§10.4-triager-reconciliation":  # SPEC §10.4 step 6 — triager divergence reconciliation
-  "divergence-detected-admit-vs-queue-triager":
-    tests: ["test_reconcile_triager_divergence_detected_and_surfaced"]
-  "no-divergence-both-admit":
-    tests: ["test_reconcile_triager_no_divergence_when_triager_admits"]
-  "no-divergence-decision-queue":
-    tests: ["test_reconcile_triager_no_noise_when_decision_is_queue"]
-  "no-comment-yet-no-divergence":
-    tests: ["test_reconcile_triager_no_comment_posted_yet"]
+"§10.4-triager-gate":  # SPEC §10.4 two-gate flow — Gate 2: apply_triager_gate
+  "gate-actionable-applies-agent-work":
+    tests: ["test_gate_actionable_applies_agent_work"]
+  "gate-not-actionable-applies-awaiting-promotion":
+    tests: ["test_gate_not_actionable_applies_awaiting_promotion"]
+  "gate-no-verdict-safe-fallback":
+    tests: ["test_gate_no_verdict_safe_fallback"]
+  "gate-noop-when-decision-is-queue":
+    tests: ["test_gate_noop_when_decision_is_queue"]
+  "gate-idempotent-when-agent-work-already-present":
+    tests: ["test_gate_idempotent_when_agent_work_already_present"]
+  "admit-sets-only-triage-label":
+    tests: ["test_intake_admit_path"]
   "intake-result-carries-decision":
     tests: ["test_intake_result_carries_decision"]
+  "parse-triager-verdict-actionable":
+    tests: ["test_parse_triager_verdict_actionable"]
+  "parse-triager-verdict-not-actionable":
+    tests: ["test_parse_triager_verdict_not_actionable"]
+  "parse-triager-verdict-none-no-marker":
+    tests: ["test_parse_triager_verdict_none_when_no_marker", "test_parse_triager_verdict_none_for_non_triage_comment", "test_parse_triager_verdict_none_for_empty_string", "test_parse_triager_verdict_no_header_no_match"]
+  "parse-triager-verdict-normalizes-case":
+    tests: ["test_parse_triager_verdict_case_insensitive", "test_parse_triager_verdict_strips_whitespace"]
+  "parse-triager-verdict-rejects-unknown":
+    tests: ["test_parse_triager_verdict_rejects_unknown_value"]
   "parse-triager-rec-queue":
     tests: ["test_parse_triager_rec_queue"]
   "parse-triager-rec-admit":

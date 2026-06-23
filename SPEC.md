@@ -1088,56 +1088,69 @@ Within each channel, entities are processed serially to avoid conflicting label 
 - **RC-3 (converge re-arm):** scope already excludes `needs-human` PRs (§4 table); call `decide_rearm_action(ci_runs, run, has_terminal_label, seconds_since_last_run, has_needs_human=False)` — `has_needs_human` is always `False` here because the scope filter guarantees it; the explicit `False` prevents silent regression if the scope filter is ever relaxed.
 - **RC-4 (orphan-issue):** `redispatch_count = await counter.get_count(issue_ref, "orphan")` before calling `decide_redispatch_action`. When acting `redispatch`: post `@claude` comment (audit marker: `<!-- orchestrator:redispatch ch=orphan -->`); `await counter.increment(issue_ref, "orphan")`.
 
-### §10.4 `Engine.intake`
+### §10.4 `Engine.intake` — Two-Gate Flow
 
 Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 
+The intake pipeline has two independent gates:
+
+**Gate 1 — Trust (synchronous, inline):** `decide_intake` — owner/allowlist check.
+**Gate 2 — Content (deferred, background):** triager verdict — scope/risk classification.
+
+#### Gate 1: `IntakeEngine.intake` (SPEC §8.11)
+
 1. `decision = decide_intake(event.actor, repo.allowlist)` → `{admit, queue}`.
    Pure, synchronous, no side effects (I4).
-2. Dispatch triager agent via `harness.dispatch` (read-only; posts one structured comment
-   summarising the triage result).
-3. `admit` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AGENT_WORK])` (atomic set; I7) →
-   fires `issues:labeled` → I2.
-4. `queue` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic set; I7)
-   → issue appears in PWA triage queue.
-5. **Audit log** (I6): after the observable state transition (step 3/4) is committed, write an
-   audit record to the DB:
-   `{event: "intake", issue_ref, actor: event.actor, decision, timestamp: now()}`.
-   This record is the authoritative trace of every intake decision; the triager comment (step 2)
-   is human-visible but the DB record is the audit trail. Audit is an **observer, not a gate** —
-   it is recorded *after* the label swap, never before it, so the trail records a decision only
-   once its authorizing label transition is committed (a failed `set_labels` writes no audit
-   record, avoiding a phantom `admit`). If `set_labels` succeeds but the audit write fails, the
-   label state is still correct and the missing record is a trail gap, not a state inconsistency
-   (symmetric with the `promote` handling in §11.3). This matches `IntakeEngine.intake`.
-6. **Triager recommendation reconciliation** (async, after step 2 completes):
-   `decide_intake` is the **authority** (trust axis: owner/allowlist). The triager is
-   **advisory** (scope/risk axis: its `**Recommended action**` field). These axes are independent
-   and may disagree — e.g. an owner-submitted but scope-unclear issue is auto-admitted (trust)
-   yet receives "queue for human review" (scope/risk). When they diverge, the discrepancy is
-   surfaced rather than silently dropped.
+2. Dispatch triager agent via `harness.dispatch` (read-only `forge_token_scope="repo-comment"`; I5).
+   The triager posts one structured comment including a machine-readable verdict marker.
+3. `admit` → `forge.set_labels(issue, [LABEL_TRIAGE])` (atomic set; I7).
+   **Critical: LABEL_AGENT_WORK is NOT applied here.** The orchestrator must NOT fire yet.
+   Gate 2 (apply_triager_gate) applies LABEL_AGENT_WORK only after the triager classifies
+   the issue as actionable.
+4. `queue` → `forge.set_labels(issue, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])` (atomic set;
+   I7) → issue appears in PWA triage queue. Gate 2 is a no-op for queued issues.
+5. **Audit log** (I6): after the observable state transition (step 3/4) is committed, write
+   `{event: "intake", issue_ref, actor: event.actor, decision, timestamp: now()}` to the DB.
+   Audit is an observer, not a gate — written after label swap, never before.
+   `IntakeEngine.intake` returns `IntakeResult(handle, decision)` to the caller so
+   `OrchestratorService` can spawn Gate 2 as a background task.
 
-   **Ordering**: the triager runs as a fire-and-forget async task (step 2). Its structured
-   comment is not available at intake time. Reconciliation therefore runs as a separate
-   background task spawned by `OrchestratorService._spawn_triager_reconcile` after
-   `Engine.intake` returns, delayed by `triager_reconcile_delay_s` (default 60 s) to allow
-   the triager to post its comment.
+**Idempotency guard**: if the issue already carries `LABEL_TRIAGE`, intake has already run —
+skip entirely (return `IntakeResult(handle=None, decision=None)`).
 
-   **Divergence condition**: `decision == "admit"` AND triager `**Recommended action**` ==
-   `"queue for human review"`. The inverse (decision=queue, triager=admit) is not surfaced —
-   the system is already being conservative.
+#### Gate 2: `IntakeEngine.apply_triager_gate` (deferred)
 
-   **When divergence is detected**, `IntakeEngine.reconcile_triager_divergence` must:
-   - Post a reconciliation comment on the issue (posted by the control plane, not the triager
-     agent — I5 preserved): explains the divergence, states the intake decision takes
-     precedence, notes it is recorded for audit transparency.
-   - Write an `"intake:triager-divergence"` audit record (I6) with the triager recommendation
-     in the `escalation_cause` field.
+Runs as a background task spawned by `OrchestratorService._spawn_triager_reconcile` after
+`Engine.intake` returns, delayed by `triager_reconcile_delay_s` (default 60 s) to allow
+the triager to post its comment.
 
-   **When they agree**, reconciliation is a no-op (no comment, no audit record).
+Only runs when `intake_decision == "admit"`. For `queue`, Gate 2 returns `"no-op"`.
 
-   **Idempotency**: `OrchestratorService._triager_reconcile_tasks` de-duplicates per issue —
-   a re-delivered `opened` event spawns at most one reconciliation task per issue.
+**Triager verdict format**: the triager embeds a machine-readable marker at the end of its
+structured comment (see `agents/triager.md §What You Produce`):
+```
+<!-- triager-verdict: actionable|not-actionable -->
+```
+`parse_triager_verdict` reads this marker. If absent or malformed, the verdict is `None`.
+
+**Gate 2 outcomes** (applied by the control plane — I5 preserved: triager only comments):
+
+| Verdict | Action | Audit action |
+|---|---|---|
+| `actionable` | `forge.add_label(LABEL_AGENT_WORK)` → fires `issues:labeled` → I2 | `intake:gate-actionable` |
+| `not-actionable` | `forge.add_label(LABEL_AWAITING_PROMOTION)` + comment | `intake:gate-not-actionable` |
+| `None` (no verdict in window) | `forge.add_label(LABEL_AWAITING_PROMOTION)` + fallback comment | `intake:gate-no-verdict` |
+
+**Safe fallback invariant**: when no verdict is found within the delay window, Gate 2 adds
+`LABEL_AWAITING_PROMOTION` (not `LABEL_AGENT_WORK`). Auto-admission without the triager's
+word is never permitted (I1 preserved).
+
+**Gate 2 idempotency**: if `LABEL_AGENT_WORK` or `LABEL_AWAITING_PROMOTION` is already
+present on the issue (Gate 2 already ran), skip without further action.
+
+**I7 preserved**: `LABEL_AGENT_WORK` and `LABEL_AWAITING_PROMOTION` never coexist.
+`set_labels` (Gate 1) sets `[LABEL_TRIAGE]` only for admitted issues; `add_label` (Gate 2)
+adds exactly one of `LABEL_AGENT_WORK` or `LABEL_AWAITING_PROMOTION` onto `[LABEL_TRIAGE]`.
 
 > **I6 human-promotion audit.** `OrchestratorService.promote` (§11.3) must also write a
 > `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot: list<string>}`
@@ -1155,8 +1168,8 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 
 | `name` | `action` | condition | Routes to |
 |---|---|---|---|
-| `issues` | `opened` / `reopened` | `intake_enabled == true` | `Engine.intake` |
-| `issues` | `labeled` | `label == LABEL_AGENT_WORK` | `Engine.dispatch` |
+| `issues` | `opened` / `reopened` | `intake_enabled == true` | `Engine.intake` (Gate 1: trust check + triager dispatch; Gate 2 runs deferred — see §10.4) |
+| `issues` | `labeled` | `label == LABEL_AGENT_WORK` | `Engine.dispatch` (fires when Gate 2 applies `LABEL_AGENT_WORK` after actionable triager verdict, or when a human promotes via `promote()`) |
 | `issue_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
 | `pull_request_review_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
 | `pull_request` | `ready_for_review` | — | `Engine.converge` |

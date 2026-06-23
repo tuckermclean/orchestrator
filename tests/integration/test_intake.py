@@ -21,7 +21,8 @@ from src.service.registry import FakeRepoRegistry, RepoConfig
 
 _REPO = RepoRef(owner="acme", name="repo")
 
-# Triager comment templates used in reconciliation tests (SPEC §10.4 step 6)
+# Triager comment templates used in gate tests (SPEC §10.4 two-gate flow)
+# These include the machine-readable <!-- triager-verdict: ... --> marker.
 _TRIAGER_COMMENT_QUEUE = (
     "## Triage Summary\n\n"
     "**Author**: @owner (admit — in allowlist)\n"
@@ -31,6 +32,7 @@ _TRIAGER_COMMENT_QUEUE = (
     "**Summary**: The issue is ambiguous.\n"
     "**Files likely affected**: unknown\n"
     "**Recommended action**: queue for human review\n"
+    "\n<!-- triager-verdict: not-actionable -->"
 )
 
 _TRIAGER_COMMENT_ADMIT = (
@@ -42,6 +44,7 @@ _TRIAGER_COMMENT_ADMIT = (
     "**Summary**: A clear small bug.\n"
     "**Files likely affected**: src/foo.py\n"
     "**Recommended action**: admit for autonomous dispatch\n"
+    "\n<!-- triager-verdict: actionable -->"
 )
 
 
@@ -100,7 +103,13 @@ async def _fresh_audit() -> AuditLog:
 
 
 async def test_intake_admit_path() -> None:
-    """Allowlisted author → LABEL_AGENT_WORK set + dispatch occurs."""
+    """Allowlisted author → Gate 1 sets only LABEL_TRIAGE; triager dispatched.
+
+    Two-gate flow (SPEC §10.4): Gate 1 (trust) sets [LABEL_TRIAGE] only.
+    LABEL_AGENT_WORK is NOT applied yet — orchestrator must NOT fire.
+    Gate 2 (apply_triager_gate) applies LABEL_AGENT_WORK only after the triager
+    classifies the issue as actionable.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
@@ -115,12 +124,14 @@ async def test_intake_admit_path() -> None:
     assert isinstance(result, IntakeResult)
     assert result.handle is not None
     assert result.decision == "admit"
-    # Verify labels were set atomically to [LABEL_TRIAGE, LABEL_AGENT_WORK]
+    # Gate 1 sets ONLY [LABEL_TRIAGE] — NOT LABEL_AGENT_WORK (two-gate flow)
     issue = await forge.get_issue(issue_ref)
-    assert LABEL_AGENT_WORK in issue.labels
     assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "LABEL_AGENT_WORK must NOT be set by Gate 1 — orchestrator fires only after Gate 2"
+    )
     assert LABEL_AWAITING_PROMOTION not in issue.labels
-    # Dispatch occurred
+    # Triager dispatch occurred (Gate 1 dispatches triager; Gate 2 reads verdict)
     assert len(harness.dispatch_calls) == 1
 
 
@@ -355,7 +366,11 @@ async def test_handle_event_issues_routes_through_intake() -> None:
 
 
 async def test_handle_event_issues_opened_runs_intake() -> None:
-    """issues:opened → intake runs when intake_enabled (default True, no registry)."""
+    """issues:opened → Gate 1 runs, sets [LABEL_TRIAGE] only for admitted author.
+
+    Two-gate flow (SPEC §10.4): after Gate 1, the issue has LABEL_TRIAGE only.
+    LABEL_AGENT_WORK is applied later by Gate 2 (apply_triager_gate).
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
@@ -376,9 +391,11 @@ async def test_handle_event_issues_opened_runs_intake() -> None:
 
     assert result["handled"] is True
     issue = await forge.get_issue(issue_ref)
-    # alice is allowlisted → admitted
-    assert LABEL_AGENT_WORK in issue.labels
+    # alice is allowlisted → admitted by Gate 1 → [LABEL_TRIAGE] only
     assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "Gate 1 must not apply LABEL_AGENT_WORK — Gate 2 does that after triager verdict"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -596,18 +613,15 @@ async def test_intake_idempotency_guard_skips_if_triage_label_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SPEC §10.4 step 6 — triager divergence reconciliation
+# SPEC §10.4 two-gate flow — Gate 2: apply_triager_gate
 # ---------------------------------------------------------------------------
 
 
-async def test_reconcile_triager_divergence_detected_and_surfaced() -> None:
-    """When intake=admit but triager recommends queue, divergence is surfaced.
+async def test_gate_actionable_applies_agent_work() -> None:
+    """Gate 2: triager verdict 'actionable' → LABEL_AGENT_WORK applied (I2 → orchestrator fires).
 
-    Divergence condition: decision axis (trust) says admit; scope/risk axis
-    (triager) says queue.  reconcile_triager_divergence must:
-      - post a reconciliation comment on the issue
-      - write an 'intake:triager-divergence' audit record (I6)
-    and return True.
+    This is the actionable path of the two-gate flow (SPEC §10.4 Gate 2).
+    The control plane (not the triager) applies the work label, preserving I5.
     """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
@@ -615,38 +629,34 @@ async def test_reconcile_triager_divergence_detected_and_surfaced() -> None:
     audit = await _fresh_audit()
 
     issue_ref = IssueRef(repo=_REPO, number=80)
-    forge.seed_issue(issue_ref, author="alice", labels=[])
+    # After Gate 1: issue has [LABEL_TRIAGE] only
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
 
-    # Simulate the triager having posted its structured comment
-    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_QUEUE)
+    # Triager posted its comment with actionable verdict
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_ADMIT)
 
-    # Reconcile with intake_decision=admit (triager says queue → divergence)
-    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
+    result = await engine.apply_triager_gate(issue_ref, "admit")
 
-    assert diverged is True
+    assert result == "applied-agent-work"
 
-    # Reconciliation comment posted on the issue
-    comments = await forge.list_comments(issue_ref)
-    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
-    assert len(reconcile_comments) == 1
-    body = reconcile_comments[0].body
-    assert "auto-admitted" in body
-    assert "queue for human review" in body
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AGENT_WORK in issue.labels, (
+        "Gate 2 must apply LABEL_AGENT_WORK when verdict is actionable"
+    )
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
 
-    # Audit record written for the divergence (I6)
+    # Audit record written (I6)
     entries = await audit.list_entries(_REPO, issue_ref)
-    divergence_entries = [e for e in entries if e["action"] == "intake:triager-divergence"]
-    assert len(divergence_entries) == 1
-    assert divergence_entries[0]["escalation_cause"] == "triager_rec=queue for human review"
+    assert any(e["action"] == "intake:gate-actionable" for e in entries)
 
 
-async def test_reconcile_triager_no_divergence_when_triager_admits() -> None:
-    """No noise when intake=admit and triager also recommends admit.
+async def test_gate_not_actionable_applies_awaiting_promotion() -> None:
+    """Gate 2: triager verdict 'not-actionable' → LABEL_AWAITING_PROMOTION + comment.
 
-    When the two axes agree (both say admit), reconcile_triager_divergence
-    must be a no-op: no reconciliation comment, no audit record, returns False.
+    Triager classifies issue as requiring human review (scope-unclear, risk flags, etc.).
+    Gate 2 must NOT apply LABEL_AGENT_WORK; orchestrator must NOT fire.
     """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
@@ -654,61 +664,40 @@ async def test_reconcile_triager_no_divergence_when_triager_admits() -> None:
     audit = await _fresh_audit()
 
     issue_ref = IssueRef(repo=_REPO, number=81)
-    forge.seed_issue(issue_ref, author="alice", labels=[])
+    # After Gate 1: issue has [LABEL_TRIAGE] only
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
 
-    # Triager recommends admit — no divergence
-    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_ADMIT)
-
-    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
-
-    assert diverged is False
-
-    # No reconciliation comment posted
-    comments = await forge.list_comments(issue_ref)
-    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
-    assert len(reconcile_comments) == 0
-
-    # No divergence audit record
-    entries = await audit.list_entries(_REPO, issue_ref)
-    divergence_entries = [e for e in entries if e["action"] == "intake:triager-divergence"]
-    assert len(divergence_entries) == 0
-
-
-async def test_reconcile_triager_no_noise_when_decision_is_queue() -> None:
-    """No reconciliation when intake decision is queue — already conservative.
-
-    When intake decided to queue the issue (non-allowlisted author), the system
-    is already being cautious.  No reconciliation is needed even if the triager
-    also says queue or admit.
-    """
-    forge = FakeForgePort()
-    harness = FakeHarnessPort()
-    session = FakeSessionPort()
-    audit = await _fresh_audit()
-
-    issue_ref = IssueRef(repo=_REPO, number=82)
-    forge.seed_issue(issue_ref, author="external", labels=[])
-
-    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
-
-    # Triager says queue — but decision was already queue, so no divergence to surface
+    # Triager posted its comment with not-actionable verdict
     await forge.post_comment(issue_ref, _TRIAGER_COMMENT_QUEUE)
 
-    diverged = await engine.reconcile_triager_divergence(issue_ref, "queue")
+    result = await engine.apply_triager_gate(issue_ref, "admit")
 
-    assert diverged is False
+    assert result == "applied-awaiting-promotion"
+
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AWAITING_PROMOTION in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "Gate 2 must not apply LABEL_AGENT_WORK when verdict is not-actionable"
+    )
+
+    # A human-visible comment posted
     comments = await forge.list_comments(issue_ref)
-    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
-    assert len(reconcile_comments) == 0
+    gate_comments = [c for c in comments if "orchestrator:intake-not-actionable" in c.body]
+    assert len(gate_comments) == 1
+
+    # Audit record written (I6)
+    entries = await audit.list_entries(_REPO, issue_ref)
+    assert any(e["action"] == "intake:gate-not-actionable" for e in entries)
 
 
-async def test_reconcile_triager_no_comment_posted_yet() -> None:
-    """No divergence surfaced when the triager comment is not yet present.
+async def test_gate_no_verdict_safe_fallback() -> None:
+    """Gate 2: no triager verdict in window → safe fallback to AWAITING_PROMOTION.
 
-    If the triager hasn't posted its comment yet (still running), reconciliation
-    must not surface anything — returns False and no comment/audit.
+    When the triager did not post a machine-readable verdict (comment absent or
+    malformed), Gate 2 must NOT auto-admit.  Safe fallback: LABEL_AWAITING_PROMOTION
+    + explanation comment.  This is the critical property: the triager gates dispatch.
     """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
@@ -716,16 +705,82 @@ async def test_reconcile_triager_no_comment_posted_yet() -> None:
     audit = await _fresh_audit()
 
     issue_ref = IssueRef(repo=_REPO, number=83)
-    forge.seed_issue(issue_ref, author="alice", labels=[])
+    # After Gate 1: issue has [LABEL_TRIAGE] only
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
 
-    # No triager comment seeded — triager hasn't completed yet
-    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
+    # No triager comment — triager hasn't completed yet (or failed)
+    result = await engine.apply_triager_gate(issue_ref, "admit")
 
-    assert diverged is False
+    assert result == "applied-awaiting-promotion"
+
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AWAITING_PROMOTION in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "Gate 2 must not auto-admit when verdict is absent"
+    )
+
+    # Fallback comment posted
     comments = await forge.list_comments(issue_ref)
-    assert len(comments) == 0
+    fallback_comments = [c for c in comments if "orchestrator:intake-no-verdict" in c.body]
+    assert len(fallback_comments) == 1
+
+    # Audit record written (I6)
+    entries = await audit.list_entries(_REPO, issue_ref)
+    assert any(e["action"] == "intake:gate-no-verdict" for e in entries)
+
+
+async def test_gate_noop_when_decision_is_queue() -> None:
+    """Gate 2 is a no-op when Gate 1 queued the issue — already conservative.
+
+    Non-allowlisted author → Gate 1 sets [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION].
+    Gate 2 is skipped entirely; no label changes, no comments.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=82)
+    forge.seed_issue(issue_ref, author="external", labels=[LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_QUEUE)
+
+    result = await engine.apply_triager_gate(issue_ref, "queue")
+
+    assert result == "no-op"
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AWAITING_PROMOTION in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels
+
+
+async def test_gate_idempotent_when_agent_work_already_present() -> None:
+    """Gate 2 is idempotent: if LABEL_AGENT_WORK is already present, skip.
+
+    Protects against re-delivery: a second Gate 2 run sees the label already
+    set and returns 'no-op' without applying a duplicate.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=84)
+    # Simulate Gate 2 already ran: LABEL_AGENT_WORK is present
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_ADMIT)
+
+    result = await engine.apply_triager_gate(issue_ref, "admit")
+
+    assert result == "no-op"
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AGENT_WORK in issue.labels  # unchanged
+    # No audit record written (no-op)
     entries = await audit.list_entries(_REPO, issue_ref)
     assert len(entries) == 0
 
@@ -738,14 +793,14 @@ async def test_intake_result_carries_decision() -> None:
     audit = await _fresh_audit()
 
     # Admit path
-    admit_ref = IssueRef(repo=_REPO, number=84)
+    admit_ref = IssueRef(repo=_REPO, number=85)
     forge.seed_issue(admit_ref, author="alice", labels=[])
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
     admit_result = await engine.intake(admit_ref)
     assert admit_result.decision == "admit"
 
     # Queue path
-    queue_ref = IssueRef(repo=_REPO, number=85)
+    queue_ref = IssueRef(repo=_REPO, number=86)
     forge.seed_issue(queue_ref, author="external", labels=[])
     queue_result = await engine.intake(queue_ref)
     assert queue_result.decision == "queue"

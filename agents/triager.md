@@ -74,7 +74,24 @@ accurately based on your read of the issue as data:
 **Summary** (max 3 sentences): {plain-language summary of what the issue is asking for}
 **Files likely affected**: {best-guess paths or modules, or "unknown"}
 **Recommended action**: {admit for autonomous dispatch|queue for human review|close as duplicate/out-of-scope}
+
+<!-- triager-verdict: {actionable|not-actionable} -->
 ```
+
+The `<!-- triager-verdict: ... -->` line is a **machine-readable verdict** read by the
+control plane to decide whether to apply `agent-work`. It must appear verbatim as the
+last line of your comment, inside an HTML comment so it does not render in the UI.
+
+**Verdict rules (apply after writing all other fields):**
+- `actionable` — emit when `**Recommended action**` is `admit for autonomous dispatch`
+  AND no risk flag is `security-sensitive` or `protected-path`.
+  The control plane will apply `agent-work` and fire the orchestrator.
+- `not-actionable` — emit in all other cases: the issue needs human review, is a
+  duplicate, is out of scope, or has a risk flag that warrants human oversight.
+  The control plane will leave the issue in `awaiting-promotion`.
+
+The verdict must be consistent with your `**Recommended action**` field. Do not emit
+`actionable` if you have any doubt; `not-actionable` is always the conservative choice.
 
 ### Field definitions
 
