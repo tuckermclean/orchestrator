@@ -12,7 +12,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Link, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
-import { getToken } from "./auth";
+import { getToken, startProactiveRefresh } from "./auth";
 import ConvergeDetail from "./pages/ConvergeDetail";
 import Dashboard from "./pages/Dashboard";
 import Login from "./pages/Login";
@@ -111,6 +111,15 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
       void navigate(`/login?next=${next}`, { replace: true });
     }
   });
+
+  // Proactive token refresh: start the background timer while the user is
+  // authenticated. The cleanup function stops the interval on logout (which
+  // unmounts RequireAuth when the router transitions to /login) so no
+  // refresh attempts happen after the token has been cleared.
+  useEffect(() => {
+    if (!getToken()) return;
+    return startProactiveRefresh();
+  }, []); // mount-once; startProactiveRefresh is stable (no closure over props)
 
   if (!getToken()) return null;
   return <>{children}</>;
