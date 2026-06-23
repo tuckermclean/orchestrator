@@ -910,13 +910,40 @@ durable in-process state other than the arguments passed to each method.
 Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
 
 1. `route_entry(event.name)` → `{model, max_turns, contract}`.
-2. For `issues:labeled agent-work`:
-   - **Dedup guard:** check `forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])`
-     filtered to PRs whose body contains `Closes #{issue_ref.number}`. If a matching open
-     implementing PR exists, skip dispatch (return immediately — idempotent). This prevents
-     a duplicate `issues:labeled` event (e.g., webhook replay outside the dedup window) from
-     opening a second draft PR for the same issue.
-   - `harness.dispatch(DispatchContext(issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
+2. For `issues:labeled agent-work` — two complementary dedup layers, applied in order:
+
+   **Layer A — in-flight dispatch guard (in `OrchestratorService`, defense-in-depth).**
+   `OrchestratorService._spawn_dispatch` maintains an in-memory dict (`_dispatch_tasks`)
+   keyed by issue (`owner/name#number`). Before calling `Engine.dispatch`, it checks
+   whether a dispatch task for this issue is already running. If so, it returns immediately
+   (no-op). Otherwise it registers the task and calls `Engine.dispatch` inside it. The key
+   is removed when the task completes (harness.dispatch is fire-and-forget, so the task
+   exits quickly). This guard closes the window between "dispatch decided" and "agent
+   opens+labels its implementing PR" — the interval when Layer B below is blind because no
+   implementing PR exists yet.
+
+   **Why two events fire ~73 s apart (observed on sandbox-derp issue #18):** GitHub's
+   at-least-once webhook delivery can redeliver a `labeled:agent-work` event if the first
+   response is slow, or the label may be removed and re-added by the operator or a
+   workflow, generating a fresh event. The guard makes dispatch idempotent regardless of
+   trigger count or inter-event gap.
+
+   **Guard clear conditions (must not permanently block re-dispatch):**
+   - The task completes (normal path — fast, since harness.dispatch is fire-and-forget).
+   - A process restart clears all in-memory state; the durable Layer B backstop then owns
+     duplicate prevention until the implementing PR is labeled.
+   There is **no explicit TTL timer**: the task lifecycle is the TTL. A failed dispatch
+   (harness error) still completes the task and removes the key, so a retry is unblocked.
+
+   **Layer B — durable list_prs dedup (in `Engine.dispatch`).**
+   Check `forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])` filtered to
+   PRs whose body contains `Closes #{issue_ref.number}`. If a matching open implementing
+   PR exists, skip dispatch (return immediately — idempotent). This is the backstop for
+   webhook replays that arrive after the dispatch task exits and before (or after) the
+   agent opens+labels its PR.
+
+   After both guards pass: `harness.dispatch(DispatchContext(issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
+
 3. For `@claude` comment → `harness.dispatch(DispatchContext(pr_ref or issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
 
 Covers I2, P1, I5.

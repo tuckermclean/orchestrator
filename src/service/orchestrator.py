@@ -300,6 +300,19 @@ class OrchestratorService:
         # concurrent converges for the same PR.
         self._converge_tasks: dict[str, asyncio.Task[PRState]] = {}
 
+        # In-flight dispatch guard, keyed by issue (owner/name#number).
+        # Defense-in-depth guard for the race described in SPEC §10.1 step 2:
+        # two issues:labeled agent-work events arrive ~73 s apart (GitHub
+        # at-least-once delivery or remove+re-add label); the second event
+        # reaches Engine.dispatch before the agent has opened+labeled its PR,
+        # so list_prs finds no implementing PR and would dispatch again.
+        # This guard marks an issue "dispatch in flight" when the first dispatch
+        # fires; the second call sees the guard and returns without dispatching.
+        # The guard expires after DISPATCH_INFLIGHT_TTL_S seconds (implemented
+        # as an asyncio sleep task whose completion removes the key) so a failed
+        # dispatch does not permanently block re-dispatch.
+        self._dispatch_guards: dict[str, asyncio.Task[None]] = {}
+
         # In-flight triager-divergence reconciliation tasks, keyed by issue.
         # Reconciliation runs after a delay (to give the triager time to post its
         # comment) and is idempotent — spawned at most once per intake run.
@@ -358,6 +371,16 @@ class OrchestratorService:
             except (asyncio.CancelledError, Exception):
                 pass
         self._converge_tasks.clear()
+
+        # Cancel in-flight dispatch guard TTL tasks so they don't fire after shutdown.
+        for gtask in list(self._dispatch_guards.values()):
+            gtask.cancel()
+        for gtask in list(self._dispatch_guards.values()):
+            try:
+                await gtask
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._dispatch_guards.clear()
 
         # Drain in-flight triager-divergence reconciliation tasks.
         for rtask in list(self._triager_reconcile_tasks.values()):
@@ -482,12 +505,8 @@ class OrchestratorService:
                     else ""
                 )
                 if label_name == LABEL_AGENT_WORK:
-                    await self.engine.dispatch(
-                        "issues",
-                        issue_ref=issue_ref,
-                        pr_ref=pr_ref,
-                        comment_body=comment_body,
-                    )
+                    if self._try_claim_dispatch(issue_ref):
+                        await self.engine.dispatch("issues", issue_ref=issue_ref)
             # All other issues actions (labeled:other, closed, edited, assigned, …) → no-op
         elif event_name == "pull_request" and pr_ref is not None:
             # SPEC §11.1 event routing table — pull_request actions:
@@ -567,6 +586,53 @@ class OrchestratorService:
         ``CI_WAIT_S``) before the approve/escalate decision is made.
         """
         return await self.engine.converge(pr_ref)
+
+    # Seconds the in-flight dispatch guard is held after a dispatch fires.
+    # Covers the window between harness.dispatch returning and the agent opening
+    # and labeling its implementing PR (~30–120 s in practice).  A failed dispatch
+    # also releases the guard after this interval so retries are unblocked.
+    _DISPATCH_GUARD_TTL_S: float = 600.0
+
+    def _try_claim_dispatch(self, issue_ref: IssueRef) -> bool:
+        """Atomically claim the dispatch slot for *issue_ref*.
+
+        Implements the in-flight dispatch guard described in SPEC §10.1 step 2
+        (Layer A).  Called in the issues:labeled agent-work branch of handle_event
+        before calling Engine.dispatch.
+
+        Returns True if the dispatch slot was claimed (caller should proceed to
+        dispatch).  Returns False if a dispatch for this issue is already in
+        flight (caller must skip dispatch; the guard is still held).
+
+        The guard is released automatically after _DISPATCH_GUARD_TTL_S seconds
+        via a sleep-task done-callback, so a failed or crashed dispatch does not
+        permanently block re-dispatch.
+
+        Why two events fire ~73 s apart: GitHub's at-least-once delivery
+        guarantee may redeliver a labeled event if the first acknowledgment is
+        slow; or a label remove+re-add on the same issue generates a fresh event.
+        Between the first harness.dispatch call and the agent opening+labeling its
+        implementing PR, list_prs dedup (Layer B) is blind because no implementing
+        PR exists yet.  This guard closes that window.
+        """
+        key = f"{issue_ref.repo.owner}/{issue_ref.repo.name}#{issue_ref.number}"
+        existing = self._dispatch_guards.get(key)
+        if existing is not None and not existing.done():
+            return False  # dispatch already in flight for this issue
+
+        # Claim the slot: start a TTL sleep task whose completion releases the key.
+        async def _ttl() -> None:
+            await asyncio.sleep(self._DISPATCH_GUARD_TTL_S)
+
+        ttl_task: asyncio.Task[None] = asyncio.create_task(_ttl())
+        self._dispatch_guards[key] = ttl_task
+
+        def _done(t: asyncio.Task[None]) -> None:
+            if self._dispatch_guards.get(key) is t:
+                del self._dispatch_guards[key]
+
+        ttl_task.add_done_callback(_done)
+        return True
 
     def _spawn_triager_reconcile(
         self,
