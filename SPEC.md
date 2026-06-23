@@ -1005,6 +1005,11 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         **Await fixer**: poll until `completed` or `CI_WAIT_S` elapses; on timeout:
         `await harness.cancel(fixer_handle)`; `terminal_escalate(E11)`.
         If fixer completes in time: advance to next round.
+        **Fixer blocker input**: the fixer obtains the blockers to address from the
+        reviewer's `## Converge Review — Round N` comment posted in Step 4 of the reviewer
+        contract. The engine guarantees this comment exists before the fixer is dispatched
+        (the reviewer run is fully awaited before `harness.dispatch(fixer_context)` is
+        called). No verdict file is committed to the PR branch (`SPEC.md §5`).
       - `escalate:no-progress` → `terminal_escalate(E2)`.
       - `escalate:no-verdict` → `retry_count = await counter.get_count(pr_ref, "converge-retry")`;
         if `retry_count < NO_VERDICT_RETRY_CAP`: post re-arm comment

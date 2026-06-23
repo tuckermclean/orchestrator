@@ -609,12 +609,7 @@ async def test_converge_resumes_from_persisted_round() -> None:
     harness.script_reviewer_verdicts(_zero_verdict())
     cs = FakeConvergeStateStore()
     cs.seed_round(_PR, 1)  # already completed R1
-    # Seed the R1 verdict file so prev_sigs lookup works.
-    forge.seed_file(
-        _PR,
-        ".converge-verdict-r1.json",
-        _blocker_verdict().model_dump_json().encode(),
-    )
+    # prev_sigs is tracked in-memory across rounds (SPEC §10.2) — no file seeding needed.
     engine = _engine(forge, harness, converge_state=cs)
 
     state = await engine.converge(_PR)
