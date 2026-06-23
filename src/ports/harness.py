@@ -60,7 +60,7 @@ import pathlib
 import signal
 import time
 import uuid
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine
 from typing import Any
 
 import httpx
@@ -218,6 +218,10 @@ class RunEventStore:
         self._status_sinks: dict[str, StatusSink] = {}
         # Per-run structured verdicts extracted from reviewer output (SPEC §5).
         self._verdicts: dict[str, Verdict | None] = {}
+        # Per-run subscriber queues for subscribe_events() fan-out.
+        # Each call to subscribe_events() registers a fresh queue here so
+        # multiple concurrent readers each get the full stream independently.
+        self._subscriber_queues: dict[str, list[asyncio.Queue[RunEvent | None]]] = {}
 
     def register(self, run_id: str) -> None:
         """Initialise storage for a new run."""
@@ -240,10 +244,13 @@ class RunEventStore:
         self._status_sinks[run_id] = sink
 
     def append(self, run_id: str, event: RunEvent) -> None:
-        """Record an event and push it to the live queue."""
+        """Record an event and push it to the live queue and all subscriber queues."""
         self._events.setdefault(run_id, []).append(event)
         if run_id in self._queues:
             self._queues[run_id].put_nowait(event)
+        # Fan out to subscribe_events() subscriber queues.
+        for sq in self._subscriber_queues.get(run_id, []):
+            sq.put_nowait(event)
 
     def set_status(self, run_id: str, status: RunStatus) -> None:
         current = self._statuses.get(run_id)
@@ -252,8 +259,13 @@ class RunEventStore:
             return
         self._statuses[run_id] = status
         if status.state == "completed" and run_id in self._queues:
-            # Signal end-of-stream
+            # Signal end-of-stream on the canonical backend watcher queue.
             self._queues[run_id].put_nowait(None)
+        if status.state == "completed":
+            # Fan out the completion sentinel to all subscribe_events() queues
+            # so every subscriber's iterator terminates cleanly.
+            for sq in self._subscriber_queues.get(run_id, []):
+                sq.put_nowait(None)
         # Notify the write-through sink (issue #101) — invoked after state is
         # committed so the sink always sees the new status.
         sink = self._status_sinks.get(run_id)
@@ -276,6 +288,53 @@ class RunEventStore:
     def get_queue(self, run_id: str) -> asyncio.Queue[RunEvent | None] | None:
         """Return the live event queue for SSE streaming (Step 9)."""
         return self._queues.get(run_id)
+
+    async def subscribe_events(self, run_id: str) -> AsyncIterator[RunEvent]:
+        """Yield the full event backlog then live events until the run completes.
+
+        A late subscriber (opening the stream after events were already appended)
+        still receives the complete transcript from the beginning — the backlog is
+        replayed before draining the live queue.
+
+        The completion sentinel (``None``) placed on the queue by ``set_status``
+        when ``state == "completed"`` terminates the iterator.
+
+        If the run is already completed when this is called, the backlog is
+        replayed and the iterator exits immediately (no live queue to drain since
+        the sentinel was already consumed, but a fresh subscriber registers a new
+        queue and the already-terminal status causes the loop to exit after
+        draining it).
+        """
+        # Register a fresh subscriber queue so this caller gets its own stream.
+        # A fresh Queue is used even for already-completed runs — the sentinel is
+        # put_nowait below so the loop terminates cleanly without blocking.
+        subscriber_queue: asyncio.Queue[RunEvent | None] = asyncio.Queue()
+
+        # Replay the existing backlog first (answers "do I see output from before
+        # I opened the window?" = YES) and enqueue those items.
+        backlog = self.get_events(run_id)
+        for event in backlog:
+            subscriber_queue.put_nowait(event)
+
+        # Determine if the run is already at a terminal state.
+        already_done = self._statuses.get(run_id, RunStatus(state="queued")).state == "completed"
+
+        if already_done:
+            # No live events to wait for — emit the sentinel so the loop exits.
+            subscriber_queue.put_nowait(None)
+        else:
+            # Register this subscriber queue so future append() / set_status(completed)
+            # calls flow into it.  We maintain a list of subscriber queues per run
+            # (the existing self._queues holds the canonical "first" queue used by
+            # the backend watcher; we shadow-deliver to all registered subscribers).
+            self._subscriber_queues.setdefault(run_id, []).append(subscriber_queue)
+
+        # Drain the subscriber queue.
+        while True:
+            item = await subscriber_queue.get()
+            if item is None:
+                break
+            yield item
 
     def store_verdict(self, run_id: str, verdict: Verdict | None) -> None:
         """Store the structured verdict extracted from a reviewer run's output.
@@ -891,6 +950,27 @@ class ClaudeCodeHarnessPort:
         setting status and RunRecordingHarness registering the sink.
         """
         return self._event_store.get_status(run_id)
+
+    def get_run_events(self, run_id: str) -> list[RunEvent]:
+        """Return the current transcript event backlog for a run (snapshot).
+
+        Used by OrchestratorService.get_run to merge the in-memory transcript
+        into the RunDetail returned for the initial page load.
+
+        Returns an empty list when the run_id is unknown (e.g. old/evicted run).
+        """
+        return self._event_store.get_events(run_id)
+
+    def subscribe_run_events(self, run_id: str) -> AsyncIterator[RunEvent]:
+        """Subscribe to a run's events: backfill + live until completion.
+
+        Delegates to RunEventStore.subscribe_events so a late subscriber still
+        receives the full transcript from the beginning.  Each call returns an
+        independent iterator (multiple concurrent readers are safe).
+
+        Used by OrchestratorService.stream_run as the authoritative event source.
+        """
+        return self._event_store.subscribe_events(run_id)
 
     async def get_run_status(self, handle: RunHandle) -> RunStatus:
         """Return the live status of the run.

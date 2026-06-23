@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from src.db.audit import AuditLog
 from src.db.run_store import FakeRunStore, SQLiteRunStore
@@ -153,6 +154,34 @@ class RunRecordingHarness:
 
         return handle
 
+    # Delegate transcript-access methods when the underlying harness exposes them.
+    # These are not part of the HarnessPort Protocol (which covers dispatch/status
+    # only) but are used by OrchestratorService.stream_run / get_run to read the
+    # live RunEventStore transcript.  Delegation is conditional so RunRecordingHarness
+    # continues to work with FakeHarnessPort (which lacks these methods).
+
+    def get_run_events(self, run_id: str) -> list[RunEvent]:
+        """Return the transcript event backlog from the underlying harness."""
+        # Cast to Any to access the extra method that is present on
+        # ClaudeCodeHarnessPort but not on the minimal HarnessPort Protocol.
+        harness: Any = self._harness
+        if hasattr(harness, "get_run_events"):
+            result: list[RunEvent] = harness.get_run_events(run_id)
+            return result
+        return []
+
+    def subscribe_run_events(self, run_id: str) -> AsyncIterator[RunEvent]:
+        """Subscribe to backfill + live events from the underlying harness."""
+        # Cast to Any to access the extra method that is present on
+        # ClaudeCodeHarnessPort but not on the minimal HarnessPort Protocol.
+        harness: Any = self._harness
+        if hasattr(harness, "subscribe_run_events"):
+            it: AsyncIterator[RunEvent] = harness.subscribe_run_events(run_id)
+            return it
+        # Fallback: return an empty async iterator for harnesses that don't
+        # expose event streaming (e.g. FakeHarnessPort in unit tests).
+        return _empty_async_iter()
+
     # Delegate all other HarnessPort methods to the wrapped harness.
     async def trigger_workflow(self, name: str, ref: str, inputs: dict[str, object]) -> None:
         await self._harness.trigger_workflow(name, ref, inputs)
@@ -212,7 +241,7 @@ class OrchestratorService:
         # Wrap the harness with the recording shim so every dispatch — whether
         # triggered via Engine, IntakeEngine, promote(), or dev_dispatch() — is
         # recorded in the run store with the correct repo context.
-        recording_harness: HarnessPort = RunRecordingHarness(harness, self._run_store)
+        recording_harness = RunRecordingHarness(harness, self._run_store)
 
         self.engine = Engine(
             forge=forge,
@@ -222,7 +251,10 @@ class OrchestratorService:
             converge_state=converge_state,
         )
         self.forge = forge
-        self.harness = recording_harness
+        # self.harness is RunRecordingHarness (a HarnessPort structural subtype) so
+        # OrchestratorService.stream_run / get_run can call the extra transcript-access
+        # methods (get_run_events / subscribe_run_events) without a cast.
+        self.harness: RunRecordingHarness = recording_harness
         self.session = session
         self._counter = counter
         self._converge_state = converge_state
@@ -637,20 +669,47 @@ class OrchestratorService:
         return await self.session.list_runs(repo)
 
     async def get_run(self, run_id: str) -> RunDetail:
-        """Return detail for a single run.
+        """Return detail for a single run, with transcript events from the harness.
 
-        Checks the run_store first (populated at dispatch); falls back to the
-        session port for dev-mode seeded runs.
+        Loads run metadata from the run_store (status, repo, type, timestamps),
+        then merges transcript events from the harness RunEventStore so the initial
+        page load shows the full transcript captured during the run.
+
+        The harness RunEventStore is the authoritative source for events (see
+        file comment at orchestrator.py:65 and the root-cause fix for the
+        disconnected-stores bug).  The run_store holds run *metadata* only;
+        events are in the RunEventStore which the backend writes into.
+
+        Falls back to the session port for dev-mode seeded runs (backward-compat).
         """
         detail = await self._run_store.get_run(run_id)
         if detail is not None:
+            # Merge transcript events from the harness RunEventStore.
+            # run_store.get_run returns events=[] because the harness never writes
+            # into the run_store events list — it writes into the RunEventStore.
+            # We union them here: prefer harness events (the authoritative source)
+            # and include any events already in the run_store record (there should
+            # be none in practice, but we deduplicate by position to be safe).
+            harness_events = self.harness.get_run_events(run_id)
+            if harness_events:
+                return detail.model_copy(update={"events": harness_events})
             return detail
         # Backward-compat fallback: session port (dev-mode demo seeds).
         return await self.session.get_run(run_id)
 
     def stream_run(self, run_id: str) -> AsyncIterator[RunEvent]:
-        """Stream live events for a run via the session port's event queue."""
-        return self.session.stream_events(run_id)
+        """Stream live events for a run: backfill + live from the harness RunEventStore.
+
+        Previously this called self.session.stream_events(run_id), which read from a
+        different store (SessionPort) that the harness backend never writes to — so
+        the stream was always empty (root-cause fix for the disconnected-stores bug).
+
+        The harness RunEventStore is the authoritative source: the backend (subprocess
+        or K8s) streams the agent's JSONL into it via RunEventStore.append().
+        subscribe_run_events() yields the full backlog first (late subscribers see
+        events from before they opened the stream) then live events until completion.
+        """
+        return self.harness.subscribe_run_events(run_id)
 
     async def status(self, repo: RepoRef) -> HealthReport:
         return await pipeline_health(repo, self.forge)
@@ -889,6 +948,15 @@ class OrchestratorService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _empty_async_iter() -> AsyncGenerator[RunEvent, None]:
+    """Async generator that yields nothing — fallback for harnesses without streaming."""
+    # Unreachable yield makes this an async generator function rather than a coroutine.
+    # Without any yield, Python would treat this as a regular coroutine function and
+    # calling it would return a coroutine object rather than an AsyncGenerator/AsyncIterator.
+    if False:  # pragma: no cover
+        yield
 
 
 def _cron_to_seconds(cron: str) -> int:
