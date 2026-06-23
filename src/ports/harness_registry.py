@@ -25,14 +25,28 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from src.domain.types import HARNESS_COOLDOWN_S, HARNESSES_JSON_ENV
+from src.domain.types import HARNESS_COOLDOWN_S, HARNESSES_JSON_ENV, RunEvent, RunStatus
 from src.ports.base import HarnessPort
 
 _log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Local async iterator helpers
+# ---------------------------------------------------------------------------
+
+
+async def _empty_async_iter() -> AsyncIterator[RunEvent]:
+    """Async generator that yields nothing — fallback for harnesses without streaming."""
+    # The unreachable yield makes this an async generator (not a plain coroutine)
+    # so callers get an AsyncIterator, not a coroutine object.
+    if False:  # pragma: no cover
+        yield  # noqa: RET504
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +291,26 @@ class FailoverHarnessPort:
     3. On HarnessQuotaExhausted: arm cooldown on that harness, try next.
     4. If all harnesses are cooled down: raise AllHarnessesExhausted.
 
-    All non-dispatch HarnessPort methods are delegated to the primary harness
-    (lowest priority number) regardless of cooldown state.  See SPEC §14.4 for
-    the design rationale (status/cancel calls target the owning harness, not
-    the failover coordinator).
+    Dispatch delegation: ``dispatch`` routes to whichever harness ``decide_harness``
+    selects (with failover on quota exhaustion).
+
+    Event-read + status-sink delegation (SPEC §14.4 amendment): ``get_run_events``,
+    ``subscribe_run_events``, ``register_run_status_sink``, and ``get_live_status``
+    must route to the harness that **owns** the given run_id (the one whose
+    ``dispatch`` produced it) — not blindly to the primary.  Without this, the
+    primary's empty RunEventStore shadows the owning harness's event store and
+    makes every transcript invisible (ev0 across all runs).
+    Ownership is determined via ``entry.port.has_run(run_id)``; when no owner is
+    found (race: run not yet registered, or primary is the only harness) the call
+    falls back to primary.
+
+    Maintenance calls that are NOT run-specific (``trigger_workflow``, ``trigger_ci``)
+    are delegated to primary unconditionally.
+
+    ``get_run_status``, ``cancel``, ``get_run_verdict`` are also routed via
+    ``_owning_port`` so they reach the harness whose RunEventStore holds the run
+    state — a correctness fix for multi-harness deployments where a non-primary
+    harness dispatched the run.
 
     I3: No credentials stored here; they live in the HarnessPort instances
     constructed by PortProvider.
@@ -336,7 +366,7 @@ class FailoverHarnessPort:
                 candidates = [c for c in candidates if c.id != entry.id]
 
     # ------------------------------------------------------------------
-    # Delegated methods — primary harness (SPEC §14.4)
+    # Delegated methods — routing helpers
     # ------------------------------------------------------------------
 
     def _primary_port(self) -> HarnessPort:
@@ -349,6 +379,39 @@ class FailoverHarnessPort:
             raise RuntimeError("HarnessRegistry is empty — no harness configured")
         return primary.port
 
+    def _owning_port(self, run_id: str) -> HarnessPort:
+        """Return the harness port that owns *run_id*, falling back to primary.
+
+        Iterates all registry entries and calls ``port.has_run(run_id)`` on each.
+        The first match is the owning harness (the one whose ``dispatch`` created
+        the run and whose RunEventStore holds its events and status).
+
+        Falls back to the primary harness when:
+        - No entry exposes ``has_run`` (e.g. a minimal fake used in tests).
+        - No entry claims ownership (race: run_id not yet registered, or the
+          primary is the only/owning harness and both paths lead to the same port).
+
+        This routing is critical for multi-harness deployments: when ``dispatch``
+        selects a non-primary harness, the run's events live in THAT harness's
+        RunEventStore.  Routing reads to primary would silently return an empty
+        transcript — exactly the ev0/tx0 bug this fix addresses.
+        """
+        for entry in self._registry.entries():
+            port: Any = entry.port
+            if hasattr(port, "has_run"):
+                # has_run must be synchronous (ClaudeCodeHarnessPort contract).
+                # Guard against test fakes that accidentally return an awaitable.
+                result = port.has_run(run_id)
+                if not hasattr(result, "__await__") and result:
+                    return entry.port
+        # No owner found — fall back to primary (covers single-harness config
+        # and the not-yet-registered race).
+        return self._primary_port()
+
+    # ------------------------------------------------------------------
+    # Delegated methods — non-run-specific; always go to primary
+    # ------------------------------------------------------------------
+
     async def trigger_workflow(
         self,
         name: str,
@@ -360,11 +423,75 @@ class FailoverHarnessPort:
     async def trigger_ci(self, pr_ref: Any) -> None:
         await self._primary_port().trigger_ci(pr_ref)
 
+    # ------------------------------------------------------------------
+    # Delegated methods — run-specific; route to owning harness (SPEC §14.4)
+    # ------------------------------------------------------------------
+
     async def get_run_status(self, handle: Any) -> Any:
-        return await self._primary_port().get_run_status(handle)
+        return await self._owning_port(handle.run_id).get_run_status(handle)
 
     async def cancel(self, handle: Any) -> None:
-        await self._primary_port().cancel(handle)
+        await self._owning_port(handle.run_id).cancel(handle)
 
     async def get_run_verdict(self, handle: Any) -> Any:
-        return await self._primary_port().get_run_verdict(handle)
+        return await self._owning_port(handle.run_id).get_run_verdict(handle)
+
+    # ------------------------------------------------------------------
+    # Event-read surface — route to owning harness (root-cause fix)
+    # ------------------------------------------------------------------
+
+    def get_run_events(self, run_id: str) -> list[RunEvent]:
+        """Return the transcript event backlog from the run-owning harness.
+
+        Routes to the harness whose RunEventStore holds this run's events.
+        Falls back to primary when ownership cannot be determined (e.g. the
+        run is not yet registered, or primary is the only harness).
+
+        Without this method, RunRecordingHarness.get_run_events() falls through
+        to its ``hasattr`` guard's else-branch and returns [] — making every
+        run's transcript invisible (ev0 across all runs).
+        """
+        port: Any = self._owning_port(run_id)
+        if hasattr(port, "get_run_events"):
+            result: list[RunEvent] = port.get_run_events(run_id)
+            return result
+        return []
+
+    def subscribe_run_events(self, run_id: str) -> AsyncIterator[RunEvent]:
+        """Subscribe to the run-owning harness's event stream (backfill + live).
+
+        Routes to the harness whose RunEventStore holds this run's events.
+        Falls back to primary when ownership cannot be determined.
+
+        Without this method, RunRecordingHarness.subscribe_run_events() falls
+        through to its ``hasattr`` guard's else-branch and returns an empty
+        async iterator — making the SSE stream always empty.
+        """
+        port: Any = self._owning_port(run_id)
+        if hasattr(port, "subscribe_run_events"):
+            it: AsyncIterator[RunEvent] = port.subscribe_run_events(run_id)
+            return it
+        return _empty_async_iter()
+
+    def register_run_status_sink(self, run_id: str, sink: Any) -> None:
+        """Register a write-through status sink on the run-owning harness.
+
+        Routes to the harness that owns the run so the sink receives status
+        updates from the correct RunEventStore.  Falls back to primary when
+        ownership cannot be determined.
+        """
+        port: Any = self._owning_port(run_id)
+        if hasattr(port, "register_run_status_sink"):
+            port.register_run_status_sink(run_id, sink)
+
+    def get_live_status(self, run_id: str) -> RunStatus:
+        """Return the current live status from the run-owning harness (issue #101).
+
+        Routes to the harness whose RunEventStore holds this run's status.
+        Falls back to primary when ownership cannot be determined.
+        """
+        port: Any = self._owning_port(run_id)
+        if hasattr(port, "get_live_status"):
+            status: RunStatus = port.get_live_status(run_id)
+            return status
+        return RunStatus(state="queued")

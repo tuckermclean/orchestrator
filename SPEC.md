@@ -1417,9 +1417,15 @@ A `HarnessPort`-compatible coordinator that wraps a `HarnessRegistry` and implem
 4. If `decide_harness` returns `None` (all harnesses cooled down):
    - Raise `AllHarnessesExhausted`. **Do NOT call `forge.add_label(LABEL_NEEDS_HUMAN)`.**
 
-**All other `HarnessPort` methods** (`trigger_workflow`, `trigger_ci`, `get_run_status`, `cancel`, `get_run_verdict`) are delegated to the **primary harness** (lowest priority number) regardless of cooldown state. These are maintenance/status calls, not dispatch; they do not participate in failover.
+**Non-dispatch delegation — two routing classes:**
 
-> **Design rationale:** Failover is dispatch-only. `get_run_status` and `cancel` must target the harness that owns the `RunHandle`; `trigger_ci` and `trigger_workflow` are repo-CI calls unrelated to AI quota. A `FailoverHarnessPort` that delegates status/cancel calls to the primary harness is correct for the current single-backend model where all handles originate from the same backend tier; a future multi-backend model would need `RunHandle` to carry the originating harness id.
+**Non-run-specific calls** (`trigger_workflow`, `trigger_ci`) are delegated to the **primary harness** (lowest priority number) unconditionally. These are repo-CI calls unrelated to AI quota or run ownership.
+
+**Run-specific calls** (`get_run_status`, `cancel`, `get_run_verdict`, `get_run_events`, `subscribe_run_events`, `register_run_status_sink`, `get_live_status`) are routed to the **harness that owns the `run_id`** — determined by calling `port.has_run(run_id)` on each registry entry in priority order. The first entry that claims ownership receives the call. When no entry claims ownership (run not yet registered, or primary is the only harness), the call falls back to primary.
+
+> **Design rationale for owner-routing:** When `dispatch` selects a non-primary harness (failover case), the run's events and status live in THAT harness's `RunEventStore`. Routing event-reads or status-sink registration to the primary would silently read from an empty store — causing the transcript to appear as `ev0`/`tx0` for every run dispatched to a non-primary harness, even though the underlying harness holds all events. Owner-routing is the correct fix. Non-dispatch delegation that blindly targets primary is only safe when there is guaranteed to be exactly one harness; the owner-routing approach is safe for all cardinalities.
+>
+> **`has_run` predicate:** Each `ClaudeCodeHarnessPort` exposes a synchronous `has_run(run_id: str) -> bool` that checks whether the `run_id` appears in its `RunEventStore`'s status index (set by `register()` at dispatch time). `FailoverHarnessPort._owning_port(run_id)` iterates entries and returns the first port where `has_run` is True. This avoids reaching into private internals from `FailoverHarnessPort` and provides a clean predicate for future harness implementations.
 
 ### §14.5 `AllHarnessesExhausted` — HOLD semantics
 

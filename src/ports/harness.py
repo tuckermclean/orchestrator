@@ -941,6 +941,17 @@ class ClaudeCodeHarnessPort:
         """
         self._event_store.register_status_sink(run_id, sink)
 
+    def has_run(self, run_id: str) -> bool:
+        """Return True when this harness owns the given run_id.
+
+        Used by FailoverHarnessPort to route event-read and status-sink calls to
+        the harness that actually dispatched (and therefore owns) a given run.
+        Checks registration in the RunEventStore: a run is "owned" by this harness
+        iff its run_id appears in the event-store's status index (set by register()
+        at dispatch time).
+        """
+        return run_id in self._event_store._statuses
+
     def get_live_status(self, run_id: str) -> RunStatus:
         """Return the current live status from the RunEventStore (issue #101).
 
