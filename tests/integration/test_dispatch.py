@@ -27,13 +27,19 @@ def _engine(
 
 
 # ---------------------------------------------------------------------------
-# §4.2 row 1 — issues:labeled agent-work → draft PR created + LABEL_IMPLEMENTING
+# §4.2 row 1 — issues:labeled agent-work → harness.dispatch called; control
+#               plane does NOT open a draft PR (agent does that per SPEC §10.1)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.covers("§4.2", "row-1-opens-draft-pr")
 async def test_dispatch_opens_draft_pr() -> None:
-    """issues:labeled with agent-work → draft PR with Closes #N; LABEL_IMPLEMENTING added."""
+    """issues:labeled with agent-work → harness.dispatch called; NO control-plane create_pr.
+
+    SPEC §10.1 step 2: the dedup guard runs, then harness.dispatch is called.
+    The orchestrator agent (agents/orchestrator.md Step 1) opens the draft PR
+    itself — the control plane must not call create_pr or add LABEL_IMPLEMENTING.
+    """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
@@ -46,25 +52,19 @@ async def test_dispatch_opens_draft_pr() -> None:
 
     assert handle is not None
 
-    # Draft PR was created
-    assert len(forge.create_pr_calls) == 1
-    _repo, title, body, head, base, draft = forge.create_pr_calls[0]
-    assert draft is True
-    assert "Closes #7" in body
-    assert "7" in title  # e.g. "Fix #7"
+    # Control plane must NOT open a PR — the agent does that (SPEC §10.1 step 2)
+    assert len(forge.create_pr_calls) == 0
 
-    # LABEL_IMPLEMENTING was added to the issue
-    add_calls = forge.add_label_calls
-    assert any(
-        (ref == issue_ref or ref.number == issue_ref.number) and label == LABEL_IMPLEMENTING
-        for ref, label in add_calls
+    # Control plane must NOT add LABEL_IMPLEMENTING to the issue — the agent
+    # adds it to the PR it creates (agents/orchestrator.md Step 2)
+    assert not any(
+        label == LABEL_IMPLEMENTING for _ref, label in forge.add_label_calls
     )
 
-    # The draft PR was created in-store with draft=True
-    pr_ref = PRRef(repo=repo, number=1)  # auto-incremented to 1
-    pr = await forge.get_pr(pr_ref)
-    assert pr.draft is True
-    assert "Closes #7" in pr.body
+    # harness.dispatch was called exactly once
+    assert len(harness.dispatch_calls) == 1
+    ctx = harness.dispatch_calls[0]
+    assert ctx.issue_ref == issue_ref
 
 
 # ---------------------------------------------------------------------------
@@ -178,14 +178,18 @@ async def test_dispatch_full_lifecycle() -> None:
 
     engine = _engine(forge, harness, session)
 
-    # Dispatch → opens draft PR + harness called exactly once
+    # Dispatch → harness.dispatch called exactly once; control plane does NOT
+    # open a PR (the agent does that per SPEC §10.1 step 2)
     handle = await engine.dispatch("issues", issue_ref=issue_ref)
     assert handle is not None
     assert len(harness.dispatch_calls) == 1
 
-    # Draft PR was created in store
-    assert len(forge.create_pr_calls) == 1
+    # Control plane must NOT have opened a PR
+    assert len(forge.create_pr_calls) == 0
+
+    # Simulate the agent having opened the draft PR and begun building
     pr_ref = PRRef(repo=repo, number=1)
+    forge.seed_pr(pr_ref, draft=True, labels=[LABEL_IMPLEMENTING], body="Closes #20")
     pr = await forge.get_pr(pr_ref)
     assert pr.draft is True  # BUILDING state
 
@@ -262,3 +266,53 @@ async def test_dispatch_no_dispatch_without_agent_work_label() -> None:
     # H5 guard fires: no harness dispatch
     assert handle is None
     assert len(harness.dispatch_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fake-fidelity hardening: FakeForgePort(require_branch_commits=True) rejects
+# create_pr when the head branch has no registered commits — catches the class
+# of bug where the control plane opens a PR before the agent pushes any commits
+# (real GitHub returns 422 Unprocessable Entity in that case).
+# ---------------------------------------------------------------------------
+
+
+async def test_fake_forge_rejects_create_pr_on_empty_branch() -> None:
+    """FakeForgePort(require_branch_commits=True) raises ValueError for empty head branch.
+
+    This test documents the hardening introduced to catch control-plane
+    create_pr calls before the agent branch has any commits (the root cause
+    of the 422 bug this PR fixes).
+    """
+    import pytest as _pytest
+
+    repo = RepoRef(owner="acme", name="service")
+    forge = FakeForgePort(require_branch_commits=True)
+
+    # Branch has no registered commits — should raise
+    with _pytest.raises(ValueError, match="422"):
+        await forge.create_pr(
+            repo=repo,
+            title="Fix #1",
+            body="Closes #1",
+            head="fix/issue-1",
+            base="main",
+            draft=True,
+        )
+
+
+async def test_fake_forge_allows_create_pr_after_seed_branch_commits() -> None:
+    """FakeForgePort(require_branch_commits=True) allows create_pr after seed_branch_commits."""
+    repo = RepoRef(owner="acme", name="service")
+    forge = FakeForgePort(require_branch_commits=True)
+    forge.seed_branch_commits(repo, "agent/1-fix-thing")
+
+    # Branch has a registered commit — should succeed
+    ref = await forge.create_pr(
+        repo=repo,
+        title="[Agent] fix thing",
+        body="Closes #1",
+        head="agent/1-fix-thing",
+        base="main",
+        draft=True,
+    )
+    assert ref is not None
