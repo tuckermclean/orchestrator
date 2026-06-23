@@ -58,6 +58,7 @@ Live transcript streaming:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -74,6 +75,8 @@ from src.ports.harness import (
     RunEventStore,
     _default_process_runner,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Protocol — the seam
@@ -1041,10 +1044,17 @@ class K8sJobBackend:
                 event = parse_jsonl_line(line)
                 if event is not None:
                     event_store.append(run_id, event)
-        except Exception:
+        except Exception as exc:
             # Log-streaming errors are non-fatal — the job status watcher is
-            # the authority.  Swallow silently to avoid crashing the task.
-            pass
+            # the authority.  Log the failure so it is visible in observability
+            # tooling rather than silently swallowed (this bug was invisible
+            # precisely because errors were eaten without logging).
+            logger.warning(
+                "pod-log stream failed for run %s (selector=%s): %r",
+                run_id,
+                label_selector,
+                exc,
+            )
 
     def _cleanup_job(self, job_name: str) -> None:
         """Delete the K8s Job (best-effort; TTL handles it if this fails)."""
@@ -1155,13 +1165,19 @@ class _RealKubeLogClient:
 
     Streams pod logs with follow=True so lines arrive incrementally.
     The kubernetes python SDK's read_namespaced_pod_log with
-    _preload_content=False returns a urllib3 HTTPResponse whose iter_lines()
-    we wrap in an async generator by running it in a thread pool executor.
+    _preload_content=False returns a urllib3 HTTPResponse.  urllib3's
+    HTTPResponse does NOT have an iter_lines() method (that belongs to
+    requests.Response).  We instead iterate the stream via resp.stream()
+    in byte chunks, buffer across chunk boundaries, and yield complete
+    newline-delimited lines.  Each chunk read is dispatched via
+    run_in_executor so the blocking I/O does not stall the asyncio event loop.
 
     We select pods by label_selector (run-id=<run_id[:63]>) and wait briefly
     for the pod to appear (the Job scheduler takes a moment to start the pod
     after job creation).
     """
+
+    _CHUNK_SIZE: int = 4096
 
     def __init__(self, core_v1: Any) -> None:
         self._api = core_v1
@@ -1174,7 +1190,14 @@ class _RealKubeLogClient:
         """Yield log lines from the pod matching label_selector.
 
         Polls for the pod to appear (up to 30 s), then streams with follow=True.
-        Each yielded item is one decoded UTF-8 line.
+        Each yielded item is one decoded UTF-8 line (no trailing newline).
+
+        The urllib3 HTTPResponse returned by read_namespaced_pod_log (with
+        _preload_content=False) exposes resp.stream(amt, decode_content=False)
+        which yields raw byte chunks.  Chunks can split a JSONL line across
+        boundaries; we accumulate a bytes buffer and yield only complete lines.
+        Each blocking chunk read runs in run_in_executor so the asyncio event
+        loop is never blocked.
         """
         import asyncio as _asyncio
 
@@ -1202,7 +1225,9 @@ class _RealKubeLogClient:
         if pod_name is None:
             return
 
-        # Stream with follow=True, _preload_content=False.
+        # Open the streaming response with follow=True, _preload_content=False.
+        # This returns a urllib3.response.HTTPResponse — not a requests.Response.
+        # urllib3.HTTPResponse does NOT have iter_lines(); use .stream() instead.
         try:
             resp = await loop.run_in_executor(
                 None,
@@ -1213,13 +1238,47 @@ class _RealKubeLogClient:
                     _preload_content=False,
                 ),
             )
-            for raw_line in resp.iter_lines():
-                if isinstance(raw_line, bytes):
-                    yield raw_line.decode("utf-8", errors="replace")
-                else:
-                    yield str(raw_line)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "pod-log open failed for pod %s (selector=%s): %r",
+                pod_name,
+                label_selector,
+                exc,
+            )
             return
+
+        # Line-buffer the urllib3 byte stream.
+        # Chunks can split JSONL lines at any byte boundary; we accumulate a
+        # buffer and split on b"\n" after each chunk.  A trailing partial line
+        # (no newline yet) is kept in the buffer and flushed at stream end.
+        buf: bytes = b""
+        try:
+            while True:
+                chunk: bytes | None = await loop.run_in_executor(
+                    None,
+                    lambda: resp.read(self._CHUNK_SIZE),
+                )
+                if not chunk:
+                    # Stream exhausted — flush any final partial line.
+                    if buf:
+                        line = buf.decode("utf-8", errors="replace").rstrip("\r\n")
+                        if line:
+                            yield line
+                    break
+                buf += chunk
+                # Split on newline and yield complete lines.
+                while b"\n" in buf:
+                    raw_line, buf = buf.split(b"\n", 1)
+                    line = raw_line.rstrip(b"\r").decode("utf-8", errors="replace")
+                    if line:
+                        yield line
+        except Exception as exc:
+            logger.warning(
+                "pod-log stream failed for pod %s (selector=%s): %r",
+                pod_name,
+                label_selector,
+                exc,
+            )
 
 
 def _make_real_kube_log_client() -> _RealKubeLogClient:

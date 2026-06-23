@@ -339,6 +339,13 @@
   # Streaming default (Bug 2) — HARNESS_K8S_STREAM_LOGS=1 enables live transcript
   "k8s-streaming-default-enabled":
     tests: ["test_backend_factory_k8s_streaming_enabled_by_default", "test_backend_factory_k8s_streaming_disabled_when_env_empty"]
+  # urllib3 stream fix — iter_lines() AttributeError + line buffering (fix: stream_pod_log)
+  "k8s-real-log-client-line-buffering":
+    tests: ["test_real_kube_log_client_buffers_chunks_into_complete_lines", "test_real_kube_log_client_no_iter_lines_called"]
+  "k8s-real-log-client-stream-error-logged":
+    tests: ["test_real_kube_log_client_logs_stream_error"]
+  "k8s-stream-pod-log-error-logged":
+    tests: ["test_k8s_backend_stream_pod_log_method_logs_error"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":
