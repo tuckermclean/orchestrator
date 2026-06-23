@@ -50,6 +50,13 @@ RBAC note: the ServiceAccount {{ include "orchestrator.serviceAccountName" . }} 
 Role allowing Job create/get/list/delete in namespace {{ .Release.Namespace }}.
 This is required for the K8s Job harness backend (issue #51).
 
+Authentik forward-auth (issue #110): if this deployment is behind an authentik
+proxy provider, the following paths must be added to the provider's
+"Unauthenticated Paths" list so the PWA shell loads before login:
+  /manifest.json, /sw.js, /icons/, /assets/, /, /index.html
+  /healthz, /readyz, /api/auth, /api/webhook
+Full configuration and verification steps: deploy/AUTHENTIK.md
+
 Live transcript streaming: HARNESS_K8S_STREAM_LOGS={{ .Values.config.HARNESS_K8S_STREAM_LOGS | default "1" }}
   "1" (default) — agent pod logs are streamed live into the run view via CoreV1Api.
   ""            — streaming disabled; run view shows only job lifecycle events.
