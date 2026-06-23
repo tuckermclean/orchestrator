@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, streamRunEvents, type RunDetail as RunDetailType, type RunEvent } from "../api";
+import { api, modelLabel, streamRunEvents, type RunDetail as RunDetailType, type RunEvent } from "../api";
 
 type StreamState = "connecting" | "live" | "closed" | "error";
 
@@ -408,6 +408,9 @@ export default function RunDetail() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", fontSize: "14px" }}>
             <div><span style={{ color: "#8b949e" }}>Status: </span>{detail.status}</div>
             <div><span style={{ color: "#8b949e" }}>Type: </span>{detail.type}</div>
+            {modelLabel(detail.model) && (
+              <div><span style={{ color: "#8b949e" }}>Model: </span>{modelLabel(detail.model)}</div>
+            )}
             <div><span style={{ color: "#8b949e" }}>Repo: </span>{detail.repo.owner}/{detail.repo.name}</div>
             <div><span style={{ color: "#8b949e" }}>Started: </span>{new Date(detail.started_at).toLocaleString()}</div>
             {detail.build_status && (

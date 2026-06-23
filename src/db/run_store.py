@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS run_events (
 """
 
 
+def _model_or_none(raw: object) -> str | None:
+    """Map the stored model column to ``str | None``.
+
+    The schema stores ``model`` as ``NOT NULL DEFAULT ''``; an empty string (or a
+    NULL from a pre-column row) means "unknown" and surfaces as ``None`` so the
+    API never reports a bogus empty-string model.
+    """
+    if raw is None:
+        return None
+    text = str(raw)
+    return text or None
+
+
 # ---------------------------------------------------------------------------
 # FakeRunStore — in-memory; used in tests and dev/CI
 # ---------------------------------------------------------------------------
@@ -89,6 +102,7 @@ class FakeRunStore:
             type=type,
             status="queued",
             started_at=started_at,
+            model=model or None,
         )
         self._events[run_id] = []
 
@@ -139,6 +153,7 @@ class FakeRunStore:
             status=summary.status,
             started_at=summary.started_at,
             completed_at=summary.completed_at,
+            model=summary.model,
             events=events,
         )
 
@@ -338,6 +353,7 @@ class SQLiteRunStore:
                     status=str(row["status"]),
                     started_at=datetime.fromisoformat(str(row["started_at"])).replace(tzinfo=UTC),
                     completed_at=completed_at,
+                    model=_model_or_none(row["model"]),
                 )
             )
         return result
@@ -373,6 +389,7 @@ class SQLiteRunStore:
             status=str(row["status"]),
             started_at=datetime.fromisoformat(str(row["started_at"])).replace(tzinfo=UTC),
             completed_at=completed_at,
+            model=_model_or_none(row["model"]),
             events=events,
         )
 
