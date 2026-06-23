@@ -696,3 +696,15 @@
     tests: ["test_memory_store_reads_see_writes"]
   "high-concurrency-writes-no-dropped-rows":
     tests: ["test_high_concurrency_writes_no_dropped_rows"]
+
+"§6-spa-fallback":  # SPA BrowserRouter history-mode fallback (WEBUI.md §6 — deep-link / refresh)
+  "client-route-returns-index-html":
+    tests: ["test_spa_client_route_returns_index_html", "test_spa_triage_route_returns_index_html", "test_full_app_client_route_returns_index_html"]
+  "root-returns-index-html":
+    tests: ["test_spa_root_returns_index_html"]
+  "real-asset-served-verbatim":
+    tests: ["test_real_asset_served_verbatim"]
+  "api-unknown-returns-json-404":
+    tests: ["test_api_unknown_route_returns_json_404"]
+  "healthz-not-shadowed":
+    tests: ["test_healthz_still_works"]
