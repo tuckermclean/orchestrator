@@ -14,12 +14,35 @@ from src.domain.types import (
     IssueRef,
     RepoRef,
 )
-from src.engine.intake import IntakeEngine
+from src.engine.intake import IntakeEngine, IntakeResult
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
 from src.service.orchestrator import OrchestratorService
 from src.service.registry import FakeRepoRegistry, RepoConfig
 
 _REPO = RepoRef(owner="acme", name="repo")
+
+# Triager comment templates used in reconciliation tests (SPEC §10.4 step 6)
+_TRIAGER_COMMENT_QUEUE = (
+    "## Triage Summary\n\n"
+    "**Author**: @owner (admit — in allowlist)\n"
+    "**Issue type**: feature\n"
+    "**Scope estimate**: large\n"
+    "**Risk flags**: scope-unclear\n"
+    "**Summary**: The issue is ambiguous.\n"
+    "**Files likely affected**: unknown\n"
+    "**Recommended action**: queue for human review\n"
+)
+
+_TRIAGER_COMMENT_ADMIT = (
+    "## Triage Summary\n\n"
+    "**Author**: @owner (admit — in allowlist)\n"
+    "**Issue type**: bug\n"
+    "**Scope estimate**: small\n"
+    "**Risk flags**: none\n"
+    "**Summary**: A clear small bug.\n"
+    "**Files likely affected**: src/foo.py\n"
+    "**Recommended action**: admit for autonomous dispatch\n"
+)
 
 
 def _make_engine(
@@ -87,9 +110,11 @@ async def test_intake_admit_path() -> None:
     forge.seed_issue(issue_ref, author="alice", labels=[])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
-    handle = await engine.intake(issue_ref)
+    result = await engine.intake(issue_ref)
 
-    assert handle is not None
+    assert isinstance(result, IntakeResult)
+    assert result.handle is not None
+    assert result.decision == "admit"
     # Verify labels were set atomically to [LABEL_TRIAGE, LABEL_AGENT_WORK]
     issue = await forge.get_issue(issue_ref)
     assert LABEL_AGENT_WORK in issue.labels
@@ -115,9 +140,11 @@ async def test_intake_queue_path() -> None:
     forge.seed_issue(issue_ref, author="eve", labels=[])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
-    handle = await engine.intake(issue_ref)
+    result = await engine.intake(issue_ref)
 
-    assert handle is not None
+    assert isinstance(result, IntakeResult)
+    assert result.handle is not None
+    assert result.decision == "queue"
     issue = await forge.get_issue(issue_ref)
     assert LABEL_AWAITING_PROMOTION in issue.labels
     assert LABEL_TRIAGE in issue.labels
@@ -556,11 +583,169 @@ async def test_intake_idempotency_guard_skips_if_triage_label_present() -> None:
     forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE, LABEL_AGENT_WORK])
 
     engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
-    handle = await engine.intake(issue_ref)
+    result = await engine.intake(issue_ref)
 
-    # Guard fired: no dispatch, no label changes, returns None
-    assert handle is None
+    # Guard fired: no dispatch, no label changes; handle and decision are None
+    assert isinstance(result, IntakeResult)
+    assert result.handle is None
+    assert result.decision is None
     assert len(harness.dispatch_calls) == 0
     # No audit record written (guard returns before audit step)
     entries = await audit.list_entries(_REPO, issue_ref)
     assert len(entries) == 0
+
+
+# ---------------------------------------------------------------------------
+# SPEC §10.4 step 6 — triager divergence reconciliation
+# ---------------------------------------------------------------------------
+
+
+async def test_reconcile_triager_divergence_detected_and_surfaced() -> None:
+    """When intake=admit but triager recommends queue, divergence is surfaced.
+
+    Divergence condition: decision axis (trust) says admit; scope/risk axis
+    (triager) says queue.  reconcile_triager_divergence must:
+      - post a reconciliation comment on the issue
+      - write an 'intake:triager-divergence' audit record (I6)
+    and return True.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=80)
+    forge.seed_issue(issue_ref, author="alice", labels=[])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+
+    # Simulate the triager having posted its structured comment
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_QUEUE)
+
+    # Reconcile with intake_decision=admit (triager says queue → divergence)
+    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
+
+    assert diverged is True
+
+    # Reconciliation comment posted on the issue
+    comments = await forge.list_comments(issue_ref)
+    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
+    assert len(reconcile_comments) == 1
+    body = reconcile_comments[0].body
+    assert "auto-admitted" in body
+    assert "queue for human review" in body
+
+    # Audit record written for the divergence (I6)
+    entries = await audit.list_entries(_REPO, issue_ref)
+    divergence_entries = [e for e in entries if e["action"] == "intake:triager-divergence"]
+    assert len(divergence_entries) == 1
+    assert divergence_entries[0]["escalation_cause"] == "triager_rec=queue for human review"
+
+
+async def test_reconcile_triager_no_divergence_when_triager_admits() -> None:
+    """No noise when intake=admit and triager also recommends admit.
+
+    When the two axes agree (both say admit), reconcile_triager_divergence
+    must be a no-op: no reconciliation comment, no audit record, returns False.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=81)
+    forge.seed_issue(issue_ref, author="alice", labels=[])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+
+    # Triager recommends admit — no divergence
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_ADMIT)
+
+    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
+
+    assert diverged is False
+
+    # No reconciliation comment posted
+    comments = await forge.list_comments(issue_ref)
+    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
+    assert len(reconcile_comments) == 0
+
+    # No divergence audit record
+    entries = await audit.list_entries(_REPO, issue_ref)
+    divergence_entries = [e for e in entries if e["action"] == "intake:triager-divergence"]
+    assert len(divergence_entries) == 0
+
+
+async def test_reconcile_triager_no_noise_when_decision_is_queue() -> None:
+    """No reconciliation when intake decision is queue — already conservative.
+
+    When intake decided to queue the issue (non-allowlisted author), the system
+    is already being cautious.  No reconciliation is needed even if the triager
+    also says queue or admit.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=82)
+    forge.seed_issue(issue_ref, author="external", labels=[])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+
+    # Triager says queue — but decision was already queue, so no divergence to surface
+    await forge.post_comment(issue_ref, _TRIAGER_COMMENT_QUEUE)
+
+    diverged = await engine.reconcile_triager_divergence(issue_ref, "queue")
+
+    assert diverged is False
+    comments = await forge.list_comments(issue_ref)
+    reconcile_comments = [c for c in comments if "orchestrator:intake-reconciliation" in c.body]
+    assert len(reconcile_comments) == 0
+
+
+async def test_reconcile_triager_no_comment_posted_yet() -> None:
+    """No divergence surfaced when the triager comment is not yet present.
+
+    If the triager hasn't posted its comment yet (still running), reconciliation
+    must not surface anything — returns False and no comment/audit.
+    """
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=83)
+    forge.seed_issue(issue_ref, author="alice", labels=[])
+
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+
+    # No triager comment seeded — triager hasn't completed yet
+    diverged = await engine.reconcile_triager_divergence(issue_ref, "admit")
+
+    assert diverged is False
+    comments = await forge.list_comments(issue_ref)
+    assert len(comments) == 0
+    entries = await audit.list_entries(_REPO, issue_ref)
+    assert len(entries) == 0
+
+
+async def test_intake_result_carries_decision() -> None:
+    """IntakeResult.decision matches the actual intake decision (admit or queue)."""
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    # Admit path
+    admit_ref = IssueRef(repo=_REPO, number=84)
+    forge.seed_issue(admit_ref, author="alice", labels=[])
+    engine = _make_engine(forge, harness, session, audit, allowlist=["alice"])
+    admit_result = await engine.intake(admit_ref)
+    assert admit_result.decision == "admit"
+
+    # Queue path
+    queue_ref = IssueRef(repo=_REPO, number=85)
+    forge.seed_issue(queue_ref, author="external", labels=[])
+    queue_result = await engine.intake(queue_ref)
+    assert queue_result.decision == "queue"
