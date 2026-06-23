@@ -12,7 +12,6 @@ from src.db.audit import AuditLog
 from src.db.run_store import FakeRunStore, SQLiteRunStore
 from src.decisions.pipeline_health import pipeline_health
 from src.domain.types import (
-    BLOCKING_CI_CHECKS,
     LABEL_AGENT_WORK,
     LABEL_AWAITING_PROMOTION,
     LABEL_CONVERGE,
@@ -492,29 +491,18 @@ class OrchestratorService:
         return [report]
 
     # -----------------------------------------------------------------------
-    # Converge — per-repo required_checks resolved here (closes #71)
+    # Converge
     # -----------------------------------------------------------------------
 
     async def converge_pr(self, pr_ref: PRRef) -> PRState:
-        """Run the converge sub-machine for *pr_ref* with per-repo required_checks.
+        """Run the converge sub-machine for *pr_ref*.
 
-        Resolution order (closes #71):
-          1. If a registry is wired and the PR's repo has a ``RepoConfig``, use
-             ``RepoConfig.required_checks`` (may be a narrowed subset).
-          2. Otherwise fall back to the global ``BLOCKING_CI_CHECKS`` constant
-             (single-repo / no-registry / unregistered repo — existing behaviour).
-
-        This is the preferred entry-point for any code that holds a registry
-        reference (e.g. the workflow-dispatch webhook handler).  Direct calls to
-        ``self.engine.converge(pr_ref)`` still work but always use the global
-        constant.
+        The CI gate trusts the repo's actual check runs — every present check
+        must be completed and green (SPEC §7 CI green definition).  No named
+        allow-list; no per-repo override.  Pending checks are awaited (up to
+        ``CI_WAIT_S``) before the approve/escalate decision is made.
         """
-        required_checks: tuple[str, ...] = BLOCKING_CI_CHECKS
-        if self._registry is not None:
-            repo_config = await self._registry.get_repo(pr_ref.repo)
-            if repo_config is not None:
-                required_checks = repo_config.required_checks
-        return await self.engine.converge(pr_ref, required_checks)
+        return await self.engine.converge(pr_ref)
 
     def _spawn_converge(self, pr_ref: PRRef) -> bool:
         """Run ``converge_pr`` as a background task; return immediately.

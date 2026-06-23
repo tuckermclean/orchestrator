@@ -97,11 +97,6 @@ export default function Repos() {
                   </span>
                 )}
               </div>
-              {repo.required_checks.length > 0 && (
-                <div style={{ ...s.muted, marginTop: "8px" }}>
-                  Required checks: {repo.required_checks.join(", ")}
-                </div>
-              )}
             </li>
           ))}
         </ul>

@@ -14,7 +14,7 @@ import json
 
 import pytest
 
-from src.domain.types import BLOCKING_CI_CHECKS, RepoRef
+from src.domain.types import RepoRef
 from src.service.registry import (
     EnvRepoRegistry,
     FakeRepoRegistry,
@@ -41,28 +41,24 @@ def _cfg(repo: RepoRef, **kwargs: object) -> RepoConfig:
 
 
 def test_repo_config_defaults() -> None:
-    """RepoConfig defaults: enabled=True, intake_enabled=True, empty allowlist, full checks."""
+    """RepoConfig defaults: enabled=True, intake_enabled=True, empty allowlist."""
     cfg = RepoConfig(repo=_ACME_API)
     assert cfg.enabled is True
     assert cfg.intake_enabled is True
     assert cfg.allowlist == []
-    assert cfg.required_checks == BLOCKING_CI_CHECKS
 
 
 def test_repo_config_custom_values() -> None:
     """RepoConfig accepts custom values."""
-    checks = ("Type Check", "Lint")
     cfg = RepoConfig(
         repo=_ACME_API,
         enabled=False,
         intake_enabled=False,
         allowlist=["alice", "bob"],
-        required_checks=checks,
     )
     assert cfg.enabled is False
     assert cfg.intake_enabled is False
     assert cfg.allowlist == ["alice", "bob"]
-    assert cfg.required_checks == checks
 
 
 def test_repo_config_equality() -> None:
@@ -253,23 +249,20 @@ async def test_env_registry_repos_json_enabled_filter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_env_registry_repos_json_custom_checks() -> None:
-    """REPOS_JSON can override required_checks per repo."""
+async def test_env_registry_repos_json_ignores_required_checks() -> None:
+    """REPOS_JSON with required_checks key is silently accepted (forward-compat).
+
+    The required_checks concept was removed; the key is now silently ignored.
+    The CI gate trusts the repo's actual check runs instead.
+    """
     repos_json = json.dumps([
         {"owner": "acme", "name": "api", "required_checks": ["Type Check", "Lint"]},
     ])
     reg = EnvRepoRegistry.from_env(repos_json=repos_json)
     repos = await reg.list_repos()
-    assert repos[0].required_checks == ("Type Check", "Lint")
-
-
-@pytest.mark.asyncio
-async def test_env_registry_repos_json_default_checks() -> None:
-    """Repos without required_checks in REPOS_JSON get BLOCKING_CI_CHECKS defaults."""
-    repos_json = json.dumps([{"owner": "acme", "name": "api"}])
-    reg = EnvRepoRegistry.from_env(repos_json=repos_json)
-    repos = await reg.list_repos()
-    assert repos[0].required_checks == BLOCKING_CI_CHECKS
+    # required_checks field no longer exists; the repo parses without error.
+    assert repos[0].repo.name == "api"
+    assert not hasattr(repos[0], "required_checks")
 
 
 # ---------------------------------------------------------------------------
@@ -365,27 +358,15 @@ async def test_sqlite_registry_preserves_insertion_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_registry_custom_checks_roundtrip() -> None:
-    """SQLiteRepoRegistry round-trips custom required_checks."""
+async def test_sqlite_registry_roundtrip_no_required_checks() -> None:
+    """SQLiteRepoRegistry round-trips a config without required_checks (field removed)."""
     reg = SQLiteRepoRegistry(db_path=":memory:")
     await reg.init()
-    checks = ("Type Check", "Lint")
-    await reg.upsert_repo(RepoConfig(repo=_ACME_API, required_checks=checks))
+    await reg.upsert_repo(RepoConfig(repo=_ACME_API, allowlist=["alice"]))
     result = await reg.get_repo(_ACME_API)
     assert result is not None
-    assert result.required_checks == checks
-    await reg.close()
-
-
-@pytest.mark.asyncio
-async def test_sqlite_registry_default_checks_roundtrip() -> None:
-    """SQLiteRepoRegistry preserves BLOCKING_CI_CHECKS as the default."""
-    reg = SQLiteRepoRegistry(db_path=":memory:")
-    await reg.init()
-    await reg.upsert_repo(RepoConfig(repo=_ACME_API))
-    result = await reg.get_repo(_ACME_API)
-    assert result is not None
-    assert result.required_checks == BLOCKING_CI_CHECKS
+    assert result.allowlist == ["alice"]
+    assert not hasattr(result, "required_checks")
     await reg.close()
 
 

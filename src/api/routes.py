@@ -34,7 +34,6 @@ class RepoSummary(BaseModel):
     name: str
     enabled: bool
     intake_enabled: bool
-    required_checks: list[str]
 
 
 async def _active_repo(registry: RepoRegistryPort) -> RepoRef | None:
@@ -206,7 +205,6 @@ def _make_router(service: OrchestratorService, registry: RepoRegistryPort) -> AP
                 name=cfg.repo.name,
                 enabled=cfg.enabled,
                 intake_enabled=cfg.intake_enabled,
-                required_checks=list(cfg.required_checks),
             )
             for cfg in configs
         ]

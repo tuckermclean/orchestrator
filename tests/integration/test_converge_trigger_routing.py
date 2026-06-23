@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 
 from src.domain.types import (
-    BLOCKING_CI_CHECKS,
     LABEL_CONVERGE,
     LABEL_NEEDS_HUMAN,
     LABEL_READY,
@@ -69,10 +68,9 @@ def _pr_payload(
 
 
 def _green_pr(forge: FakeForgePort) -> None:
-    """Seed a non-draft converge-eligible PR with all CI checks green."""
+    """Seed a non-draft converge-eligible PR with a generic green CI check."""
     forge.seed_pr(_PR, draft=False, labels=[LABEL_CONVERGE], changed_files=1)
-    for name in BLOCKING_CI_CHECKS:
-        forge.seed_check_run(_PR, name, "completed", "success")
+    forge.seed_check_run(_PR, "CI", "completed", "success")
 
 
 def _make_service(
@@ -248,8 +246,7 @@ async def test_handle_event_ready_for_review_routes_converge_regardless_of_label
     harness = FakeHarnessPort(forge=forge)
     # Non-draft PR without converge label — routing still calls converge_pr.
     forge.seed_pr(_PR, draft=False, labels=[], changed_files=1)
-    for name in BLOCKING_CI_CHECKS:
-        forge.seed_check_run(_PR, name, "completed", "success")
+    forge.seed_check_run(_PR, "CI", "completed", "success")
     harness.script_reviewer_verdicts(
         Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
     )

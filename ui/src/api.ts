@@ -108,7 +108,6 @@ export interface RepoSummary {
   name: string;
   enabled: boolean;
   intake_enabled: boolean;
-  required_checks: string[];
 }
 
 export interface OperatorRecord {

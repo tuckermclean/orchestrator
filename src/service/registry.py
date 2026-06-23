@@ -23,8 +23,8 @@ pre-multi-repo behaviour.
 
 I3 compliance
 --------------
-RepoConfig carries *configuration* only (owner, name, allowlist,
-required_checks).  Credentials live exclusively in PortProvider.
+RepoConfig carries *configuration* only (owner, name, allowlist).
+Credentials live exclusively in PortProvider.
 No token is accepted by or stored in any registry type.
 """
 
@@ -35,7 +35,7 @@ from typing import Protocol, runtime_checkable
 
 import aiosqlite
 
-from src.domain.types import BLOCKING_CI_CHECKS, RepoRef
+from src.domain.types import RepoRef
 
 
 class RepoConfig:
@@ -55,13 +55,9 @@ class RepoConfig:
         GitHub logins admitted through decide_intake without queuing.  Empty →
         owner-only default-deny (issue #48).  The repo owner (repo.owner) is
         always admitted regardless of this list (same semantics as single-repo).
-    required_checks:
-        CI check names that must be green before converge can approve.  Defaults
-        to BLOCKING_CI_CHECKS (all checks).  Per-repo override allows repos
-        with a subset of checks to converge without the full suite.
     """
 
-    __slots__ = ("repo", "enabled", "intake_enabled", "allowlist", "required_checks")
+    __slots__ = ("repo", "enabled", "intake_enabled", "allowlist")
 
     def __init__(
         self,
@@ -70,15 +66,11 @@ class RepoConfig:
         enabled: bool = True,
         intake_enabled: bool = True,
         allowlist: list[str] | None = None,
-        required_checks: tuple[str, ...] | None = None,
     ) -> None:
         self.repo = repo
         self.enabled = enabled
         self.intake_enabled = intake_enabled
         self.allowlist: list[str] = allowlist if allowlist is not None else []
-        self.required_checks: tuple[str, ...] = (
-            required_checks if required_checks is not None else BLOCKING_CI_CHECKS
-        )
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RepoConfig):
@@ -88,15 +80,13 @@ class RepoConfig:
             and self.enabled == other.enabled
             and self.intake_enabled == other.intake_enabled
             and self.allowlist == other.allowlist
-            and self.required_checks == other.required_checks
         )
 
     def __repr__(self) -> str:
         return (
             f"RepoConfig(repo={self.repo!r}, enabled={self.enabled!r}, "
             f"intake_enabled={self.intake_enabled!r}, "
-            f"allowlist={self.allowlist!r}, "
-            f"required_checks={self.required_checks!r})"
+            f"allowlist={self.allowlist!r})"
         )
 
 
@@ -312,11 +302,6 @@ class SQLiteRepoRegistry:
         return _row_to_config(row) if row is not None else None
 
     async def upsert_repo(self, config: RepoConfig) -> None:
-        checks_json = (
-            json.dumps(list(config.required_checks))
-            if config.required_checks != BLOCKING_CI_CHECKS
-            else "null"
-        )
         await self._conn.execute(
             """
             INSERT INTO repos (owner, name, enabled, intake_enabled, allowlist_json, checks_json)
@@ -333,7 +318,7 @@ class SQLiteRepoRegistry:
                 int(config.enabled),
                 int(config.intake_enabled),
                 json.dumps(config.allowlist),
-                checks_json,
+                "null",
             ),
         )
         await self._conn.commit()
@@ -368,6 +353,8 @@ def _parse_repos_json(raw: str) -> list[RepoConfig]:
         ]
 
     Unknown keys are silently ignored to allow forward-compatible additions.
+    The ``required_checks`` key is no longer supported; include it in REPOS_JSON
+    for forward-compat and it will be silently ignored.
     """
     data = json.loads(raw)
     if not isinstance(data, list):
@@ -382,17 +369,12 @@ def _parse_repos_json(raw: str) -> list[RepoConfig]:
         enabled = bool(entry.get("enabled", True))
         intake_enabled = bool(entry.get("intake_enabled", True))
         allowlist = [str(u) for u in entry.get("allowlist", [])]
-        raw_checks = entry.get("required_checks")
-        required_checks: tuple[str, ...] | None = (
-            tuple(str(c) for c in raw_checks) if raw_checks is not None else None
-        )
         configs.append(
             RepoConfig(
                 repo=RepoRef(owner=owner, name=name),
                 enabled=enabled,
                 intake_enabled=intake_enabled,
                 allowlist=allowlist,
-                required_checks=required_checks,
             )
         )
     return configs
@@ -405,17 +387,11 @@ def _row_to_config(row: aiosqlite.Row) -> RepoConfig:
     enabled = bool(row["enabled"])
     intake_enabled = bool(row["intake_enabled"])
     allowlist: list[str] = json.loads(str(row["allowlist_json"]))
-    checks_raw = row["checks_json"]
-    if checks_raw and checks_raw != "null":
-        required_checks: tuple[str, ...] | None = tuple(
-            str(c) for c in json.loads(str(checks_raw))
-        )
-    else:
-        required_checks = None
+    # checks_json is retained in the DB schema for forward-compat but is no longer
+    # used by the converge gate; the CI green definition trusts all present checks.
     return RepoConfig(
         repo=RepoRef(owner=owner, name=name),
         enabled=enabled,
         intake_enabled=intake_enabled,
         allowlist=allowlist,
-        required_checks=required_checks,
     )
