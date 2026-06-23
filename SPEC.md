@@ -238,6 +238,8 @@ Single-source home. All implementation code must import from this table; never h
 | `AWAITING_PROMOTION_NUDGE_S` | `86400` | 24 h; RC-5 fires push notification if issue sits in PENDING longer than this; does not auto-promote |
 | `DEFAULT_SWARM_MODEL` | `"claude-sonnet-4-6"` | Default model for all routine swarm dispatches: implementer, converge reviewer (R1/R2), converge fixer, and specialist sub-agents (inherited from parent context). Overridable per-slot via `RepoConfig.model_config`. |
 | `ADJUDICATION_MODEL` | `"claude-opus-4-8"` | Model for the terminal-verdict dispatch: converge reviewer at R3 (`CONVERGE_ROUNDS`) — the final approval gate before a PR is handed to a human to merge, and the escalation-to-`needs-human` decision. Overridable via `RepoConfig.model_config.adjudication`. |
+| `HARNESS_COOLDOWN_S` | `300` | 5 min; cooldown duration after a harness signals quota/rate-limit exhaustion. During this window the harness is skipped by `decide_harness`; after expiry it becomes eligible again. Single-sourced here; never hardcode `300`. |
+| `HARNESSES_JSON_ENV` | `"HARNESSES_JSON"` | Name of the environment variable that carries the JSON harness configuration array. Referenced by `PortProvider.from_env`; never hardcode the string `"HARNESSES_JSON"`. |
 
 ### Model tier
 
@@ -1334,6 +1336,118 @@ stateDiagram-v2
     Escalated --> [*]
     Rearm --> [*]
 ```
+
+---
+
+## §14 Harness Registry & Failover
+
+### §14.1 Overview
+
+The orchestrator dispatches agent work through a `HarnessPort`. When a single harness backend exhausts its AI quota or hits a rate-limit, work currently stalls. This section specifies a **multi-harness registry with automatic failover** that keeps the pipeline moving by routing around temporarily exhausted backends.
+
+**Two-sentence invariant:** Quota/rate-limit exhaustion is always transient — the work is held in its current forge-label state and the reconciler retries on the next tick. Humans are escalated only for genuine task failures, never for transient exhaustion.
+
+### §14.2 Definitions
+
+**`HarnessConfig`** — configuration for a single harness backend:
+```
+HarnessConfig {
+  id:        string    # unique identifier, e.g. "primary", "fallback-1"
+  priority:  int       # lower number = higher priority; dispatching iterates ascending
+}
+```
+Credentials (`CLAUDE_CODE_OAUTH_TOKEN`, App keys) are NEVER stored in `HarnessConfig`; they live exclusively in `PortProvider` (invariant I3).
+
+**`HarnessRegistryEntry`** — registry row combining config and in-memory runtime state:
+```
+HarnessRegistryEntry {
+  config:        HarnessConfig
+  port:          HarnessPort          # port instance (held by PortProvider, not HarnessConfig)
+  cooled_until:  datetime | None      # None = available; non-None = cooling down
+}
+```
+`cooled_until` is in-memory only; it is reset to `None` on process restart. A restarted process re-discovers quota limits naturally (the first exhausted dispatch re-arms the cooldown).
+
+**`HarnessRegistry`** — ordered collection of `HarnessRegistryEntry` values, sorted ascending by `HarnessConfig.priority`. Provides the eligibility query and cooldown mutation methods consumed by `decide_harness` and `FailoverHarnessPort`. Mirrors the `RepoRegistry` pattern: a `FakeHarnessRegistry` is used in tests.
+
+**`HarnessQuotaExhausted`** — exception raised by a `HarnessPort.dispatch` (or equivalent) implementation to signal that this harness has hit an AI quota or rate-limit condition. This is the **only** signal that triggers failover; any other exception is propagated as a genuine task failure. Implementations must map API-level quota/rate-limit errors (e.g. HTTP 429, HTTP 529, provider error codes) to `HarnessQuotaExhausted`; all other errors propagate unchanged.
+
+### §14.3 `decide_harness` (pure, synchronous)
+
+Selects the highest-priority available harness from the registry.
+
+**Inputs:**
+- `entries: list[HarnessRegistryEntry]` — registry entries in ascending priority order
+- `now: datetime` — caller-supplied wall clock (enables pure, deterministic tests)
+
+**Output:** `HarnessRegistryEntry | None`
+
+**Algorithm:**
+```
+for entry in entries:   # ascending priority order
+    if entry.cooled_until is None or entry.cooled_until <= now:
+        return entry    # first available harness
+return None             # all harnesses are currently cooled down
+```
+
+`decide_harness` is **pure and synchronous** — it reads `cooled_until` from the entries list passed to it; it does not mutate state and makes no I/O calls. Callers (`FailoverHarnessPort`) are responsible for reading and updating cooldown state.
+
+The strict `<=` boundary means a harness whose `cooled_until` equals `now` exactly is considered available (symmetric with the `REARM_RECENT_GUARD_S` strict `<` convention — boundary = not guarded).
+
+### §14.4 `FailoverHarnessPort`
+
+A `HarnessPort`-compatible coordinator that wraps a `HarnessRegistry` and implements the failover algorithm. The Engine receives a `FailoverHarnessPort` wherever it expects a `HarnessPort`; the coordination is transparent to the Engine.
+
+**`dispatch(context) → RunHandle` algorithm:**
+
+1. Snapshot the registry entries (ascending priority order).
+2. Call `decide_harness(entries, now=datetime.now(UTC))` → `entry | None`.
+3. If `entry` is not `None`:
+   a. Attempt `entry.port.dispatch(context)`.
+   b. If dispatch succeeds → return `RunHandle`. Done.
+   c. If dispatch raises `HarnessQuotaExhausted`:
+      - Set `entry.cooled_until = datetime.now(UTC) + timedelta(seconds=HARNESS_COOLDOWN_S)`.
+      - Remove `entry` from the candidate list and go to step 2 (try next eligible harness).
+   d. Any other exception → propagate immediately (genuine task failure).
+4. If `decide_harness` returns `None` (all harnesses cooled down):
+   - Raise `AllHarnessesExhausted`. **Do NOT call `forge.add_label(LABEL_NEEDS_HUMAN)`.**
+
+**All other `HarnessPort` methods** (`trigger_workflow`, `trigger_ci`, `get_run_status`, `cancel`, `get_run_verdict`) are delegated to the **primary harness** (lowest priority number) regardless of cooldown state. These are maintenance/status calls, not dispatch; they do not participate in failover.
+
+> **Design rationale:** Failover is dispatch-only. `get_run_status` and `cancel` must target the harness that owns the `RunHandle`; `trigger_ci` and `trigger_workflow` are repo-CI calls unrelated to AI quota. A `FailoverHarnessPort` that delegates status/cancel calls to the primary harness is correct for the current single-backend model where all handles originate from the same backend tier; a future multi-backend model would need `RunHandle` to carry the originating harness id.
+
+### §14.5 `AllHarnessesExhausted` — HOLD semantics
+
+`AllHarnessesExhausted` is a distinct exception class (not a subclass of `HarnessQuotaExhausted`). It signals to the **caller** (the Engine or `OrchestratorService`) that **all configured harnesses are currently on cooldown** and no dispatch was attempted.
+
+**Critical invariant:** `AllHarnessesExhausted` must **NEVER** be converted to `needs-human`. The entity stays in its current forge-label state. The reconciler re-attempts on its next tick; by that time one or more harness cooldowns may have expired (each cooldown expires after `HARNESS_COOLDOWN_S` seconds), so the next dispatch attempt may succeed.
+
+**Engine / `OrchestratorService` contract:**
+- `Engine.dispatch`: if `harness.dispatch(context)` raises `AllHarnessesExhausted`, return `None` (same as a no-op guard path). The issue stays `QUEUED` (still has `agent-work` label). The reconciler's RC-4 channel picks it up on the next tick.
+- `Engine.converge` (reviewer/fixer dispatch paths): if a dispatch raises `AllHarnessesExhausted`, raise it to the `OrchestratorService` event handler which logs it and returns without label mutation. The PR stays `CONVERGING` (retains `converge` label). The reconciler's RC-3 re-arm picks it up.
+- `OrchestratorService.handle_event`: catch `AllHarnessesExhausted`, log at INFO level with the entity reference, and return a `HELD` outcome. No escalation, no label change.
+
+### §14.6 Configuration
+
+Multiple harnesses are configured via the `HARNESSES_JSON` environment variable (constant name: `HARNESSES_JSON_ENV`). Its value is a JSON array of harness-config objects, one per backend:
+
+```json
+[
+  {"id": "primary",    "priority": 1},
+  {"id": "fallback-1", "priority": 2}
+]
+```
+
+Each entry's `id` must map to a set of credential env vars that `PortProvider` reads. Credentials are NEVER in `HarnessConfig` (I3). The convention for multi-harness credential namespacing is operator-defined (e.g. `CLAUDE_CODE_OAUTH_TOKEN_PRIMARY`, `CLAUDE_CODE_OAUTH_TOKEN_FALLBACK_1`); the `PortProvider` is the only place credentials are read.
+
+**Single-harness backward compat:** When `HARNESSES_JSON` is absent, `PortProvider.from_env` builds a one-entry registry from the existing single-harness env vars (`CLAUDE_CODE_OAUTH_TOKEN`, `GITHUB_APP_*`). The `FailoverHarnessPort` wrapping a single-entry registry behaves identically to a bare `HarnessPort` — a single exhausted harness raises `AllHarnessesExhausted` immediately.
+
+### §14.7 Cross-references
+
+- **§10.1 `Engine.dispatch`:** `harness.dispatch(context)` may now raise `AllHarnessesExhausted`; the dispatch method must catch this and return `None` (HELD — entity stays QUEUED, reconciler retries).
+- **§10.2 `Engine.converge`:** reviewer and fixer dispatch calls may raise `AllHarnessesExhausted`; propagate to the event handler (no label change — entity stays CONVERGING, reconciler re-arms).
+- **§10.3 `Engine.reconcile` (RC-4):** `decide_redispatch_action` returns `redispatch` when appropriate; the channel calls `harness.dispatch`; if this raises `AllHarnessesExhausted`, the issue is not re-countered (counter.increment is not called) and remains QUEUED for the next tick.
+- **§9.2 `HarnessPort`:** `HarnessQuotaExhausted` is the normative exhaustion signal. `FailoverHarnessPort` satisfies the `HarnessPort` Protocol.
 
 ---
 

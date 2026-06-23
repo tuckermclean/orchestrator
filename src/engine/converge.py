@@ -61,6 +61,11 @@ from src.domain.types import (
 if TYPE_CHECKING:
     from src.engine.dispatch import Engine
 
+# AllHarnessesExhausted propagates naturally through the converge dispatcher
+# (SPEC §14.5: all-exhausted → stay CONVERGING, let RC-3 re-arm).
+# No explicit import needed here; it is raised by FailoverHarnessPort and
+# propagates to OrchestratorService.handle_event without label mutation.
+
 _CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
 _CONVERGE_FIXER_CONTRACT = "agents/converge-fixer.md"
 _REVIEWER_MAX_TURNS = 60
@@ -205,6 +210,8 @@ async def converge(
             allowed_agent_refs=specialist_refs,
             head_branch=pr_head_branch,
         )
+        # AllHarnessesExhausted propagates up to OrchestratorService; no label change
+        # so the PR stays CONVERGING and RC-3 re-arms it on the next tick (SPEC §14.5).
         reviewer_handle = await engine.harness.dispatch(reviewer_context)
         # Persist the handle so RC-3 can poll run status on the next reconcile tick.
         await converge_state.set_last_run_handle(pr_ref, reviewer_handle)
@@ -262,6 +269,7 @@ async def converge(
                 allowed_agent_refs=specialist_refs,
                 head_branch=pr_head_branch,
             )
+            # AllHarnessesExhausted propagates up to OrchestratorService (SPEC §14.5).
             fixer_handle = await engine.harness.dispatch(fixer_context)
             completed = await engine._await_run(fixer_handle)
             if not completed:

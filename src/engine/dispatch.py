@@ -21,6 +21,7 @@ from src.domain.types import (
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
+from src.ports.harness_registry import AllHarnessesExhausted
 
 if TYPE_CHECKING:
     from src.engine.reconcile import ReconcileReport
@@ -72,7 +73,12 @@ class Engine:
                 forge_token_scope="repo-branch",
                 allowed_agent_refs=None,
             )
-            handle = await self.harness.dispatch(context)
+            try:
+                handle = await self.harness.dispatch(context)
+            except AllHarnessesExhausted:
+                # All harnesses are on cooldown — HOLD; entity stays QUEUED.
+                # The reconciler RC-4 re-attempts on the next tick (SPEC §14.5).
+                return None
             return handle
 
         elif event_name == "issue_comment" and issue_ref is not None:
@@ -90,7 +96,11 @@ class Engine:
                 forge_token_scope="repo-branch",
                 allowed_agent_refs=None,
             )
-            handle = await self.harness.dispatch(context)
+            try:
+                handle = await self.harness.dispatch(context)
+            except AllHarnessesExhausted:
+                # All harnesses on cooldown — HOLD; entity stays QUEUED (SPEC §14.5).
+                return None
             return handle
 
         elif event_name == "pull_request_review_comment" and pr_ref is not None:
@@ -108,7 +118,11 @@ class Engine:
                 forge_token_scope="repo-branch",
                 allowed_agent_refs=None,
             )
-            handle = await self.harness.dispatch(context)
+            try:
+                handle = await self.harness.dispatch(context)
+            except AllHarnessesExhausted:
+                # All harnesses on cooldown — HOLD; entity stays CONVERGING (SPEC §14.5).
+                return None
             return handle
 
         return None

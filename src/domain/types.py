@@ -214,6 +214,9 @@ AT_RISK_THRESHOLD = 5
 AWAITING_PROMOTION_NUDGE_S = 86400
 DEFAULT_SWARM_MODEL = "claude-sonnet-4-6"
 ADJUDICATION_MODEL = "claude-opus-4-8"
+# Harness registry & failover constants (SPEC §14, §7)
+HARNESS_COOLDOWN_S = 300  # 5 min; cooldown after quota/rate-limit exhaustion
+HARNESSES_JSON_ENV = "HARNESSES_JSON"  # env var name for multi-harness config array
 
 # ---------------------------------------------------------------------------
 # Labels
