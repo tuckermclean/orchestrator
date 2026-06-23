@@ -23,7 +23,7 @@ from datetime import UTC, datetime  # noqa: TC003
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection
+from src.db import configure_sqlite_connection, serialized_write
 from src.domain.types import RepoRef, RunDetail, RunEvent, RunSummary
 
 _log = logging.getLogger(__name__)
@@ -224,6 +224,7 @@ class SQLiteRunStore:
             )
         )
 
+    @serialized_write
     async def _record_async(
         self,
         run_id: str,
@@ -247,6 +248,7 @@ class SQLiteRunStore:
         """Schedule async UPDATE for the run status."""
         self._spawn(self._set_status_async(run_id, status, completed_at))
 
+    @serialized_write
     async def _set_status_async(
         self,
         run_id: str,
@@ -271,6 +273,7 @@ class SQLiteRunStore:
             )
         )
 
+    @serialized_write
     async def _append_event_async(
         self,
         run_id: str,

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection
+from src.db import configure_sqlite_connection, serialized_write
 from src.domain.types import IssueRef, PRRef, RepoRef
+
+_log = logging.getLogger(__name__)
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -80,6 +83,11 @@ class AuditLog:
 
         Callers other than ``deescalate_pr`` (intake, promote, decline) pass neither
         optional field; the schema extension is backward-compatible.
+
+        Resilient under contention: the write is serialised through the
+        process-wide ``_db_write_lock`` and retried on transient ``"locked"``
+        errors (#109).  Persistent failures are logged (not re-raised) so a DB
+        hiccup never propagates as a 500 to the webhook caller.
         """
         ts = datetime.now(tz=UTC).isoformat()
         if isinstance(entity_ref, IssueRef):
@@ -90,7 +98,34 @@ class AuditLog:
             entity_number = entity_ref.number
 
         pr_labels_str = ",".join(pr_labels) if pr_labels is not None else None
+        params = (
+            ts,
+            repo.owner,
+            repo.name,
+            entity_type,
+            entity_number,
+            action,
+            operator,
+            escalation_cause,
+            pr_labels_str,
+        )
 
+        try:
+            await self._write_audit_row(params)
+        except Exception:
+            # A persistent DB failure must not 500 the webhook path (issue #109).
+            # The write is already retried inside _write_audit_row via
+            # @serialized_write; if all retries fail we log and continue.
+            _log.exception(
+                "audit.record failed (action=%r, repo=%s/%s) — audit row dropped",
+                action,
+                repo.owner,
+                repo.name,
+            )
+
+    @serialized_write
+    async def _write_audit_row(self, params: tuple[object, ...]) -> None:
+        """Inner write helper wrapped with process-wide serialisation + retry."""
         await self._conn.execute(
             """
             INSERT INTO audit_events
@@ -98,17 +133,7 @@ class AuditLog:
                  action, operator, escalation_cause, pr_labels)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                ts,
-                repo.owner,
-                repo.name,
-                entity_type,
-                entity_number,
-                action,
-                operator,
-                escalation_cause,
-                pr_labels_str,
-            ),
+            params,
         )
         await self._conn.commit()
 

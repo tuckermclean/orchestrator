@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection
+from src.db import configure_sqlite_connection, serialized_write
 from src.domain.types import IssueRef, PRRef
 
 _CREATE_TABLE = """
@@ -74,11 +74,13 @@ class SQLiteCounterStore:
             row = await cursor.fetchone()
         return int(row["v"]) if row is not None else 0
 
+    @serialized_write
     async def increment(self, entity_ref: IssueRef | PRRef, channel: str) -> int:
         """Atomically increment the counter; return the new value.
 
         Uses ``INSERT … ON CONFLICT DO UPDATE`` so the entire read-modify-write
         is a single SQL statement executed under SQLite's serialised write lock.
+        Additionally wrapped with the process-wide write lock + retry (#109).
         """
         key = _entity_key(entity_ref)
         async with self._conn.execute(
@@ -96,6 +98,7 @@ class SQLiteCounterStore:
         assert row is not None, "RETURNING returned no row"
         return int(row["v"])
 
+    @serialized_write
     async def reset(self, entity_ref: IssueRef | PRRef, channel: str) -> None:
         """Reset the counter to 0."""
         key = _entity_key(entity_ref)

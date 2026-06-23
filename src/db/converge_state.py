@@ -11,7 +11,7 @@ from datetime import datetime
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection
+from src.db import configure_sqlite_connection, serialized_write
 from src.domain.types import PRRef, RunHandle
 
 _CREATE_TABLE = """
@@ -77,6 +77,7 @@ class SQLiteConvergeStateStore:
             row = await cursor.fetchone()
         return int(row["converge_round"]) if row is not None else 0
 
+    @serialized_write
     async def set_converge_round(self, pr_ref: PRRef, round: int) -> None:
         """Upsert the converge round for this PR."""
         await self._conn.execute(
@@ -100,6 +101,7 @@ class SQLiteConvergeStateStore:
             return None
         return datetime.fromisoformat(str(row["round_started"]))
 
+    @serialized_write
     async def set_round_started(self, pr_ref: PRRef, started: datetime) -> None:
         """Upsert the round-start timestamp for this PR."""
         ts = started.isoformat()
@@ -113,6 +115,7 @@ class SQLiteConvergeStateStore:
         )
         await self._conn.commit()
 
+    @serialized_write
     async def clear_converge_state(self, pr_ref: PRRef) -> None:
         """Delete the row for this PR, resetting all state to defaults."""
         await self._conn.execute(
@@ -132,6 +135,7 @@ class SQLiteConvergeStateStore:
             return None
         return RunHandle(run_id=str(row["last_run_handle"]))
 
+    @serialized_write
     async def set_last_run_handle(self, pr_ref: PRRef, handle: RunHandle) -> None:
         """Upsert the last dispatched run handle for this PR."""
         await self._conn.execute(
