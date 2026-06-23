@@ -192,7 +192,12 @@ class OrchestratorService:
         dedup_window: int = _DEFAULT_DEDUP_WINDOW,
         registry: RepoRegistryPort | None = None,
         run_store: FakeRunStore | SQLiteRunStore | None = None,
+        triager_reconcile_delay_s: float = 60.0,
     ) -> None:
+        # Seconds to wait after intake before attempting triager divergence reconciliation.
+        # The triager agent runs asynchronously; this delay gives it time to post its comment.
+        # Default: 60 s (well within the triager's typical completion time).
+        self._triager_reconcile_delay_s = triager_reconcile_delay_s
         # Run store — single source of truth for dispatched run metadata.
         # FakeRunStore is the default (in-memory, no persistence); callers may
         # inject SQLiteRunStore for pod-lifetime durability.
@@ -259,6 +264,11 @@ class OrchestratorService:
         # concurrent converges for the same PR.
         self._converge_tasks: dict[str, asyncio.Task[PRState]] = {}
 
+        # In-flight triager-divergence reconciliation tasks, keyed by issue.
+        # Reconciliation runs after a delay (to give the triager time to post its
+        # comment) and is idempotent — spawned at most once per intake run.
+        self._triager_reconcile_tasks: dict[str, asyncio.Task[bool]] = {}
+
     # -----------------------------------------------------------------------
     # Lifecycle
     # -----------------------------------------------------------------------
@@ -312,6 +322,16 @@ class OrchestratorService:
             except (asyncio.CancelledError, Exception):
                 pass
         self._converge_tasks.clear()
+
+        # Drain in-flight triager-divergence reconciliation tasks.
+        for rtask in list(self._triager_reconcile_tasks.values()):
+            rtask.cancel()
+        for rtask in list(self._triager_reconcile_tasks.values()):
+            try:
+                await rtask
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._triager_reconcile_tasks.clear()
 
     # -----------------------------------------------------------------------
     # Event routing
@@ -409,7 +429,15 @@ class OrchestratorService:
                         if _cfg is not None:
                             intake_enabled = _cfg.intake_enabled
                 if intake_enabled:
-                    await intake_engine.intake(issue_ref)
+                    result = await intake_engine.intake(issue_ref)
+                    if result.handle is not None and result.decision is not None:
+                        # Spawn background reconciliation: compare intake decision with
+                        # the triager's recommendation once the triager has posted its
+                        # comment.  The triager runs async (fire-and-forget); reconciliation
+                        # is deferred by triager_reconcile_delay_s.  SPEC §10.4 step 6.
+                        self._spawn_triager_reconcile(
+                            intake_engine, issue_ref, result.decision
+                        )
             elif action == "labeled":
                 label_data = payload.get("label", {})
                 label_name = (
@@ -503,6 +531,55 @@ class OrchestratorService:
         ``CI_WAIT_S``) before the approve/escalate decision is made.
         """
         return await self.engine.converge(pr_ref)
+
+    def _spawn_triager_reconcile(
+        self,
+        intake_engine: IntakeEngine,
+        issue_ref: IssueRef,
+        intake_decision: str,
+    ) -> bool:
+        """Spawn a background task to detect/surface intake–triager recommendation divergence.
+
+        Waits ``triager_reconcile_delay_s`` seconds before calling
+        ``intake_engine.reconcile_triager_divergence`` — giving the triager agent
+        time to complete and post its structured comment.
+
+        De-duplicated per issue: if a reconciliation for this issue is already
+        in flight, returns False (idempotent on re-delivery).
+
+        Returns True if a new task was spawned, False if one was already in flight.
+        SPEC §10.4 step 6.
+        """
+        key = f"{issue_ref.repo.owner}/{issue_ref.repo.name}#{issue_ref.number}"
+        existing = self._triager_reconcile_tasks.get(key)
+        if existing is not None and not existing.done():
+            return False
+
+        delay = self._triager_reconcile_delay_s
+
+        async def _reconcile() -> bool:
+            import asyncio as _asyncio
+
+            await _asyncio.sleep(delay)
+            try:
+                return await intake_engine.reconcile_triager_divergence(
+                    issue_ref, intake_decision
+                )
+            except Exception:
+                _log.exception(
+                    "Triager divergence reconciliation failed for %s", key
+                )
+                return False
+
+        task: asyncio.Task[bool] = asyncio.create_task(_reconcile())
+        self._triager_reconcile_tasks[key] = task
+
+        def _done(t: asyncio.Task[bool]) -> None:
+            if self._triager_reconcile_tasks.get(key) is t:
+                del self._triager_reconcile_tasks[key]
+
+        task.add_done_callback(_done)
+        return True
 
     def _spawn_converge(self, pr_ref: PRRef) -> bool:
         """Run ``converge_pr`` as a background task; return immediately.
@@ -688,6 +765,9 @@ class OrchestratorService:
         When a registry is configured and the issue's repo is registered, the
         per-repo allowlist and owner are used.  Falls back to the service-level
         defaults for unregistered repos or when no registry is set.
+
+        Returns the triager RunHandle (or None when intake was skipped).
+        Spawns the background triager-divergence reconciliation task (SPEC §10.4 step 6).
         """
         if self._registry is not None:
             repo_config = await self._registry.get_repo(issue_ref.repo)
@@ -700,8 +780,14 @@ class OrchestratorService:
                     allowlist=repo_config.allowlist,
                     owner=repo_config.repo.owner,
                 )
-                return await engine.intake(issue_ref)
-        return await self._intake_engine.intake(issue_ref)
+                result = await engine.intake(issue_ref)
+                if result.handle is not None and result.decision is not None:
+                    self._spawn_triager_reconcile(engine, issue_ref, result.decision)
+                return result.handle
+        result = await self._intake_engine.intake(issue_ref)
+        if result.handle is not None and result.decision is not None:
+            self._spawn_triager_reconcile(self._intake_engine, issue_ref, result.decision)
+        return result.handle
 
     async def list_triage(self, repo: RepoRef) -> list[TriageItem]:
         """List issues currently in AWAITING_PROMOTION state.

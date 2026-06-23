@@ -1069,6 +1069,34 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
    record, avoiding a phantom `admit`). If `set_labels` succeeds but the audit write fails, the
    label state is still correct and the missing record is a trail gap, not a state inconsistency
    (symmetric with the `promote` handling in §11.3). This matches `IntakeEngine.intake`.
+6. **Triager recommendation reconciliation** (async, after step 2 completes):
+   `decide_intake` is the **authority** (trust axis: owner/allowlist). The triager is
+   **advisory** (scope/risk axis: its `**Recommended action**` field). These axes are independent
+   and may disagree — e.g. an owner-submitted but scope-unclear issue is auto-admitted (trust)
+   yet receives "queue for human review" (scope/risk). When they diverge, the discrepancy is
+   surfaced rather than silently dropped.
+
+   **Ordering**: the triager runs as a fire-and-forget async task (step 2). Its structured
+   comment is not available at intake time. Reconciliation therefore runs as a separate
+   background task spawned by `OrchestratorService._spawn_triager_reconcile` after
+   `Engine.intake` returns, delayed by `triager_reconcile_delay_s` (default 60 s) to allow
+   the triager to post its comment.
+
+   **Divergence condition**: `decision == "admit"` AND triager `**Recommended action**` ==
+   `"queue for human review"`. The inverse (decision=queue, triager=admit) is not surfaced —
+   the system is already being conservative.
+
+   **When divergence is detected**, `IntakeEngine.reconcile_triager_divergence` must:
+   - Post a reconciliation comment on the issue (posted by the control plane, not the triager
+     agent — I5 preserved): explains the divergence, states the intake decision takes
+     precedence, notes it is recorded for audit transparency.
+   - Write an `"intake:triager-divergence"` audit record (I6) with the triager recommendation
+     in the `escalation_cause` field.
+
+   **When they agree**, reconciliation is a no-op (no comment, no audit record).
+
+   **Idempotency**: `OrchestratorService._triager_reconcile_tasks` de-duplicates per issue —
+   a re-delivered `opened` event spawns at most one reconciliation task per issue.
 
 > **I6 human-promotion audit.** `OrchestratorService.promote` (§11.3) must also write a
 > `{event: "promote", issue_ref, operator, timestamp, allowlist_snapshot: list<string>}`
