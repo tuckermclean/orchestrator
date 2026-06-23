@@ -491,3 +491,97 @@ documentation, `coverage_map`-neutral, or single-line config change, self-review
 ground-truth source (the code or the implemented convention) and merge — spending a multi-
 agent swarm on a typo-class edit burns tokens for no added assurance. Reserve the swarm for
 behavioral code. (Still rebase, still confirm CI.)
+
+---
+
+The notes below were added after a **live-operations session**: diagnosing and fixing a
+deployed k3s instance (run-view empty, comment dispatch, converge churn) rather than building
+from spec. These are about a *running* system — none are visible from the code or the tests.
+
+**[Obligatory] "Blank in the UI" is a symptom, not a diagnosis — trace the datum through
+produce → store → serialize → display, and suspect a wrapper that silently drops methods.**
+The entire run-transcript view read empty for a long time. The events were being produced and
+stored the whole time; `FailoverHarnessPort` (which `PortProvider` *always* wraps the harness
+in) simply didn't implement `get_run_events` / `subscribe_run_events` / `register_run_status_sink`,
+and `RunRecordingHarness` delegated those via `hasattr` — so the checks were always False and
+every read returned `[]`. Separately, the per-run model was in the DB but dropped by the API
+response schema, and `run_events` (SQLite) was empty *by design* (the in-memory store is the
+live authority). Three different "it's blank" causes at three different layers. **When you
+interpose a wrapper / failover / recording layer in front of a port, it must re-export every
+method the callers reach for — including the non-Protocol extras accessed via
+`hasattr`/`getattr`/`Any`-cast — or reads fail silently. A Protocol covering only the "core"
+methods will not catch this, and neither will mypy.**
+
+**[Obligatory] Verify the *deployed* config, not the chart default.** `GITHUB_BOT_LOGIN` was
+added to the chart's `values`, but the live Flux `HelmRelease` supplied config *inline*
+(`spec.values.config`) and never inherited the chart default — so the production ConfigMap key
+was empty and the bot answered to the wrong mention. What the repo's chart says and what is
+actually running can differ. Read the live `ConfigMap` / `HelmRelease` / pod env before
+concluding a setting is wired.
+
+**[Obligatory] Gate external I/O on actual readiness and retry transient failures — "the
+resource exists" is not "the resource is ready to serve."** The K8s pod-log streamer opened
+`read_namespaced_pod_log` the instant the pod *object* appeared, hit a still-`ContainerCreating`
+pod (`ApiException`/404), logged "open failed," and **gave up permanently with no retry** — so
+the agent transcript never streamed even though the streamer was wired correctly. Wait for the
+real ready state (container `Running`/`Succeeded`), and retry the open on transient errors up to
+a deadline before surrendering.
+
+**[Obligatory] An event type fires for more cases than its name implies — gate each event
+explicitly, filter the system's own actions, and never blanket-dispatch from a catch-all.** A
+webhook handler's `else` branch dispatched a full agent on *every* unhandled event. `issue_comment`
+fires for **PR conversation comments too** (a PR is an issue), so a gate written as
+"issue → require `agent-work`" wrongly rejected `@mention` comments on PRs (which carry
+`agent:implementing`, not `agent-work`). And dispatching on every comment included the bot's
+*own* comments → a self-amplifying spawn loop. Gate on `action`, author, and subject *type*
+(issue vs PR); filter the system's own actions (`comment.user.type == "Bot"`); make the default
+case a no-op.
+
+**[Obligatory] A guard's denial message must tell the agent how to comply — a terse "DENIED"
+makes it flail.** The I9 spawn hook denied spawns missing `subagent_type` with "subagent_type
+absent — DENIED"; the live agent then read the hook's source and improvised a workaround instead
+of retrying correctly. Claude Code feeds hook stderr back to the agent, so an *actionable*
+message ("retry with `subagent_type='general-purpose'` and `.agents/<ref>` in the prompt") turns
+a dead end into self-correction. Security-critical guards still fail closed (deny == exit 2) —
+but state *why* and *how to fix it*.
+
+**[Obligatory] Hardcoded references to external artifacts must match the artifact exactly —
+verify against ground truth, not memory.** `CONVERGE_REVIEW_BASE` listed
+`engineering-security-engineer.md`, which does not exist in the pinned agent pack (the real file
+is `security-appsec-engineer.md`) — so the reviewer was handed an allow-set entry it could never
+read and "winged" the security review. When code names a file/agent/label that lives in an
+external pack or in the cluster, list the actual artifact (`ls` the baked `.agents/`, read the
+live labels) and match it; a plausible-looking name is not a correct one.
+
+**[Obligatory] Read and *quote* SPEC before (re)designing spec'd behavior — a paraphrase from
+memory sends an agent building the wrong thing.** A full design cycle was spent on "make Opus
+adjudicate" before checking that SPEC already defined Opus as the *R3 reviewer's model* (not a
+separate step) — and that `decide_round` approves at **any** round when clean, so a spotless PR
+short-circuits at R1-Sonnet and the Opus review usually never runs at all. The real gap was the
+early-exit, not a missing step. Pull the exact lines first; the cost of paraphrasing was a
+farmed agent rebuilt from scratch.
+
+**[Obligatory] Preserve an in-flight agent's WIP before you destroy its worktree.** Redirecting
+a farmed agent by `git worktree remove --force` discards all *uncommitted* work — and agents
+commit only at the very end, so a near-complete implementation (state machine + SPEC rewrite +
+new contract, only test-fixups remaining) was thrown away to make a small design delta. Before
+relaunching: `git -C <wt> add -A && git commit` (or stash) so the work survives and the relaunch
+can stand on it — or, better, ship the in-flight version and apply the delta as a follow-up PR.
+(Redirecting a *live* agent via `SendMessage` isn't always available — that is *why* the
+stop-and-restart reflex exists, and exactly why preserving the WIP first is mandatory.)
+
+**[Advisory] Use the reliable introspection path; don't thrash on a flaky one — and confirm the
+real port/interface.** Repeated `kubectl port-forward` attempts failed or truncated mid-diagnosis;
+the dependable path was `kubectl exec` into the control-plane pod, querying SQLite directly and
+hitting the API on its actual in-pod port (`:8080`, not the assumed `:8000`). When a debugging
+channel is flaky, stop retrying it and switch to the one that works — and verify the listen
+port/interface rather than assuming it.
+
+**[Advisory] A platform actor usually cannot act on its own artifacts.** The GitHub App authored
+the PRs, then tried to submit a formal `APPROVE` review on them → HTTP 422 (you cannot approve
+your own PR). That failure propagated out of the converge task and the reconciler re-armed it,
+producing an unbounded **re-arm storm** that saturated the API. Know the platform's self-action
+restrictions; here the approval signal is the `agent:ready` label, never a formal self-review.
+A swallowed/failed terminal action that gets retried by a reconciler is how a single bug becomes
+a storm — make terminal actions idempotent and tolerant of the "already done / not permitted"
+case.
