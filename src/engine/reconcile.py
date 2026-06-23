@@ -8,6 +8,7 @@ Returns a ``ReconcileReport`` with counters for each channel.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,9 +33,12 @@ from src.domain.types import (
     RepoRef,
     RunStatus,
 )
+from src.ports.harness_registry import AllHarnessesExhausted
 
 if TYPE_CHECKING:
     from src.engine.dispatch import Engine
+
+_log = logging.getLogger(__name__)
 
 # Workflow name triggered when RC-3 re-arms a converge PR (P13).
 _CONVERGE_WORKFLOW_NAME = "orchestrator-converge.yml"
@@ -311,6 +315,29 @@ async def _rc4_orphan(engine: Engine, repo: RepoRef) -> tuple[int, int]:
         )
 
         if action == "redispatch":
+            # Re-dispatch the implementer for this issue.
+            result = route_entry("issues")
+            context = DispatchContext(
+                issue_ref=issue_ref,
+                contract=result.contract,
+                model=result.model,
+                max_turns=result.max_turns,
+                forge_token_scope="repo-branch",
+                allowed_agent_refs=None,
+            )
+            try:
+                await engine.harness.dispatch(context)
+            except AllHarnessesExhausted:
+                # All harnesses on cooldown — HOLD; issue stays QUEUED.
+                # Do NOT increment the counter: the issue was not actually
+                # re-dispatched; leave the count unchanged so the next tick
+                # reconsiders it without eating into the ISSUE_REDISPATCH_CAP
+                # (SPEC §14.5, §14.7).
+                _log.info(
+                    "RC-4: all harnesses exhausted for issue %s — held, skipping",
+                    issue_ref,
+                )
+                continue
             # SPEC §10.3: post audit marker comment FIRST (with the upcoming count),
             # THEN increment the counter so the comment is the observable record of
             # the decision before the counter reflects it.
@@ -321,17 +348,6 @@ async def _rc4_orphan(engine: Engine, repo: RepoRef) -> tuple[int, int]:
             )
             if engine.counter is not None:
                 await engine.counter.increment(issue_ref, "orphan")
-            # Re-dispatch the implementer for this issue
-            result = route_entry("issues")
-            context = DispatchContext(
-                issue_ref=issue_ref,
-                contract=result.contract,
-                model=result.model,
-                max_turns=result.max_turns,
-                forge_token_scope="repo-branch",
-                allowed_agent_refs=None,
-            )
-            await engine.harness.dispatch(context)
             redispatched += 1
 
         elif action == "escalate":

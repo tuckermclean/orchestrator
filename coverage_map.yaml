@@ -554,6 +554,78 @@
       - "test_handle_event_converge_runs_in_background_not_inline"
       - "test_spawn_converge_dedupes_concurrent_same_pr"
 
+"§14":  # Harness Registry & Failover (SPEC §14)
+  "harness-config-valid":
+    tests: ["test_valid_config", "test_zero_priority_valid"]
+  "harness-config-validation":
+    tests: ["test_empty_id_raises", "test_whitespace_id_raises", "test_negative_priority_raises"]
+  "harness-config-frozen":
+    tests: ["test_frozen"]
+  "harness-registry-entry-available-no-cooldown":
+    tests: ["test_is_available_no_cooldown"]
+  "harness-registry-entry-available-expired":
+    tests: ["test_is_available_expired_cooldown", "test_is_available_exactly_at_boundary"]
+  "harness-registry-entry-not-available-future":
+    tests: ["test_is_not_available_future_cooldown"]
+  "harness-registry-entry-set-cooldown":
+    tests: ["test_set_cooldown_arms_future", "test_set_cooldown_custom_duration"]
+  "harness-registry-entry-reset-cooldown":
+    tests: ["test_reset_cooldown_clears"]
+  "decide-harness-single-available":
+    tests: ["test_single_available_entry_returned"]
+  "decide-harness-empty-list":
+    tests: ["test_returns_none_when_list_empty"]
+  "decide-harness-skip-cooled":
+    tests: ["test_skips_cooled_entry_returns_none_when_only_one", "test_skips_cooled_picks_next_priority"]
+  "decide-harness-priority-order":
+    tests: ["test_prefers_lower_priority_number"]
+  "decide-harness-all-cooled":
+    tests: ["test_all_cooled_returns_none"]
+  "decide-harness-boundary-at-now":
+    tests: ["test_boundary_exactly_at_now_is_available", "test_one_second_before_expiry_still_cooling"]
+  "decide-harness-pure":
+    tests: ["test_pure_does_not_mutate_entries"]
+  "harness-registry-sorted":
+    tests: ["test_entries_sorted_by_priority"]
+  "harness-registry-get-by-id":
+    tests: ["test_get_by_id"]
+  "harness-registry-primary":
+    tests: ["test_primary_returns_lowest_priority", "test_primary_empty_registry_returns_none"]
+  "harness-registry-from-json":
+    tests: ["test_from_json_parses_entries", "test_from_json_default_priority"]
+  "harness-registry-from-json-validation":
+    tests: ["test_from_json_duplicate_id_raises", "test_from_json_non_array_raises", "test_from_json_non_object_entry_raises"]
+  "failover-single-success":
+    tests: ["test_single_harness_success"]
+  "failover-to-second-on-exhaustion":
+    tests: ["test_failover_to_second_on_quota_exhaustion", "test_failover_to_second_on_quota_exhaustion"]
+  "failover-cooldown-armed":
+    tests: ["test_cooldown_armed_on_quota_exhaustion"]
+  "failover-all-cooled-raises":
+    tests: ["test_all_cooled_raises_all_harnesses_exhausted", "test_single_harness_all_cooled_raises"]
+  "failover-genuine-failure-propagates":
+    tests: ["test_genuine_task_failure_propagates_immediately", "test_genuine_failure_does_not_arm_cooldown"]
+  "failover-pre-cooled-skipped":
+    tests: ["test_pre_cooled_entry_skipped_immediately"]
+  "failover-three-harnesses":
+    tests: ["test_three_harnesses_first_two_exhausted_third_succeeds"]
+  "failover-delegation-primary":
+    tests: ["test_get_run_status_delegates_to_primary", "test_cancel_delegates_to_primary", "test_trigger_ci_delegates_to_primary", "test_trigger_workflow_delegates_to_primary", "test_get_run_verdict_delegates_to_primary"]
+  "failover-empty-registry-raises":
+    tests: ["test_primary_port_empty_registry_raises"]
+  "all-harnesses-exhausted-hold-not-escalate":
+    tests: ["test_is_distinct_from_quota_exhausted", "test_all_harnesses_exhausted_is_exception"]
+  "engine-dispatch-held-returns-none":
+    tests: ["test_engine_dispatch_returns_none_on_all_exhausted", "test_engine_dispatch_held_entity_has_no_needs_human_label"]
+  "rc4-held-no-counter-increment":
+    tests: ["test_rc4_held_does_not_increment_counter", "test_rc4_held_issue_has_no_needs_human"]
+  "exhaustion-vs-task-failure":
+    tests: ["test_quota_exhausted_triggers_failover_not_propagation", "test_runtime_error_propagates_as_task_failure", "test_value_error_propagates_as_task_failure", "test_quota_on_both_escalates_only_all_harnesses_exhausted"]
+  "harness-cooldown-constant":
+    tests: ["test_cooldown_constant_is_named", "test_harnesses_json_env_constant", "test_cooldown_arms_for_exactly_harness_cooldown_s"]
+  "cooldown-expiry-self-heal":
+    tests: ["test_dispatch_succeeds_after_cooldown_expires"]
+
 "§9.2-agent-transcript":  # Live agent transcript streaming — JSONL → RunEvent mapping
   "agent-transcript-assistant-text":
     tests: ["test_parse_assistant_text_returns_agent_message", "test_parse_assistant_empty_text_returns_none", "test_parse_assistant_whitespace_only_text_returns_none"]
