@@ -15,7 +15,7 @@ from typing import Protocol, runtime_checkable
 
 import aiosqlite
 
-from src.db import serialized_write
+from src.db import SharedDB, _make_shared_db, serialized_write
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS operators (
@@ -123,34 +123,47 @@ class FakeOperatorStore:
 class SQLiteOperatorStore:
     """SQLite-backed operator store.
 
+    Accepts either a ``SharedDB`` (production, shared connections) or a plain
+    path string (tests / legacy callers).
+
     ``init()`` must be awaited before any other method.
     """
 
-    def __init__(self, db_path: str = ":memory:") -> None:
-        self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+    def __init__(self, db_path: str | SharedDB = ":memory:") -> None:
+        self._shared: SharedDB = _make_shared_db(db_path)
+        self._owns_shared: bool = not isinstance(db_path, SharedDB)
+        self._initialized = False
 
     async def init(self) -> None:
-        if self._db is not None:
+        if self._initialized:
             return
-        self._db = await aiosqlite.connect(self._db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_TABLE)
-        await self._db.commit()
+        await self._shared.init()
+        wc = self._shared.write
+        wc.row_factory = aiosqlite.Row
+        await wc.execute(_CREATE_TABLE)
+        await wc.commit()
+        self._shared.read.row_factory = aiosqlite.Row
+        self._initialized = True
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if not self._initialized:
             raise RuntimeError("SQLiteOperatorStore.init() must be called before use")
-        return self._db
+        return self._shared.write
+
+    @property
+    def _read_conn(self) -> aiosqlite.Connection:
+        if not self._initialized:
+            raise RuntimeError("SQLiteOperatorStore.init() must be called before use")
+        return self._shared.read
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._owns_shared:
+            await self._shared.close()
+        self._initialized = False
 
     async def get_operator(self, operator_id: str) -> dict[str, object] | None:
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT id, password_hash, created_at, last_login FROM operators WHERE id = ?",
             (operator_id,),
         ) as cursor:
@@ -165,7 +178,7 @@ class SQLiteOperatorStore:
         }
 
     async def list_operators(self) -> list[dict[str, object]]:
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT id, created_at, last_login FROM operators ORDER BY id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
@@ -191,7 +204,7 @@ class SQLiteOperatorStore:
 
     @serialized_write
     async def delete_operator(self, operator_id: str) -> None:
-        # Count total operators first
+        # Count total operators first (read via write conn to stay in same tx).
         async with self._conn.execute("SELECT COUNT(*) as cnt FROM operators") as cur:
             row = await cur.fetchone()
         count = int(row["cnt"]) if row else 0

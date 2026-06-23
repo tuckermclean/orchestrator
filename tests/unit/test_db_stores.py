@@ -116,7 +116,7 @@ def test_build_prod_service_sqlite_stores_for_file_db_url() -> None:
 
         (
             service, _secret, op_store, push_store,
-            _reg, db_audit, db_counter, db_converge, db_run_store,
+            _reg, db_audit, db_counter, db_converge, db_run_store, _shared_db,
         ) = _build_prod_service()
 
     # Engine stores should be SQLite-backed
@@ -135,6 +135,12 @@ def test_build_prod_service_sqlite_stores_for_file_db_url() -> None:
     # OrchestratorService should have the SQLite counter and converge stores wired
     assert service._counter is db_counter
     assert service._converge_state is db_converge
+
+    # Shared connection set should be present for file-backed mode.
+    from src.db import SharedDB
+
+    assert _shared_db is not None
+    assert isinstance(_shared_db, SharedDB)
 
     # Operator and push stores should also be SQLite-backed
     from src.db.operator_store import SQLiteOperatorStore
@@ -171,7 +177,7 @@ def test_build_prod_service_memory_stores_for_memory_db_url() -> None:
 
         (
             _service, _secret, op_store, push_store,
-            _reg, _db_audit, db_counter, db_converge, db_run_store,
+            _reg, _db_audit, db_counter, db_converge, db_run_store, _shared_db,
         ) = _build_prod_service()
 
     # SQLite stores should NOT be selected for in-memory path
@@ -206,9 +212,10 @@ def test_build_prod_service_memory_stores_when_db_url_unset() -> None:
 
         from src.api.main import _build_prod_service
 
-        _service, _secret, _op, _push, _reg, _db_audit, db_counter, db_converge, db_run_store = (
-            _build_prod_service()
-        )
+        (
+            _service, _secret, _op, _push, _reg,
+            _db_audit, db_counter, db_converge, db_run_store, _shared_db,
+        ) = _build_prod_service()
 
         # Clean up
         os.environ.pop("DB_URL", None)
@@ -231,9 +238,10 @@ def test_build_prod_service_dev_mode_no_sqlite_stores() -> None:
 
         from src.api.main import _build_prod_service
 
-        _service, _secret, _op, _push, _reg, db_audit, db_counter, db_converge, db_run_store = (
-            _build_prod_service()
-        )
+        (
+            _service, _secret, _op, _push, _reg,
+            db_audit, db_counter, db_converge, db_run_store, _shared_db,
+        ) = _build_prod_service()
 
     # Dev mode: no SQLite engine stores (all None)
     assert db_audit is None

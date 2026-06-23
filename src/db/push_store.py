@@ -16,7 +16,7 @@ from typing import Protocol, runtime_checkable
 
 import aiosqlite
 
-from src.db import serialized_write
+from src.db import SharedDB, _make_shared_db, serialized_write
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -103,31 +103,44 @@ class FakePushStore:
 class SQLitePushStore:
     """SQLite-backed VAPID push subscription store.
 
+    Accepts either a ``SharedDB`` (production, shared connections) or a plain
+    path string (tests / legacy callers).
+
     ``init()`` must be awaited before any other method.
     """
 
-    def __init__(self, db_path: str = ":memory:") -> None:
-        self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+    def __init__(self, db_path: str | SharedDB = ":memory:") -> None:
+        self._shared: SharedDB = _make_shared_db(db_path)
+        self._owns_shared: bool = not isinstance(db_path, SharedDB)
+        self._initialized = False
 
     async def init(self) -> None:
-        if self._db is not None:
+        if self._initialized:
             return
-        self._db = await aiosqlite.connect(self._db_path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_TABLE)
-        await self._db.commit()
+        await self._shared.init()
+        wc = self._shared.write
+        wc.row_factory = aiosqlite.Row
+        await wc.execute(_CREATE_TABLE)
+        await wc.commit()
+        self._shared.read.row_factory = aiosqlite.Row
+        self._initialized = True
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if not self._initialized:
             raise RuntimeError("SQLitePushStore.init() must be called before use")
-        return self._db
+        return self._shared.write
+
+    @property
+    def _read_conn(self) -> aiosqlite.Connection:
+        if not self._initialized:
+            raise RuntimeError("SQLitePushStore.init() must be called before use")
+        return self._shared.read
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._owns_shared:
+            await self._shared.close()
+        self._initialized = False
 
     @serialized_write
     async def add_subscription(
@@ -158,7 +171,7 @@ class SQLitePushStore:
         await self._conn.commit()
 
     async def list_subscriptions(self, operator_id: str) -> list[dict[str, object]]:
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT operator_id, endpoint, keys_json, created_at "
             "FROM push_subscriptions WHERE operator_id = ? ORDER BY id ASC",
             (operator_id,),
@@ -167,7 +180,7 @@ class SQLitePushStore:
         return [_row_to_sub(row) for row in rows]
 
     async def all_subscriptions(self) -> list[dict[str, object]]:
-        async with self._conn.execute(
+        async with self._read_conn.execute(
             "SELECT operator_id, endpoint, keys_json, created_at "
             "FROM push_subscriptions ORDER BY id ASC"
         ) as cursor:

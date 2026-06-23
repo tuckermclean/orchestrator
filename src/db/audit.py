@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import aiosqlite
 
-from src.db import configure_sqlite_connection, serialized_write
+from src.db import SharedDB, _make_shared_db, serialized_write
 from src.domain.types import IssueRef, PRRef, RepoRef
 
 _log = logging.getLogger(__name__)
@@ -37,33 +37,57 @@ _ALTER_ADD_PR_LABELS = (
 
 
 class AuditLog:
-    """SQLite-backed audit log."""
+    """SQLite-backed audit log.
+
+    Accepts either a ``SharedDB`` (production, shared connections) or a plain
+    path string (tests / legacy callers).  When passed a string, creates an
+    internal ``SharedDB`` and owns its lifecycle.
+    """
 
     def __init__(self, db_path: str = ":memory:") -> None:
-        self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+        self._shared: SharedDB = _make_shared_db(db_path)
+        # Track whether we own the SharedDB (created from a string path) so
+        # close() tears it down correctly.  When a SharedDB is passed in, the
+        # caller owns its lifecycle.
+        self._owns_shared: bool = not isinstance(db_path, SharedDB)
+        self._initialized = False
 
     async def init(self) -> None:
         """Open the database connection and create the table if absent."""
-        if self._db is not None:
+        if self._initialized:
             return
-        self._db = await aiosqlite.connect(self._db_path)
-        await configure_sqlite_connection(self._db)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute(_CREATE_TABLE)
+        await self._shared.init()
+        wc = self._shared.write
+        wc.row_factory = aiosqlite.Row
+        await wc.execute(_CREATE_TABLE)
         # Idempotent column additions for existing schemas (no-op on fresh tables).
         for alter in (_ALTER_ADD_ESCALATION_CAUSE, _ALTER_ADD_PR_LABELS):
             try:
-                await self._db.execute(alter)
+                await wc.execute(alter)
             except Exception:
                 pass  # column already exists
-        await self._db.commit()
+        await wc.commit()
+        # Mirror row_factory on read connection (may differ from write for file DB).
+        self._shared.read.row_factory = aiosqlite.Row
+        self._initialized = True
+
+    @property
+    def _db(self) -> aiosqlite.Connection | None:
+        """Legacy compat: expose the write connection as ``_db`` so existing
+        WAL/busy_timeout tests (``store._db``) keep working."""
+        return self._shared._write
 
     @property
     def _conn(self) -> aiosqlite.Connection:
-        if self._db is None:
+        if not self._initialized:
             raise RuntimeError("AuditLog.init() must be called before use")
-        return self._db
+        return self._shared.write
+
+    @property
+    def _read_conn(self) -> aiosqlite.Connection:
+        if not self._initialized:
+            raise RuntimeError("AuditLog.init() must be called before use")
+        return self._shared.read
 
     async def record(
         self,
@@ -81,13 +105,11 @@ class AuditLog:
           - ``pr_labels``: label snapshot at the time of the audit event (stored as
             comma-separated string for forensic inspection).
 
-        Callers other than ``deescalate_pr`` (intake, promote, decline) pass neither
-        optional field; the schema extension is backward-compatible.
-
-        Resilient under contention: the write is serialised through the
-        process-wide ``_db_write_lock`` and retried on transient ``"locked"``
-        errors (#109).  Persistent failures are logged (not re-raised) so a DB
-        hiccup never propagates as a 500 to the webhook caller.
+        Resilient: the write goes through the single shared write connection
+        (serialised by aiosqlite's background thread) plus belt-and-suspenders
+        retry via ``@serialized_write``.  Persistent failures are logged rather
+        than re-raised so a DB hiccup never propagates as a 500 to the webhook
+        caller.
         """
         ts = datetime.now(tz=UTC).isoformat()
         if isinstance(entity_ref, IssueRef):
@@ -125,7 +147,7 @@ class AuditLog:
 
     @serialized_write
     async def _write_audit_row(self, params: tuple[object, ...]) -> None:
-        """Inner write helper wrapped with process-wide serialisation + retry."""
+        """Inner write helper wrapped with belt-and-suspenders retry."""
         await self._conn.execute(
             """
             INSERT INTO audit_events
@@ -150,7 +172,7 @@ class AuditLog:
             else:
                 entity_type = "pr"
                 entity_number = entity_ref.number
-            async with self._conn.execute(
+            async with self._read_conn.execute(
                 """
                 SELECT * FROM audit_events
                 WHERE repo_owner = ? AND repo_name = ?
@@ -161,7 +183,7 @@ class AuditLog:
             ) as cursor:
                 rows = await cursor.fetchall()
         else:
-            async with self._conn.execute(
+            async with self._read_conn.execute(
                 """
                 SELECT * FROM audit_events
                 WHERE repo_owner = ? AND repo_name = ?
@@ -175,6 +197,6 @@ class AuditLog:
 
     async def close(self) -> None:
         """Close the database connection."""
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
+        if self._owns_shared:
+            await self._shared.close()
+        self._initialized = False
