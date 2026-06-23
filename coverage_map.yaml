@@ -149,6 +149,14 @@
   "row-7-no-dispatch-without-agent-work":
     tests: ["test_dispatch_no_dispatch_without_agent_work_label"]
 
+"§10.1-inflight-guard":
+  "guard-blocks-second-rapid-event":
+    tests: ["test_inflight_guard_two_rapid_events_one_dispatch"]
+  "guard-clears-after-ttl-expires":
+    tests: ["test_inflight_guard_clears_after_ttl_expires"]
+  "durable-dedup-backstop-after-pr-labeled":
+    tests: ["test_inflight_guard_durable_dedup_still_blocks_after_pr_labeled", "test_dispatch_idempotent_two_calls"]
+
 # I7 invariant: awaiting-promotion and agent-work must never coexist on an issue.
 # Test not yet implemented — belongs in Step 2 security test suite.
 # "I7-invariant-awaiting-and-agent-work-never-coexist":

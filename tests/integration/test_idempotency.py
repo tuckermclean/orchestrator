@@ -666,3 +666,157 @@ async def test_partial_state_recovery_converge_pr_no_workflow() -> None:
     # RC-3 should call trigger_workflow exactly once (rearm action)
     assert len(harness.trigger_workflow_calls) == 1
     assert report.rearmed == 1
+
+
+# ---------------------------------------------------------------------------
+# In-flight dispatch guard tests (SPEC §10.1 step 2 — race guard)
+# ---------------------------------------------------------------------------
+# The guard lives in OrchestratorService._spawn_dispatch.  It marks an issue
+# "dispatch in flight" the moment the first dispatch is decided, so a second
+# issues:labeled event for the same issue (arriving before the agent opens its
+# implementing PR) is rejected rather than spawning a duplicate orchestrator run.
+# The durable list_prs LABEL_IMPLEMENTING dedup remains the backstop.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inflight_guard_two_rapid_events_one_dispatch() -> None:
+    """Two rapid issues:labeled agent-work events → exactly ONE harness.dispatch call.
+
+    Covers SPEC §10.1 step 2 in-flight guard.  The first handle_event call
+    registers the issue key in _dispatch_tasks; the second sees a running task
+    and returns without dispatching.  The guard fires before any implementing PR
+    exists in the forge — the window where the durable list_prs dedup is blind.
+    """
+    import asyncio
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(70)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload: dict[str, object] = {
+        "repository": {"owner": {"login": "acme"}, "name": "service"},
+        "issue": {"number": 70},
+        "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},
+    }
+
+    # Fire both events before allowing the event loop to run the dispatch task.
+    # In real life these arrive ~73 s apart (GitHub delivery guarantee), but we
+    # exercise the guard by firing them before the first task completes.
+    result1 = await svc.handle_event("issues", payload, delivery_id="evt-001")
+    assert result1["handled"] is True
+
+    # Guard is now set — second event must be blocked.
+    result2 = await svc.handle_event("issues", payload, delivery_id="evt-002")
+    assert result2["handled"] is True  # handle_event still returns handled=True
+
+    # Allow background tasks to complete.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Exactly one harness dispatch despite two events.
+    assert len(harness.dispatch_calls) == 1, (
+        f"Expected 1 dispatch, got {len(harness.dispatch_calls)}: "
+        "in-flight guard must block the second issues:labeled event"
+    )
+
+
+@pytest.mark.asyncio
+async def test_inflight_guard_clears_after_ttl_expires() -> None:
+    """Guard key is removed after the TTL expires → later re-dispatch succeeds.
+
+    After the TTL sleep-task completes the issue key is removed from
+    _dispatch_guards.  A subsequent issues:labeled event (e.g. after escalation
+    + re-queue) must be allowed to dispatch again — the guard must not
+    permanently block an issue.  We simulate TTL expiry by directly cancelling
+    the guard task (equivalent to the TTL elapsing).
+    """
+    import asyncio
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(71)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload: dict[str, object] = {
+        "repository": {"owner": {"login": "acme"}, "name": "service"},
+        "issue": {"number": 71},
+        "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},
+    }
+
+    # First dispatch — guard is set and dispatch fires.
+    await svc.handle_event("issues", payload, delivery_id="evt-A")
+    assert len(harness.dispatch_calls) == 1
+
+    # Verify guard is now held (TTL task is running).
+    guard_key = "acme/service#71"
+    assert guard_key in svc._dispatch_guards
+    assert not svc._dispatch_guards[guard_key].done()
+
+    # Simulate TTL expiry: cancel the guard task (same effect as sleep completing).
+    svc._dispatch_guards[guard_key].cancel()
+    try:
+        await svc._dispatch_guards[guard_key]
+    except asyncio.CancelledError:
+        pass
+    # Done-callback removes the key.
+    await asyncio.sleep(0)
+
+    assert guard_key not in svc._dispatch_guards, (
+        "Guard must be removed from _dispatch_guards after TTL/cancellation"
+    )
+
+    # Guard cleared — second event must dispatch again.
+    await svc.handle_event("issues", payload, delivery_id="evt-B")
+
+    assert len(harness.dispatch_calls) == 2, (
+        "Guard must clear so re-dispatch is not permanently blocked"
+    )
+
+
+@pytest.mark.asyncio
+async def test_inflight_guard_durable_dedup_still_blocks_after_pr_labeled() -> None:
+    """Once the agent opens+labels the implementing PR, list_prs dedup blocks further dispatch.
+
+    Verifies that the durable dedup backstop (SPEC §10.1 step 2) still works
+    after the in-flight guard clears: with an implementing PR seeded in the forge,
+    Engine.dispatch returns None even when _dispatch_tasks is empty.
+    """
+    import asyncio
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(72)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    # Simulate agent having already opened the implementing PR.
+    agent_pr_ref = PRRef(repo=REPO, number=99)
+    forge.seed_pr(agent_pr_ref, labels=[LABEL_IMPLEMENTING], draft=True, body="Closes #72")
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload: dict[str, object] = {
+        "repository": {"owner": {"login": "acme"}, "name": "service"},
+        "issue": {"number": 72},
+        "action": "labeled",
+        "label": {"name": LABEL_AGENT_WORK},
+    }
+
+    # No in-flight task, but implementing PR exists → list_prs dedup blocks.
+    await svc.handle_event("issues", payload, delivery_id="evt-X")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert len(harness.dispatch_calls) == 0, (
+        "list_prs dedup must block dispatch when implementing PR already exists"
+    )
