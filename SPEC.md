@@ -1023,7 +1023,11 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
    > before it, RC-3 re-arms and the engine re-enters and re-escalates. A stale
    > `ConvergeState` left by a partial escalation is recovered by `deescalate_pr` (§11.3).
 
-      - `approve` → add `LABEL_READY`, remove `LABEL_CONVERGE`, post approving review;
+      - `approve` → add `LABEL_READY`, remove `LABEL_CONVERGE`
+        (**no** `forge.create_review("APPROVE", ...)` — the GitHub App authored the PR;
+        GitHub returns HTTP 422 on self-approval; the `agent:ready` label IS the approval
+        signal and the reviewer's `## Converge Review` comment is the human-readable
+        summary; a formal GitHub APPROVE review is both redundant and forbidden here);
         `forge.create_issue(repo, "Converge follow-up nits", body)` where `body` is
         `accumulated_nits` deduplicated by exact string equality, first-seen order (omit
         if empty); `await counter.reset(pr_ref, "converge-retry")`;
@@ -1049,8 +1053,9 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
       - `escalate:ci-red` → `harness.trigger_ci(pr)`; poll until **all present checks
         complete** (up to `CI_WAIT_S`) and are green (§7 CI green definition); if all
         green → execute full `approve` token actions (P9: add `LABEL_READY`, remove
-        `LABEL_CONVERGE`, post review, nit issue if non-empty, counter.reset,
-        clear_converge_state) → `APPROVED`; else `terminal_escalate(E4)`.
+        `LABEL_CONVERGE`, nit issue if non-empty, counter.reset,
+        clear_converge_state — same as the `approve` path, no GitHub APPROVE review)
+        → `APPROVED`; else `terminal_escalate(E4)`.
       - `escalate:cap-reached` → `terminal_escalate(E5)`. _(D3: work never discarded.)_
 
 ### §10.3 `Engine.reconcile`

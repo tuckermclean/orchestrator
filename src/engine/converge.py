@@ -312,12 +312,20 @@ async def converge(
 async def _finalize_approve(
     engine: Engine, pr_ref: PRRef, accumulated_nits: list[str]
 ) -> PRState:
-    """Execute the `approve` token actions (SPEC §10.2 step 4c)."""
+    """Execute the `approve` token actions (SPEC §10.2 step 4c).
+
+    The canonical approval signal is the ``agent:ready`` label swap — NOT a formal
+    GitHub APPROVE review.  Posting ``{"event": "APPROVE"}`` on a self-authored PR
+    raises HTTP 422 (GitHub rejects self-approval), which would cause the converge task
+    to raise, the reconciler (RC-3) to re-arm, and an unbounded re-arm storm.
+    The reviewer already posts a human-readable ``## Converge Review`` comment; the label
+    is machine-readable; a formal GitHub review is both redundant and forbidden here.
+    """
     forge = engine.forge
     assert engine.converge_state is not None
     await forge.add_label(pr_ref, LABEL_READY)
     await forge.remove_label(pr_ref, LABEL_CONVERGE)
-    await forge.create_review(pr_ref, "APPROVE", "Converge approved: zero blockers, CI green.")
+    # Intentionally no create_review("APPROVE") call — see docstring above.
 
     deduped = _dedupe_nits(accumulated_nits)
     if deduped:

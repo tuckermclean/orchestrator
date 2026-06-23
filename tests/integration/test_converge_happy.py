@@ -71,8 +71,12 @@ async def test_converge_approve_round1() -> None:
     # Label swap.
     assert (_PR, LABEL_READY) in forge.add_label_calls
     assert (_PR, LABEL_CONVERGE) in forge.remove_label_calls
-    # Approving review posted.
-    assert any(event == "APPROVE" for _ref, event, _body in forge.create_review_calls)
+    # No formal GitHub APPROVE review — self-authored PRs 422 on APPROVE/REQUEST_CHANGES.
+    # The agent:ready label IS the approval signal (SPEC §10.2 step 4c, amended).
+    assert not any(event == "APPROVE" for _ref, event, _body in forge.create_review_calls), (
+        "Engine must NOT post a formal GitHub APPROVE review on a self-authored PR "
+        "(HTTP 422); approval is signaled by the agent:ready label"
+    )
 
 
 async def test_converge_no_sentinel_written_to_branch() -> None:
@@ -238,4 +242,50 @@ async def test_converge_pr_dispatch_uses_head_branch() -> None:
     reviewer_ctx = harness.dispatch_calls[0]
     assert reviewer_ctx.head_branch == "feature-branch", (
         f"P0.4: reviewer context must carry head_branch; got {reviewer_ctx.head_branch!r}"
+    )
+
+
+async def test_converge_approve_does_not_self_approve_via_github_review() -> None:
+    """Regression: converge APPROVE path must NOT post a GitHub APPROVE review.
+
+    The GitHub App is the PR author — posting {"event": "APPROVE"} on a self-authored PR
+    returns HTTP 422, causing the converge task to raise, and the reconciler (RC-3) to
+    re-arm the PR indefinitely (re-arm storm).  The fix: agent:ready label is the approval
+    signal; no formal GitHub review is submitted (SPEC §10.2 step 4c, amended).
+
+    This test locks in the fix: a FakeForgePort that raises on APPROVE is wired so any
+    regression restores the 422 failure path.
+    """
+    class _Self422ForgePort(FakeForgePort):
+        async def create_review(self, pr_ref: PRRef, event: str, body: str) -> None:
+            if event == "APPROVE":
+                raise RuntimeError(
+                    "422 Unprocessable Entity: Can not approve your own pull request"
+                )
+            # Non-APPROVE events (e.g. COMMENT) are recorded normally.
+            self.create_review_calls.append((pr_ref, event, body))
+            self._reviews.append({"pr_ref": pr_ref, "event": event, "body": body})
+
+    forge = _Self422ForgePort()
+    harness = FakeHarnessPort(forge=forge)
+    _green_pr(forge, changed_files=["src/foo.py"])
+    harness.script_reviewer_verdicts(
+        Verdict(blockers=0, suggestions=0, nits=[], blocker_signatures=[])
+    )
+    engine = _engine(forge, harness)
+
+    # Must succeed (return APPROVED) without raising — the 422-raising forge port
+    # proves that no APPROVE review is attempted.
+    state = await engine.converge(_PR)
+
+    assert state == "APPROVED", (
+        "Converge must return APPROVED even when APPROVE reviews would 422 — "
+        "the agent:ready label is the approval signal, not a GitHub review"
+    )
+    # Confirm the label swap happened (the real approval signal).
+    assert (_PR, LABEL_READY) in forge.add_label_calls
+    assert (_PR, LABEL_CONVERGE) in forge.remove_label_calls
+    # Confirm no APPROVE review was attempted.
+    assert not any(event == "APPROVE" for _ref, event, _body in forge.create_review_calls), (
+        "Engine posted a forbidden APPROVE review on a self-authored PR"
     )
