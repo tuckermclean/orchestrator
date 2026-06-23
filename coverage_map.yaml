@@ -659,7 +659,7 @@
   "agent-transcript-i3-secret-redaction":
     tests: ["test_redact_github_pat_in_text", "test_redact_github_server_token_in_text", "test_redact_sk_ant_token_in_text", "test_redact_bearer_token_in_text", "test_redact_secrets_in_parsed_event", "test_redact_secrets_in_tool_result", "test_normal_text_not_redacted"]
   "agent-transcript-i3-truncation":
-    tests: ["test_truncate_text_short_string_unchanged", "test_truncate_text_exactly_at_limit_unchanged", "test_truncate_text_over_limit_truncated", "test_long_agent_message_is_truncated", "test_long_tool_input_is_truncated", "test_long_tool_result_is_truncated"]
+    tests: ["test_truncate_text_short_string_unchanged", "test_truncate_text_exactly_at_limit_unchanged", "test_truncate_text_32kb_boundary", "test_truncate_text_over_limit_truncated", "test_long_agent_message_is_truncated", "test_long_tool_input_is_truncated", "test_long_tool_result_is_truncated"]
   "agent-transcript-subprocess-integration":
     tests: ["test_subprocess_backend_emits_agent_message_events", "test_subprocess_backend_drops_system_noise"]
   "agent-transcript-k8s-log-streaming":

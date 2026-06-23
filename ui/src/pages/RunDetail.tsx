@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, streamRunEvents, type RunDetail as RunDetailType, type RunEvent } from "../api";
 
@@ -28,37 +28,143 @@ const eventStyles: Record<string, React.CSSProperties> = {
   default: { color: "#8b949e" },
 };
 
+// ---------------------------------------------------------------------------
+// Display threshold for the expand/collapse toggle.
+// Content longer than this (in characters) is collapsed by default; shorter
+// content renders inline with no toggle.
+// ---------------------------------------------------------------------------
+const EXPAND_THRESHOLD_CHARS = 600;
+
+// Number of characters shown in the collapsed preview.
+const PREVIEW_CHARS = 300;
+
+// Marker appended by the backend when a payload exceeded _MAX_TEXT_BYTES (32 KiB).
+const TRUNCATION_MARKER = "…[truncated]";
+
+// ---------------------------------------------------------------------------
+// ExpandableContent — per-event collapse/expand control
+// ---------------------------------------------------------------------------
+
+interface ExpandableContentProps {
+  /** Full stored text, potentially ending with TRUNCATION_MARKER. */
+  text: string;
+  style?: React.CSSProperties;
+}
+
+/** Renders long content collapsed behind a toggle.
+ *
+ * - Content ≤ EXPAND_THRESHOLD_CHARS renders inline with no toggle.
+ * - Longer content shows a PREVIEW_CHARS-char preview + expand button.
+ * - Toggle state is local to this instance; each event expands independently.
+ * - Uses button semantics + aria-expanded for accessibility.
+ * - If the stored text ends with the TRUNCATION_MARKER (backend 32 KiB cap
+ *   was hit) a note is appended when expanded so the user knows the content
+ *   was hard-truncated server-side.
+ */
+function ExpandableContent({ text, style }: ExpandableContentProps) {
+  const [expanded, setExpanded] = useState(false);
+  const panelId = useId();
+
+  const isLong = text.length > EXPAND_THRESHOLD_CHARS;
+  const isTruncated = text.endsWith(TRUNCATION_MARKER);
+
+  if (!isLong) {
+    return (
+      <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", ...style }}>
+        {text}
+      </span>
+    );
+  }
+
+  const preview = text.slice(0, PREVIEW_CHARS);
+
+  return (
+    <span style={style}>
+      {expanded ? (
+        <>
+          <span
+            id={panelId}
+            style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+          >
+            {text}
+          </span>
+          {isTruncated && (
+            <span
+              style={{
+                display: "block",
+                marginTop: "4px",
+                color: "#8b949e",
+                fontStyle: "italic",
+                fontSize: "11px",
+              }}
+            >
+              (content exceeds 32 KB — truncated by server)
+            </span>
+          )}
+        </>
+      ) : (
+        <span
+          id={panelId}
+          style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}
+        >
+          {preview}
+          <span style={{ color: "#6e7681" }}>…</span>
+        </span>
+      )}
+      {" "}
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        onClick={() => setExpanded((e) => !e)}
+        style={{
+          background: "none",
+          border: "1px solid #30363d",
+          borderRadius: "4px",
+          color: "#58a6ff",
+          cursor: "pointer",
+          fontSize: "11px",
+          padding: "1px 6px",
+          verticalAlign: "middle",
+          marginLeft: "4px",
+          lineHeight: "1.4",
+        }}
+      >
+        <span aria-hidden="true">{expanded ? "▴" : "▾"}</span>
+        {" "}
+        {expanded ? "collapse" : "expand"}
+      </button>
+    </span>
+  );
+}
+
 /** Render a single event row, with richer layout for transcript event types. */
 function EventRow({ ev }: { ev: RunEvent }) {
   const style = eventStyles[ev.event_type] ?? eventStyles.default;
   const time = new Date(ev.timestamp).toLocaleTimeString();
 
-  // agent_message — show prose text
+  // agent_message — show prose text (expandable when long)
   if (ev.event_type === "agent_message") {
     return (
       <div style={{ marginBottom: "8px", ...style }}>
         <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
-        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          {String(ev.data.text ?? "")}
-        </span>
+        <ExpandableContent text={String(ev.data.text ?? "")} />
       </div>
     );
   }
 
-  // agent_thinking — collapsible italics block
+  // agent_thinking — collapsible italics block (expandable when long)
   if (ev.event_type === "agent_thinking") {
     return (
       <div style={{ marginBottom: "6px", ...style }}>
         <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
         <span style={{ color: "#6e7681" }}>💭 </span>
-        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          {String(ev.data.thinking ?? "")}
-        </span>
+        <ExpandableContent text={String(ev.data.thinking ?? "")} />
       </div>
     );
   }
 
-  // agent_tool_use — monospace name + input summary
+  // agent_tool_use — monospace name + input summary (expandable when long)
   if (ev.event_type === "agent_tool_use") {
     return (
       <div style={{ marginBottom: "6px", ...style }}>
@@ -73,34 +179,31 @@ function EventRow({ ev }: { ev: RunEvent }) {
               fontSize: "12px",
             }}
           >
-            {String(ev.data.input_summary)}
+            <ExpandableContent
+              text={String(ev.data.input_summary)}
+              style={{ fontFamily: "monospace", fontSize: "12px" }}
+            />
           </span>
         ) : null}
       </div>
     );
   }
 
-  // agent_tool_result — monospace content
+  // agent_tool_result — monospace content (expandable when long)
   if (ev.event_type === "agent_tool_result") {
     return (
       <div style={{ marginBottom: "6px", ...style }}>
         <span style={{ color: "#6e7681", marginRight: "8px" }}>[{time}]</span>
         <span style={{ color: "#6e7681", marginRight: "4px" }}>↩</span>
-        <span
-          style={{
-            fontFamily: "monospace",
-            fontSize: "12px",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}
-        >
-          {String(ev.data.content ?? "")}
-        </span>
+        <ExpandableContent
+          text={String(ev.data.content ?? "")}
+          style={{ fontFamily: "monospace", fontSize: "12px" }}
+        />
       </div>
     );
   }
 
-  // agent_result — bold final outcome
+  // agent_result — bold final outcome (expandable when long)
   if (ev.event_type === "agent_result") {
     return (
       <div style={{ marginBottom: "8px", ...style }}>
@@ -111,9 +214,7 @@ function EventRow({ ev }: { ev: RunEvent }) {
             [{String(ev.data.subtype)}]
           </span>
         ) : null}
-        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-          {String(ev.data.result ?? "")}
-        </span>
+        <ExpandableContent text={String(ev.data.result ?? "")} />
       </div>
     );
   }
