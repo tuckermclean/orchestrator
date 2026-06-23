@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, streamRunEvents, type RunDetail as RunDetailType, type RunEvent } from "../api";
+
+type StreamState = "connecting" | "live" | "closed" | "error";
 
 const card: React.CSSProperties = {
   background: "#161b22",
@@ -134,45 +136,72 @@ export default function RunDetail() {
   const { run_id } = useParams<{ run_id: string }>();
   const [detail, setDetail] = useState<RunDetailType | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
-  const [streaming, setStreaming] = useState(false);
+  const [streamState, setStreamState] = useState<StreamState>("connecting");
   const [error, setError] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const unsubRef = useRef<(() => void) | null>(null);
 
+  // Fetch run metadata on mount / runId change.
   useEffect(() => {
     if (!run_id) return;
     api
       .getRun(run_id)
       .then((d) => {
         setDetail(d);
-        setEvents(d.events);
+        // The SSE stream backfills all prior events, so we do NOT seed events
+        // from the REST snapshot here — that would cause duplicates once the
+        // stream delivers the same events. The SSE effect below owns event state.
       })
       .catch((e: Error) => setError(e.message));
   }, [run_id]);
 
+  // Auto-connect the SSE stream on mount; reconnect whenever runId changes.
+  // The backend backfills all prior events then streams live ones — so a single
+  // connection gives the full transcript from the start without a separate REST
+  // seed. On reconnect we clear accumulated events so the backfill replay is
+  // the sole source of truth and there are no duplicates.
+  const connect = useCallback(() => {
+    if (!run_id) return;
+
+    // Tear down any existing connection before opening a new one.
+    unsubRef.current?.();
+    unsubRef.current = null;
+
+    setEvents([]);
+    setStreamState("connecting");
+
+    const unsub = streamRunEvents(
+      run_id,
+      (ev) => {
+        setStreamState("live");
+        setEvents((prev) => [...prev, ev]);
+      },
+      (err) => {
+        // Distinguish a clean close (undefined / null) from a real error.
+        if (err != null) {
+          setStreamState("error");
+        } else {
+          setStreamState("closed");
+        }
+      },
+    );
+    unsubRef.current = unsub;
+  }, [run_id]);
+
+  // Auto-connect on mount and when runId changes; clean up on unmount.
+  useEffect(() => {
+    connect();
+    return () => {
+      unsubRef.current?.();
+      unsubRef.current = null;
+    };
+  }, [connect]);
+
+  // Keep the transcript scrolled to the bottom as events arrive.
   useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events]);
-
-  const startStream = () => {
-    if (!run_id || streaming) return;
-    setStreaming(true);
-    const unsub = streamRunEvents(
-      run_id,
-      (ev) => setEvents((prev) => [...prev, ev]),
-      () => setStreaming(false),
-    );
-    unsubRef.current = unsub;
-  };
-
-  const stopStream = () => {
-    unsubRef.current?.();
-    unsubRef.current = null;
-    setStreaming(false);
-  };
-
-  useEffect(() => () => unsubRef.current?.(), []);
 
   const handleDevDispatch = async () => {
     setDispatching(true);
@@ -186,6 +215,64 @@ export default function RunDetail() {
       setDispatching(false);
     }
   };
+
+  // Stream status pill shown in the transcript header.
+  const streamBadge = (() => {
+    switch (streamState) {
+      case "connecting":
+        return (
+          <span style={{ color: "#8b949e", fontSize: "13px" }}>
+            Connecting…
+          </span>
+        );
+      case "live":
+        return (
+          <span style={{ color: "#3fb950", fontSize: "13px" }}>
+            ● Live
+          </span>
+        );
+      case "closed":
+        return (
+          <span style={{ color: "#8b949e", fontSize: "13px" }}>
+            Stream closed —{" "}
+            <button
+              onClick={connect}
+              style={{
+                background: "none",
+                border: "none",
+                color: "#58a6ff",
+                cursor: "pointer",
+                fontSize: "13px",
+                padding: 0,
+                textDecoration: "underline",
+              }}
+            >
+              Reconnect
+            </button>
+          </span>
+        );
+      case "error":
+        return (
+          <span style={{ color: "#f85149", fontSize: "13px" }}>
+            Stream error —{" "}
+            <button
+              onClick={connect}
+              style={{
+                background: "none",
+                border: "none",
+                color: "#58a6ff",
+                cursor: "pointer",
+                fontSize: "13px",
+                padding: 0,
+                textDecoration: "underline",
+              }}
+            >
+              Reconnect
+            </button>
+          </span>
+        );
+    }
+  })();
 
   return (
     <div>
@@ -267,40 +354,8 @@ export default function RunDetail() {
 
       <div style={card}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-          <h2 style={{ fontSize: "16px" }}>Live Event Stream</h2>
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button
-              onClick={startStream}
-              disabled={streaming}
-              style={{
-                background: streaming ? "#21262d" : "#1f6feb",
-                color: "#fff",
-                border: "none",
-                borderRadius: "6px",
-                padding: "6px 14px",
-                cursor: streaming ? "not-allowed" : "pointer",
-                fontSize: "13px",
-              }}
-            >
-              {streaming ? "● Live" : "Connect SSE"}
-            </button>
-            {streaming && (
-              <button
-                onClick={stopStream}
-                style={{
-                  background: "#21262d",
-                  color: "#e6edf3",
-                  border: "1px solid #30363d",
-                  borderRadius: "6px",
-                  padding: "6px 14px",
-                  cursor: "pointer",
-                  fontSize: "13px",
-                }}
-              >
-                Disconnect
-              </button>
-            )}
-          </div>
+          <h2 style={{ fontSize: "16px" }}>Run Transcript</h2>
+          {streamBadge}
         </div>
 
         <div
@@ -316,8 +371,14 @@ export default function RunDetail() {
             fontSize: "13px",
           }}
         >
-          {events.length === 0 && (
-            <span style={{ color: "#6e7681" }}>No events yet. Connect SSE to stream live events.</span>
+          {events.length === 0 && streamState === "connecting" && (
+            <span style={{ color: "#6e7681" }}>Connecting to stream…</span>
+          )}
+          {events.length === 0 && streamState === "live" && (
+            <span style={{ color: "#6e7681" }}>Waiting for events…</span>
+          )}
+          {events.length === 0 && (streamState === "closed" || streamState === "error") && (
+            <span style={{ color: "#6e7681" }}>No events received.</span>
           )}
           {events.map((ev, i) => (
             <EventRow key={i} ev={ev} />
