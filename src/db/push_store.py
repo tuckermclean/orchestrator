@@ -16,6 +16,8 @@ from typing import Protocol, runtime_checkable
 
 import aiosqlite
 
+from src.db import serialized_write
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +129,7 @@ class SQLitePushStore:
             await self._db.close()
             self._db = None
 
+    @serialized_write
     async def add_subscription(
         self,
         operator_id: str,
@@ -146,6 +149,7 @@ class SQLitePushStore:
         )
         await self._conn.commit()
 
+    @serialized_write
     async def remove_subscription(self, operator_id: str, endpoint: str) -> None:
         await self._conn.execute(
             "DELETE FROM push_subscriptions WHERE operator_id = ? AND endpoint = ?",

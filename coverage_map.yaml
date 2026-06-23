@@ -653,3 +653,25 @@
     tests: ["test_k8s_backend_without_log_client_no_transcript_events"]
   "agent-transcript-k8s-i3-secret-in-log":
     tests: ["test_k8s_log_stream_redacts_secrets"]
+
+"§109":  # SQLite write serialisation + retry — issue #109 "database is locked"
+  "cross-store-concurrent-no-lock-error":
+    tests: ["test_cross_store_concurrent_writes_no_lock_error"]
+  "run-store-fire-and-forget-no-drops":
+    tests: ["test_run_store_concurrent_writes_all_land"]
+  "all-store-types-concurrent-no-lock-error":
+    tests: ["test_mixed_store_types_concurrent_no_lock_error"]
+  "retry-on-locked-succeeds":
+    tests: ["test_run_with_retry_succeeds_after_locked_error"]
+  "retry-non-locked-propagates-immediately":
+    tests: ["test_run_with_retry_non_locked_error_propagates_immediately"]
+  "retry-exhausted-raises-runtime-error":
+    tests: ["test_run_with_retry_exhausts_retries_raises_runtime_error"]
+  "retry-attempt-count-matches-max":
+    tests: ["test_run_with_retry_attempt_count_matches_max"]
+  "audit-resilient-no-500-on-db-failure":
+    tests: ["test_audit_record_does_not_raise_on_persistent_db_failure"]
+  "audit-normal-path-succeeds":
+    tests: ["test_audit_record_succeeds_normally_when_no_contention"]
+  "write-lock-shared-cross-store":
+    tests: ["test_write_lock_serializes_cross_store_writes"]

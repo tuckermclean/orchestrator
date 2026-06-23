@@ -15,6 +15,8 @@ from typing import Protocol, runtime_checkable
 
 import aiosqlite
 
+from src.db import serialized_write
+
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS operators (
     id           TEXT    PRIMARY KEY,
@@ -176,6 +178,7 @@ class SQLiteOperatorStore:
             for row in rows
         ]
 
+    @serialized_write
     async def create_operator(self, operator_id: str, password_hash: str) -> None:
         try:
             await self._conn.execute(
@@ -186,6 +189,7 @@ class SQLiteOperatorStore:
         except aiosqlite.IntegrityError:
             raise ValueError(f"Operator {operator_id!r} already exists")
 
+    @serialized_write
     async def delete_operator(self, operator_id: str) -> None:
         # Count total operators first
         async with self._conn.execute("SELECT COUNT(*) as cnt FROM operators") as cur:
@@ -196,6 +200,7 @@ class SQLiteOperatorStore:
         await self._conn.execute("DELETE FROM operators WHERE id = ?", (operator_id,))
         await self._conn.commit()
 
+    @serialized_write
     async def update_password(self, operator_id: str, password_hash: str) -> None:
         await self._conn.execute(
             "UPDATE operators SET password_hash = ? WHERE id = ?",
@@ -203,6 +208,7 @@ class SQLiteOperatorStore:
         )
         await self._conn.commit()
 
+    @serialized_write
     async def record_login(self, operator_id: str) -> None:
         await self._conn.execute(
             "UPDATE operators SET last_login = ? WHERE id = ?",
