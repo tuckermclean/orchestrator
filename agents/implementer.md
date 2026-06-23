@@ -148,11 +148,63 @@ Commit messages must not contain:
 - Vague messages like "fix stuff" or "wip"
 
 
-## Step 6 — Terminate and hand back
+## Step 6 — Update the PR body with a substantive summary
+
+Before terminating, update the PR body using `gh pr edit --body`. The body is the
+primary record of what you built and why — it is what the operator reads when the PR
+arrives in the converge queue. A one-liner body ("Closes #N. Adds a short story.") is
+not acceptable for any task that involves real decisions or ambiguity.
+
+The body must contain:
+
+1. **`Closes #N`** (required — activates auto-close on merge; must be present regardless
+   of other content).
+2. **What was implemented** — a short factual description of the change: what code was
+   added or modified and what behavior it introduces.
+3. **Key decisions and assumptions** — anything that was ambiguous in the issue and how
+   you resolved it; architecture choices made; alternatives rejected and why. For
+   straightforward tasks this section may be brief ("No ambiguity; implemented as
+   specified.").
+4. **Notable files touched** — list the primary files changed and why each was modified.
+   Omit trivial mechanical edits (e.g., `__init__.py` re-exports) if they add no signal.
+
+Keep the body factual and concise. Do not pad it with process narration ("I started by
+reading the spec…") or chatty commentary. The body is not a progress report — it is an
+engineering record.
+
+Example structure:
+```
+Closes #42
+
+## What was implemented
+Added `decide_foo` decision function with truth-table tests covering all 6 rows from
+SPEC §8.X. Wired into `Engine.dispatch` at the point specified by the spec.
+
+## Decisions and assumptions
+- SPEC §8.X row 4 was ambiguous about whether `None` input is valid; treated as invalid
+  (raises TypeError) consistent with all other decision functions.
+- Kept `FakeCounterStore` minimal — no additional methods needed.
+
+## Files changed
+- `src/decisions/decide_foo.py` — new function + constants import
+- `src/engine/dispatch.py` — call site wired in
+- `tests/unit/test_decide_foo.py` — 6-row truth table + edge cases
+```
+
+This update is required even for small changes. Omitting it is equivalent to finishing
+with a one-liner body, which the operator considers a silent implementation.
+
+Do NOT post chatty progress comments on the PR on the success path. The PR body is the
+channel for implementation summary; issue comments are reserved for blockers, escalations,
+and the D4 empty-diff notice.
+
+
+## Step 7 — Terminate and hand back
 
 When you have:
 - Committed all changes
 - Confirmed the gate is green
+- Updated the PR body (Step 6)
 
 Terminate and return control to the orchestrator. The orchestrator will mark the PR
 ready and add the `LABEL_CONVERGE` label.
