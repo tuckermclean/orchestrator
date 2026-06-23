@@ -584,14 +584,25 @@ class OrchestratorService:
         elif event_name in ("issue_comment", "pull_request_review_comment"):
             # SPEC §11.1 — comment events gate (fix: stop per-comment orchestrator spawn).
             #
-            # Dispatch the orchestrator ONLY when ALL of these conditions hold:
+            # Common gates (apply to every comment event):
             #   1. action == "created"  (not edited / deleted)
             #   2. Comment body contains the configured bot-mention (case-insensitive substring)
             #   3. Author is NOT a bot / NOT the orchestrator itself — kills self-trigger loop
             #   4. Actor is authorized: repo allowlist empty OR author ∈ allowlist
-            #   5. Subject carries the work label: issue→LABEL_AGENT_WORK, PR→LABEL_IMPLEMENTING
-            #   6. _try_claim_dispatch guard passes (in-flight dedup)
             #
+            # Subject-specific routing (SPEC §11.1):
+            #   - issue_comment on a PR  (payload.issue.pull_request present): the subject is
+            #     a PR, so require LABEL_IMPLEMENTING and route as a PR (Bug 1 fix — PRs carry
+            #     agent:implementing, never agent-work, so the old agent-work gate rejected
+            #     every @mention on a PR conversation).
+            #   - issue_comment on a real issue carrying LABEL_AGENT_WORK: dispatch as today.
+            #   - issue_comment on a real (open) issue WITHOUT LABEL_AGENT_WORK, from an
+            #     authorized actor: PROMOTE it (human override — apply agent-work; SPEC §11.3
+            #     promote semantics, I7) then dispatch.  Bypasses the triager content-gate
+            #     because a human explicitly asked.
+            #   - pull_request_review_comment: subject is always a PR → require LABEL_IMPLEMENTING.
+            #
+            # Every dispatch route is guarded by _try_claim_dispatch (in-flight dedup).
             # Any other combination → no-op.  Unknown events fall through to no-op below.
             action = str(payload.get("action", ""))
             if action != "created":
@@ -621,43 +632,84 @@ class OrchestratorService:
             if self._allowlist and actor not in self._allowlist:
                 return {"handled": True}
 
-            # 5. Subject must carry the work label (SPEC §11.1): an issue_comment's
-            #    issue must carry LABEL_AGENT_WORK; a review comment's PR must carry
-            #    LABEL_IMPLEMENTING.  Labels come from the webhook payload — no extra
-            #    forge round-trip.
-            if event_name == "issue_comment":
-                subject = payload.get("issue", {})
-                required_label = LABEL_AGENT_WORK
-            else:  # pull_request_review_comment
-                subject = payload.get("pull_request", {})
-                required_label = LABEL_IMPLEMENTING
-            subject_labels = subject.get("labels", []) if isinstance(subject, dict) else []
-            label_names = {
+            # Resolve the subject (issue/PR object) and detect whether an issue_comment
+            # is actually on a PR.  GitHub delivers a comment on a PR conversation as an
+            # issue_comment whose issue object carries a "pull_request" key.
+            subject = (
+                payload.get("issue", {})
+                if event_name == "issue_comment"
+                else payload.get("pull_request", {})
+            )
+            if not isinstance(subject, dict):
+                subject = {}
+            subject_label_names = {
                 str(lbl.get("name", ""))
-                for lbl in subject_labels
+                for lbl in subject.get("labels", [])
                 if isinstance(lbl, dict)
             }
-            if required_label not in label_names:
+            issue_comment_on_pr = (
+                event_name == "issue_comment" and "pull_request" in subject
+            )
+
+            if event_name == "pull_request_review_comment" or issue_comment_on_pr:
+                # PR route — require LABEL_IMPLEMENTING and dispatch as a PR.
+                if LABEL_IMPLEMENTING not in subject_label_names:
+                    return {"handled": True}
+
+                # For an issue_comment-on-PR the payload has no pull_request object,
+                # so synthesize the pr_ref from the issue/PR number.
+                effective_pr_ref = pr_ref
+                if effective_pr_ref is None and issue_ref is not None:
+                    effective_pr_ref = PRRef(
+                        repo=issue_ref.repo, number=issue_ref.number
+                    )
+                if effective_pr_ref is None:
+                    return {"handled": True}
+
+                guard_ref = IssueRef(
+                    repo=effective_pr_ref.repo, number=effective_pr_ref.number
+                )
+                if not self._try_claim_dispatch(guard_ref):
+                    return {"handled": True}
+
+                # Route via the pull_request_review_comment engine path: it reads the
+                # PR's live labels (LABEL_IMPLEMENTING guard) and iterates on the PR.
+                await self.engine.dispatch(
+                    "pull_request_review_comment",
+                    pr_ref=effective_pr_ref,
+                    comment_body=comment_body,
+                )
                 return {"handled": True}
 
-            # Only apply the in-flight claim guard when we have an issue_ref
-            # (issue_comment events always carry one; pull_request_review_comment
-            # events carry a pr_ref — use it as the claim key via a synthetic
-            # IssueRef so the dedup guard covers both event types).
-            ref_for_guard: IssueRef | None = issue_ref
-            if ref_for_guard is None and pr_ref is not None:
-                # Synthesize an IssueRef from the PR number for claim purposes.
-                ref_for_guard = IssueRef(repo=pr_ref.repo, number=pr_ref.number)
+            # issue_comment on a real issue.
+            if issue_ref is None:
+                return {"handled": True}
 
-            if ref_for_guard is not None and not self._try_claim_dispatch(ref_for_guard):
-                return {"handled": True}  # in-flight dedup: skip duplicate command
+            if LABEL_AGENT_WORK in subject_label_names:
+                # Issue is already agent-work → dispatch as today.
+                if not self._try_claim_dispatch(issue_ref):
+                    return {"handled": True}
+                await self.engine.dispatch(
+                    "issue_comment",
+                    issue_ref=issue_ref,
+                    comment_body=comment_body,
+                )
+                return {"handled": True}
 
-            await self.engine.dispatch(
-                event_name,
-                issue_ref=issue_ref,
-                pr_ref=pr_ref,
-                comment_body=comment_body,
+            # Issue is NOT yet agent-work.  An authorized actor's @mention acts as an
+            # explicit human promotion (Bug 2 / SPEC §11.1).  Bot authors and
+            # non-allowlisted actors were already filtered above.  Never promote a
+            # closed issue.
+            subject_closed = bool(subject.get("closed", False)) or (
+                str(subject.get("state", "")) == "closed"
             )
+            if subject_closed:
+                return {"handled": True}
+            if not self._try_claim_dispatch(issue_ref):
+                return {"handled": True}
+            # promote() performs the atomic agent-work label swap (I7), dispatches the
+            # orchestrator, and writes the human-promotion audit record (I6).
+            await self.promote(issue_ref, operator=actor or "comment-promotion")
         # Any other / unknown event → no-op (SPEC §11.1 "anything else → no-op")
 
         return {"handled": True}

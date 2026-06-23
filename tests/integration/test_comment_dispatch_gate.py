@@ -26,6 +26,7 @@ import pytest
 from src.db.audit import AuditLog
 from src.domain.types import (
     LABEL_AGENT_WORK,
+    LABEL_AWAITING_PROMOTION,
     LABEL_IMPLEMENTING,
     IssueRef,
     PRRef,
@@ -614,34 +615,222 @@ async def test_comment_delivery_id_dedup_still_works(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_comment_without_work_label_no_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SPEC §11.1: a valid @mention on an issue NOT carrying LABEL_AGENT_WORK → no dispatch.
+async def test_comment_promotes_non_work_issue_authorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPEC §11.1 (Bug 2): an authorized @mention on a non-work issue PROMOTES it.
 
-    The work-label gate stops @mentions from triggering dispatch on un-triaged
-    issues (the label is the authorization that the issue is agent-eligible).
+    An owner/allowlisted @mention on an issue NOT yet carrying LABEL_AGENT_WORK
+    (e.g. an awaiting-promotion follow-up issue) acts as an explicit human
+    promotion: agent-work is applied (swapping out awaiting-promotion per I7) and
+    the orchestrator dispatches.  This intentionally bypasses the triager
+    content-gate because the human explicitly asked.
     """
     monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
 
     forge = FakeForgePort()
     harness = FakeHarnessPort()
-    svc = _make_service(forge=forge, harness=harness)
+    issue_ref = _issue(14)
+    forge.seed_issue(issue_ref, labels=[LABEL_AWAITING_PROMOTION])
+    svc = _make_service(forge=forge, harness=harness, allowlist=["tuckermclean"])
     await svc._audit.init()
 
     payload = _issue_comment_payload(
         issue_n=14,
-        body="@orecchiette1111 please fix this",
+        body="@orecchiette1111 please pick this up",
         action="created",
         author_login="tuckermclean",
         author_type="User",
-        labels=[],  # issue does NOT carry agent-work
+        labels=[LABEL_AWAITING_PROMOTION],  # NOT agent-work yet
     )
 
     result = await svc.handle_event("issue_comment", payload, delivery_id="d-014")
     await asyncio.sleep(0)
 
     assert result["handled"] is True
+    # Promotion dispatches the orchestrator exactly once.
+    assert len(harness.dispatch_calls) == 1, (
+        "Authorized @mention on a non-work issue must promote + dispatch"
+    )
+    # I7: agent-work applied, awaiting-promotion swapped out (PUT label semantics).
+    final = await forge.get_issue(issue_ref)
+    assert LABEL_AGENT_WORK in final.labels
+    assert LABEL_AWAITING_PROMOTION not in final.labels
+
+
+@pytest.mark.asyncio
+async def test_comment_promote_non_work_issue_unauthorized_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPEC §11.1 (Bug 2): a NON-allowlisted @mention on a non-work issue → no promote.
+
+    The promotion is a human override gated by the actor allowlist; a non-listed
+    actor neither promotes nor dispatches.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(17)
+    forge.seed_issue(issue_ref, labels=[LABEL_AWAITING_PROMOTION])
+    # allowlist excludes the comment author.
+    svc = _make_service(forge=forge, harness=harness, allowlist=["someone-else"])
+    await svc._audit.init()
+
+    payload = _issue_comment_payload(
+        issue_n=17,
+        body="@orecchiette1111 please pick this up",
+        action="created",
+        author_login="tuckermclean",
+        author_type="User",
+        labels=[LABEL_AWAITING_PROMOTION],
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="d-017")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
     assert len(harness.dispatch_calls) == 0, (
-        "@mention on an issue without LABEL_AGENT_WORK must not dispatch"
+        "Non-allowlisted actor must not promote a non-work issue"
+    )
+    final = await forge.get_issue(issue_ref)
+    assert LABEL_AGENT_WORK not in final.labels
+    assert LABEL_AWAITING_PROMOTION in final.labels
+
+
+@pytest.mark.asyncio
+async def test_comment_no_promote_closed_issue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SPEC §11.1 (Bug 2): a closed non-work issue is never auto-promoted."""
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    issue_ref = _issue(18)
+    forge.seed_issue(issue_ref, labels=[LABEL_AWAITING_PROMOTION], closed=True)
+    svc = _make_service(forge=forge, harness=harness, allowlist=["tuckermclean"])
+    await svc._audit.init()
+
+    payload = _issue_comment_payload(
+        issue_n=18,
+        body="@orecchiette1111 reopen and work this",
+        action="created",
+        author_login="tuckermclean",
+        author_type="User",
+        labels=[LABEL_AWAITING_PROMOTION],
+    )
+    # Mark the subject closed in the payload (GitHub sends issue.state).
+    issue_obj = payload["issue"]
+    assert isinstance(issue_obj, dict)
+    issue_obj["state"] = "closed"
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="d-018")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 0, "Closed issue must not be auto-promoted"
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 — issue_comment on a PR (payload.issue.pull_request present)
+# ---------------------------------------------------------------------------
+
+
+def _issue_comment_on_pr_payload(
+    pr_n: int,
+    body: str = "@orecchiette1111 address those suggestions",
+    action: str = "created",
+    author_login: str = "tuckermclean",
+    author_type: str = "User",
+    labels: list[str] | None = None,
+) -> dict[str, object]:
+    """GitHub delivers a comment on a PR conversation as an issue_comment event.
+
+    The issue object carries a ``pull_request`` key and the PR's labels
+    (e.g. agent:implementing) — NOT agent-work.
+    """
+    label_objs = [{"name": n} for n in (labels if labels is not None else [LABEL_IMPLEMENTING])]
+    return {
+        "repository": {"owner": {"login": "acme"}, "name": "service"},
+        "issue": {
+            "number": pr_n,
+            "labels": label_objs,
+            "pull_request": {"url": f"https://api.github.com/repos/acme/service/pulls/{pr_n}"},
+        },
+        "action": action,
+        "comment": {
+            "body": body,
+            "user": {"login": author_login, "type": author_type},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_on_pr_dispatches_as_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bug 1 regression lock: @mention on a PR conversation dispatches, routed as PR.
+
+    GitHub delivers it as an issue_comment with payload.issue.pull_request present
+    and the PR's labels (agent:implementing).  The old gate required agent-work and
+    rejected it.  The fix detects the PR and requires LABEL_IMPLEMENTING instead,
+    routing the dispatch as a PR.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(45)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_pr_payload(
+        pr_n=45,
+        body="@orecchiette1111 please address those 7 suggestions",
+        labels=[LABEL_IMPLEMENTING, "agent:ready"],
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="d-045")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 1, (
+        "@mention on a PR conversation (issue_comment-on-PR) must dispatch"
+    )
+    ctx = harness.dispatch_calls[0]
+    # Routed as a PR: the dispatch context carries pr_ref, not issue_ref.
+    assert ctx.pr_ref == pr_ref
+    assert ctx.issue_ref is None
+
+
+@pytest.mark.asyncio
+async def test_issue_comment_on_pr_without_implementing_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An issue_comment on a PR NOT carrying agent:implementing → no dispatch."""
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(46)
+    forge.seed_pr(pr_ref, labels=["agent:ready"], draft=True)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_pr_payload(
+        pr_n=46,
+        body="@orecchiette1111 do something",
+        labels=["agent:ready"],  # no agent:implementing
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="d-046")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 0, (
+        "issue_comment on a PR without agent:implementing must not dispatch"
     )
 
 
