@@ -56,6 +56,9 @@ class FakeForgePort:
         self._reviews: list[dict[str, object]] = []
         self._pr_counter: dict[str, int] = {}
         self._issue_counter: dict[str, int] = {}
+        # Branches known to have at least one commit (used by require_branch_commits mode).
+        # Key: "{repo_owner}/{repo_name}:{branch_name}"
+        self._branch_commits: set[str] = set()
 
         # Call logs
         self.get_issue_calls: list[IssueRef] = []
@@ -81,7 +84,8 @@ class FakeForgePort:
         self.last_workflow_run_at_calls: list[tuple[PRRef, str]] = []
         self.last_dispatch_run_at_calls: list[PRRef] = []
 
-    def __init__(self) -> None:
+    def __init__(self, *, require_branch_commits: bool = False) -> None:
+        self._require_branch_commits = require_branch_commits
         self._init_state()
 
     def reset(self) -> None:
@@ -186,6 +190,14 @@ class FakeForgePort:
         key = self._pr_key(pr_ref)
         self._dispatch_run_ats[key] = ran_at
 
+    def seed_branch_commits(self, repo: RepoRef, branch: str) -> None:
+        """Register that `branch` has at least one commit ahead of its base.
+
+        Required only when ``require_branch_commits=True`` is set on the fake.
+        Call this before ``create_pr`` to declare the branch is non-empty.
+        """
+        self._branch_commits.add(f"{self._repo_key(repo)}:{branch}")
+
     # --- ForgePort implementation ---
 
     async def get_issue(self, issue_ref: IssueRef) -> Issue:
@@ -254,6 +266,18 @@ class FakeForgePort:
         draft: bool,
     ) -> PRRef:
         self.create_pr_calls.append((repo, title, body, head, base, draft))
+        # Strict-mode guard: mimic the real GitHub 422 when head has no commits
+        # ahead of base (e.g. a freshly-created branch with zero commits).
+        # Enable with ``FakeForgePort(require_branch_commits=True)`` to catch
+        # control-plane code that opens a PR before pushing any commits.
+        if self._require_branch_commits:
+            branch_key = f"{self._repo_key(repo)}:{head}"
+            if branch_key not in self._branch_commits:
+                raise ValueError(
+                    f"422 Unprocessable Entity: No commits between '{base}' and "
+                    f"'{head}' — seed_branch_commits(repo, {head!r}) first, or "
+                    "do not open a PR before the agent commits to the branch."
+                )
         repo_key = self._repo_key(repo)
         self._pr_counter[repo_key] = self._pr_counter.get(repo_key, 0) + 1
         number = self._pr_counter[repo_key]

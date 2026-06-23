@@ -490,11 +490,18 @@ async def test_deescalate_pr_full_recovery_cycle() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_idempotent_two_calls() -> None:
-    """Two Engine.dispatch calls for the same issue do not create two PRs (TESTING.md §6).
+    """Two Engine.dispatch calls for the same issue produce only one harness dispatch.
 
-    The dedup guard in Engine.dispatch checks for an existing open implementing PR
-    (carrying LABEL_IMPLEMENTING) whose body closes the issue; the second dispatch
-    is a no-op when such a PR already exists.
+    TESTING.md §6.
+
+    The dedup guard in Engine.dispatch (SPEC §10.1 step 2) checks for an existing
+    open implementing PR (carrying LABEL_IMPLEMENTING) whose body closes the issue;
+    the second dispatch is a no-op when such a PR already exists.
+
+    The control plane does NOT create the draft PR — that is the orchestrator agent's
+    job (agents/orchestrator.md Step 1).  The dedup guard therefore operates on
+    agent-created PRs: the test seeds the agent's PR in the forge to verify the guard
+    correctly skips the second dispatch event.
     """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
@@ -509,23 +516,27 @@ async def test_dispatch_idempotent_two_calls() -> None:
         converge_state=FakeConvergeStateStore(),
     )
 
-    # First dispatch — creates a draft PR
+    # First dispatch — control plane does NOT create a PR; it dispatches the agent
     await engine.dispatch("issues", issue_ref=issue_ref)
-    prs_after_first = list(forge._prs.values())
-    assert len(prs_after_first) == 1, "First dispatch should create exactly one PR"
+    assert len(harness.dispatch_calls) == 1, "First dispatch should call harness once"
+    assert len(forge.create_pr_calls) == 0, "Control plane must not create a PR"
 
-    # The dedup guard looks for open PRs with LABEL_IMPLEMENTING.  Add that label to
-    # the newly-created PR (simulating the forge labeling that happens in production
-    # after the harness applies the implementing label to the PR).
-    first_pr_ref = prs_after_first[0].ref
-    await forge.add_label(first_pr_ref, LABEL_IMPLEMENTING)
+    # Simulate the agent having opened a draft PR with LABEL_IMPLEMENTING and
+    # Closes #60 in the body (agents/orchestrator.md Steps 1–2).
+    repo = issue_ref.repo
+    agent_pr_ref = PRRef(repo=repo, number=1)
+    forge.seed_pr(
+        agent_pr_ref,
+        draft=True,
+        labels=[LABEL_IMPLEMENTING],
+        body="Closes #60",
+    )
 
-    # Second dispatch — dedup guard sees the existing implementing PR, no-ops
-    await engine.dispatch("issues", issue_ref=issue_ref)
-    prs_after_second = list(forge._prs.values())
-    assert len(prs_after_second) == 1, "Second dispatch must not create a duplicate PR"
-    # Harness was called once (for the first dispatch only)
-    assert len(harness.dispatch_calls) == 1
+    # Second dispatch event (e.g. webhook replay) — dedup guard sees the existing
+    # implementing PR referencing issue 60 and returns None without calling harness
+    result = await engine.dispatch("issues", issue_ref=issue_ref)
+    assert result is None, "Second dispatch must be skipped by dedup guard"
+    assert len(harness.dispatch_calls) == 1, "Harness must not be called a second time"
 
 
 @pytest.mark.asyncio

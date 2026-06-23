@@ -51,7 +51,10 @@ class Engine:
         result = route_entry(event_name)
 
         if event_name == "issues" and issue_ref is not None:
-            # Dedup guard — skip if an implementing PR already references this issue
+            # Dedup guard (§10.1 step 2): skip if an implementing PR already
+            # references this issue.  The orchestrator agent opens the draft PR
+            # itself (agents/orchestrator.md Step 1) and adds LABEL_IMPLEMENTING
+            # (Step 2); the control plane must not duplicate those actions.
             repo = issue_ref.repo
             open_prs = await self.forge.list_prs(
                 repo, state="open", labels=[LABEL_IMPLEMENTING]
@@ -60,18 +63,6 @@ class Engine:
                 matched_nums = {int(m) for m in _CLOSING_RE.findall(pr.body)}
                 if issue_ref.number in matched_nums:
                     return None  # already dispatching
-
-            # Open a draft PR and mark the issue as in-progress (§10.1 step 2)
-            pr_body = f"Closes #{issue_ref.number}"
-            await self.forge.create_pr(
-                repo=issue_ref.repo,
-                title=f"Fix #{issue_ref.number}",
-                body=pr_body,
-                head=f"fix/issue-{issue_ref.number}",
-                base="main",
-                draft=True,
-            )
-            await self.forge.add_label(issue_ref, LABEL_IMPLEMENTING)
 
             context = DispatchContext(
                 issue_ref=issue_ref,
