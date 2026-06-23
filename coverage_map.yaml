@@ -625,6 +625,14 @@
     tests: ["test_cooldown_constant_is_named", "test_harnesses_json_env_constant", "test_cooldown_arms_for_exactly_harness_cooldown_s"]
   "cooldown-expiry-self-heal":
     tests: ["test_dispatch_succeeds_after_cooldown_expires"]
+  "has-run-predicate":
+    tests: ["test_has_run_false_before_dispatch", "test_has_run_true_after_dispatch", "test_has_run_false_for_run_on_different_harness"]
+  "failover-event-read-routes-to-owner":
+    tests: ["test_get_run_events_routes_to_owning_harness_not_primary", "test_subscribe_run_events_routes_to_owning_harness"]
+  "failover-single-harness-full-stack-events":
+    tests: ["test_single_harness_events_visible_through_full_stack", "test_single_harness_subscribe_events_through_full_stack"]
+  "failover-status-sink-routes-to-owner":
+    tests: ["test_register_run_status_sink_routes_to_owning_harness", "test_get_live_status_routes_to_owning_harness"]
 
 "§9.2-agent-transcript":  # Live agent transcript streaming — JSONL → RunEvent mapping
   "agent-transcript-assistant-text":

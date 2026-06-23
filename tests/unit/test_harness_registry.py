@@ -14,7 +14,7 @@ Coverage targets (see coverage_map.yaml §14):
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -59,7 +59,12 @@ def _make_context() -> DispatchContext:
 
 
 def _make_port(*, quota_exhausted: bool = False, run_id: str = "run-1") -> AsyncMock:
-    """Build a minimal FakeHarnessPort as an AsyncMock."""
+    """Build a minimal FakeHarnessPort as an AsyncMock.
+
+    has_run is a synchronous predicate on ClaudeCodeHarnessPort.  Wire it as a
+    MagicMock (sync) returning False so _owning_port falls back to primary and the
+    existing delegation tests continue to work without 'coroutine never awaited' warnings.
+    """
     port = AsyncMock()
     if quota_exhausted:
         port.dispatch.side_effect = HarnessQuotaExhausted("test", "rate limited")
@@ -70,6 +75,8 @@ def _make_port(*, quota_exhausted: bool = False, run_id: str = "run-1") -> Async
     port.trigger_ci.return_value = None
     port.trigger_workflow.return_value = None
     port.get_run_verdict.return_value = None
+    # has_run is synchronous — override the AsyncMock's default async behaviour.
+    port.has_run = MagicMock(return_value=False)
     return port
 
 
@@ -806,3 +813,383 @@ class TestCooldownExpirySelfHeal:
         # At now+2s: definitely available
         after_expiry = now + timedelta(seconds=2)
         assert entry.is_available(after_expiry) is True
+
+
+# ---------------------------------------------------------------------------
+# has_run predicate — ClaudeCodeHarnessPort owns a run_id iff registered
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeCodeHarnessPortHasRun:
+    """has_run(run_id) must return True only for runs registered in this harness's
+    RunEventStore.  Used by FailoverHarnessPort._owning_port to route event reads.
+    """
+
+    def test_has_run_false_before_dispatch(self) -> None:
+        """has_run returns False for an unknown run_id (not yet registered)."""
+        from src.ports.execution_backend import FakeExecutionBackend
+        from src.ports.harness import ClaudeCodeHarnessPort
+
+        backend = FakeExecutionBackend()
+        port = ClaudeCodeHarnessPort(
+            claude_oauth_token="tok",
+            app_id="",
+            private_key_pem="",
+            installation_id="",
+            repo_owner="acme",
+            repo_name="api",
+            execution_backend=backend,
+        )
+        assert port.has_run("nonexistent-run") is False
+
+    @pytest.mark.asyncio
+    async def test_has_run_true_after_dispatch(self) -> None:
+        """has_run returns True for a run_id registered by dispatch()."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.domain.types import DispatchContext, IssueRef, RepoRef
+        from src.ports.execution_backend import FakeExecutionBackend
+        from src.ports.harness import ClaudeCodeHarnessPort
+
+        backend = FakeExecutionBackend()
+        port = ClaudeCodeHarnessPort(
+            claude_oauth_token="tok",
+            app_id="",
+            private_key_pem="",
+            installation_id="",
+            repo_owner="acme",
+            repo_name="api",
+            execution_backend=backend,
+        )
+        ctx = DispatchContext(
+            issue_ref=IssueRef(repo=RepoRef(owner="acme", name="api"), number=1),
+            contract="agents/orchestrator.md",
+            model="claude-sonnet-4-6",
+            max_turns=10,
+            forge_token_scope="repo-branch",
+        )
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await port.dispatch(ctx)
+
+        assert port.has_run(handle.run_id) is True
+
+    @pytest.mark.asyncio
+    async def test_has_run_false_for_run_on_different_harness(self) -> None:
+        """has_run returns False for a run_id that belongs to a different harness."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.domain.types import DispatchContext, IssueRef, RepoRef
+        from src.ports.execution_backend import FakeExecutionBackend
+        from src.ports.harness import ClaudeCodeHarnessPort
+
+        backend_a = FakeExecutionBackend()
+        backend_b = FakeExecutionBackend()
+
+        def _make_harness(backend: FakeExecutionBackend) -> ClaudeCodeHarnessPort:
+            return ClaudeCodeHarnessPort(
+                claude_oauth_token="tok",
+                app_id="",
+                private_key_pem="",
+                installation_id="",
+                repo_owner="acme",
+                repo_name="api",
+                execution_backend=backend,
+            )
+
+        harness_a = _make_harness(backend_a)
+        harness_b = _make_harness(backend_b)
+
+        ctx = DispatchContext(
+            issue_ref=IssueRef(repo=RepoRef(owner="acme", name="api"), number=1),
+            contract="agents/orchestrator.md",
+            model="claude-sonnet-4-6",
+            max_turns=10,
+            forge_token_scope="repo-branch",
+        )
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await harness_a.dispatch(ctx)
+
+        # harness_a owns the run; harness_b does not
+        assert harness_a.has_run(handle.run_id) is True
+        assert harness_b.has_run(handle.run_id) is False
+
+
+# ---------------------------------------------------------------------------
+# FailoverHarnessPort — event-read surface routes to run-owning harness
+# ---------------------------------------------------------------------------
+
+
+def _make_claude_harness_entry(
+    harness_id: str,
+    priority: int,
+) -> HarnessRegistryEntry:
+    """Build a registry entry with a real ClaudeCodeHarnessPort (FakeExecutionBackend)."""
+    from src.ports.execution_backend import FakeExecutionBackend
+    from src.ports.harness import ClaudeCodeHarnessPort
+
+    backend = FakeExecutionBackend()
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token="tok",
+        app_id="",
+        private_key_pem="",
+        installation_id="",
+        repo_owner="acme",
+        repo_name="api",
+        execution_backend=backend,
+    )
+    config = HarnessConfig(id=harness_id, priority=priority)
+    return HarnessRegistryEntry(config=config, port=port)
+
+
+class TestFailoverHarnessPortEventReadRouting:
+    """Regression lock for the ev0/tx0 transcript-invisible bug.
+
+    Root cause: FailoverHarnessPort lacked get_run_events / subscribe_run_events,
+    so RunRecordingHarness.hasattr guard fell through to empty returns.
+    Fix: route event reads to the harness that owns the run_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_run_events_routes_to_owning_harness_not_primary(self) -> None:
+        """Multi-harness: dispatch selects non-primary; events must come from that harness."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.domain.types import RunEvent
+
+        # Primary is cooled-down (so dispatch goes to fallback).
+        primary_entry = _make_claude_harness_entry("primary", priority=1)
+        fallback_entry = _make_claude_harness_entry("fallback", priority=2)
+
+        # Arm primary cooldown before dispatch so decide_harness selects fallback.
+        primary_entry.set_cooldown(datetime.now(UTC))
+
+        reg = HarnessRegistry([primary_entry, fallback_entry])
+        failover = FailoverHarnessPort(reg)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await failover.dispatch(ctx)
+
+        # Inject a synthetic event into the fallback harness's event store.
+        fallback_port = fallback_entry.port
+        assert hasattr(fallback_port, "_event_store")
+        evt = RunEvent(
+            event_type="agent_message",
+            data={"text": "hello from fallback"},
+            timestamp=datetime.now(UTC),
+        )
+        fallback_port._event_store.append(handle.run_id, evt)  # type: ignore[union-attr]
+
+        # FailoverHarnessPort.get_run_events must route to fallback, not primary.
+        events = failover.get_run_events(handle.run_id)
+        assert len(events) == 1
+        assert events[0].data["text"] == "hello from fallback"
+
+        # Primary's event store must be empty for this run.
+        primary_port = primary_entry.port
+        assert hasattr(primary_port, "get_run_events")
+        primary_events = primary_port.get_run_events(handle.run_id)  # type: ignore[union-attr]
+        assert primary_events == []
+
+    @pytest.mark.asyncio
+    async def test_subscribe_run_events_routes_to_owning_harness(self) -> None:
+        """subscribe_run_events must route to owning harness and yield its events."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.domain.types import RunEvent
+
+        primary_entry = _make_claude_harness_entry("primary", priority=1)
+        fallback_entry = _make_claude_harness_entry("fallback", priority=2)
+        primary_entry.set_cooldown(datetime.now(UTC))
+
+        reg = HarnessRegistry([primary_entry, fallback_entry])
+        failover = FailoverHarnessPort(reg)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await failover.dispatch(ctx)
+
+        # Inject an event into the fallback's store.
+        evt = RunEvent(
+            event_type="agent_message",
+            data={"text": "streamed event"},
+            timestamp=datetime.now(UTC),
+        )
+        fallback_port = fallback_entry.port
+        fallback_port._event_store.append(handle.run_id, evt)  # type: ignore[union-attr]
+
+        # subscribe_run_events must yield the backlog from fallback's store.
+        collected: list[RunEvent] = []
+        async for event in failover.subscribe_run_events(handle.run_id):
+            collected.append(event)
+
+        assert len(collected) == 1
+        assert collected[0].data["text"] == "streamed event"
+
+    @pytest.mark.asyncio
+    async def test_single_harness_events_visible_through_full_stack(self) -> None:
+        """Regression: single-harness config — full RunRecordingHarness(Failover) stack.
+
+        Before the fix: FailoverHarnessPort lacked get_run_events, so
+        RunRecordingHarness.get_run_events() returned [] for ALL runs.
+        After the fix: events are visible through the full stack.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from src.db.run_store import FakeRunStore
+        from src.domain.types import RunEvent
+        from src.service.orchestrator import RunRecordingHarness
+
+        entry = _make_claude_harness_entry("default", priority=1)
+        reg = HarnessRegistry([entry])
+        failover = FailoverHarnessPort(reg)
+        run_store = FakeRunStore()
+        recording = RunRecordingHarness(harness=failover, run_store=run_store)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await recording.dispatch(ctx)
+
+        # Inject a k8s_job_created-style event into the underlying store.
+        evt = RunEvent(
+            event_type="k8s_job_created",
+            data={"job_name": "run-abc-123"},
+            timestamp=datetime.now(UTC),
+        )
+        # Reach through to the real event store via the underlying harness.
+        real_port = entry.port
+        real_port._event_store.append(handle.run_id, evt)  # type: ignore[union-attr]
+
+        # RunRecordingHarness.get_run_events must return the event (not []).
+        events = recording.get_run_events(handle.run_id)
+        assert len(events) >= 1
+        assert any(e.event_type == "k8s_job_created" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_single_harness_subscribe_events_through_full_stack(self) -> None:
+        """subscribe_run_events returns events through full stack (not empty iterator)."""
+        from unittest.mock import AsyncMock, patch
+
+        from src.db.run_store import FakeRunStore
+        from src.domain.types import RunEvent
+        from src.service.orchestrator import RunRecordingHarness
+
+        entry = _make_claude_harness_entry("default", priority=1)
+        reg = HarnessRegistry([entry])
+        failover = FailoverHarnessPort(reg)
+        run_store = FakeRunStore()
+        recording = RunRecordingHarness(harness=failover, run_store=run_store)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await recording.dispatch(ctx)
+
+        # Inject a streamed event.
+        evt = RunEvent(
+            event_type="agent_message",
+            data={"text": "tx1"},
+            timestamp=datetime.now(UTC),
+        )
+        entry.port._event_store.append(handle.run_id, evt)  # type: ignore[union-attr]
+
+        collected: list[RunEvent] = []
+        async for event in recording.subscribe_run_events(handle.run_id):
+            collected.append(event)
+
+        assert any(e.event_type == "agent_message" for e in collected)
+
+
+# ---------------------------------------------------------------------------
+# FailoverHarnessPort — status-sink path routes to owning harness
+# ---------------------------------------------------------------------------
+
+
+class TestFailoverHarnessPortStatusSinkRouting:
+    """Status sinks must be registered on the harness that owns the run."""
+
+    @pytest.mark.asyncio
+    async def test_register_run_status_sink_routes_to_owning_harness(self) -> None:
+        """register_run_status_sink must wire the sink on the owning harness's event store.
+
+        Verified by checking that the sink is registered in the fallback's RunEventStore
+        (not in primary's).  The FakeExecutionBackend completes runs synchronously so we
+        cannot fire a status transition after dispatch; instead we inspect the store's
+        internal sink registry directly.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        primary_entry = _make_claude_harness_entry("primary", priority=1)
+        fallback_entry = _make_claude_harness_entry("fallback", priority=2)
+        primary_entry.set_cooldown(datetime.now(UTC))
+
+        reg = HarnessRegistry([primary_entry, fallback_entry])
+        failover = FailoverHarnessPort(reg)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await failover.dispatch(ctx)
+
+        sink_calls: list[tuple[str, RunStatus]] = []
+
+        def _sink(run_id: str, status: RunStatus) -> None:
+            sink_calls.append((run_id, status))
+
+        failover.register_run_status_sink(handle.run_id, _sink)
+
+        # The sink must be registered in the FALLBACK's event store (not primary's).
+        fallback_port = fallback_entry.port
+        primary_port = primary_entry.port
+        assert handle.run_id in fallback_port._event_store._status_sinks  # type: ignore[union-attr]
+        # Primary's store must NOT have the sink (different run_id universe).
+        assert handle.run_id not in primary_port._event_store._status_sinks  # type: ignore[union-attr]
+        # And the registered sink is our function.
+        assert fallback_port._event_store._status_sinks[handle.run_id] is _sink  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_get_live_status_routes_to_owning_harness(self) -> None:
+        """get_live_status must read from the harness that owns the run."""
+        from unittest.mock import AsyncMock, patch
+
+        primary_entry = _make_claude_harness_entry("primary", priority=1)
+        fallback_entry = _make_claude_harness_entry("fallback", priority=2)
+        primary_entry.set_cooldown(datetime.now(UTC))
+
+        reg = HarnessRegistry([primary_entry, fallback_entry])
+        failover = FailoverHarnessPort(reg)
+
+        ctx = _make_context()
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="gh-tok"),
+        ):
+            handle = await failover.dispatch(ctx)
+
+        # Set status on fallback's event store (it owns the run).
+        in_progress = RunStatus(state="in_progress")
+        fallback_port = fallback_entry.port
+        # Override existing status manually (the fake backend sets "completed" synchronously).
+        fallback_port._event_store._statuses[handle.run_id] = in_progress  # type: ignore[union-attr]
+
+        live = failover.get_live_status(handle.run_id)
+        assert live.state == "in_progress"
