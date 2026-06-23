@@ -365,6 +365,13 @@
     tests: ["test_background_task_done_callback_no_log_on_success"]
   "k8s-log-stream-concurrent-streamers":
     tests: ["test_multiple_concurrent_streamers_all_receive_events"]
+  # Container readiness gate + log-open retry (LIVE BUG fix — pod-log opened before Running)
+  "k8s-log-client-container-readiness-gate":
+    tests: ["test_real_kube_log_client_waits_for_running_phase_not_just_existence", "test_real_kube_log_client_streams_succeeded_pod_log", "test_real_kube_log_client_events_land_in_store_after_retry"]
+  "k8s-log-client-log-open-retry":
+    tests: ["test_real_kube_log_client_retries_log_open_on_api_exception", "test_real_kube_log_client_log_open_all_retries_exhausted_logs_warning"]
+  "k8s-log-client-pod-never-starts-deadline":
+    tests: ["test_real_kube_log_client_pod_never_starts_returns_cleanly"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":

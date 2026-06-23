@@ -1249,6 +1249,13 @@ class _RealKubeLogClient:
     """
 
     _CHUNK_SIZE: int = 4096
+    # Tunable constants for the readiness-wait and log-open retry loops.
+    # Exposed as class attributes so tests can subclass and override without
+    # touching production code.
+    _READINESS_POLL_SECONDS: float = 0.5
+    _READINESS_TIMEOUT_POLLS: int = 60  # 60 × 0.5 s = 30 s total
+    _LOG_OPEN_RETRY_SLEEP: float = 1.0
+    _LOG_OPEN_MAX_RETRIES: int = 30  # up to ~30 s of retries after readiness
 
     def __init__(self, core_v1: Any) -> None:
         self._api = core_v1
@@ -1260,8 +1267,19 @@ class _RealKubeLogClient:
     ) -> AsyncIterator[str]:
         """Yield log lines from the pod matching label_selector.
 
-        Polls for the pod to appear (up to 30 s), then streams with follow=True.
-        Each yielded item is one decoded UTF-8 line (no trailing newline).
+        Polls for the pod to appear AND reach a running/terminal state (up to
+        30 s), then streams with follow=True.  Retries the log-open call on
+        ApiException/NotFoundException so a container that is still in
+        ContainerCreating at the moment of the first open attempt does not
+        cause a permanent give-up.
+
+        Gate: only proceed once the pod's container has actually started.
+        Specifically we wait until pod.status.phase is Running, Succeeded, or
+        Failed.  A pod that completes very fast (Succeeded) must still yield
+        its full log — follow=True on a finished pod returns the buffered log
+        then EOF.  When the container is already terminated we fall back to
+        follow=False so a kubelet that rejects follow on a dead container is
+        handled correctly.
 
         The urllib3 HTTPResponse returned by read_namespaced_pod_log (with
         _preload_content=False) exposes resp.read1(amt) which returns
@@ -1270,9 +1288,10 @@ class _RealKubeLogClient:
         until N bytes arrive or the stream closes, holding the thread for the
         pod's entire lifetime and starving the executor under concurrent runs.
 
-        All blocking calls go to _log_stream_executor (dedicated, 64 workers)
-        rather than the default executor so streaming cannot starve watcher
-        polls or other asyncio background work.
+        All blocking calls to the K8s API use the default executor (short
+        calls); only the resp.read1() streaming loop uses _log_stream_executor
+        (dedicated, 64 workers) so streaming cannot starve watcher polls or
+        other asyncio background work.
 
         Chunks can split JSONL lines at any byte boundary; we accumulate a
         buffer and yield only complete newline-terminated lines.
@@ -1281,11 +1300,18 @@ class _RealKubeLogClient:
 
         loop = _asyncio.get_running_loop()
 
-        # Wait up to 30 s for the pod to be created and reach Running.
+        # ------------------------------------------------------------------ #
+        # Phase 1: wait up to 30 s for the pod to exist AND its container to
+        # reach Running, Succeeded, or Failed.  Breaking on pod-existence alone
+        # (the previous bug) races against ContainerCreating → ApiException.
         # Pod-list polls use the default executor (short calls) so they don't
         # compete with the dedicated streaming pool.
+        # ------------------------------------------------------------------ #
         pod_name: str | None = None
-        for _ in range(60):
+        container_terminal: bool = False  # True when phase is Succeeded/Failed
+        container_ready: bool = False  # True when phase reached Running/Succeeded/Failed
+
+        for _ in range(self._READINESS_TIMEOUT_POLLS):
             try:
                 pod_list = await loop.run_in_executor(
                     None,
@@ -1296,35 +1322,68 @@ class _RealKubeLogClient:
                 )
                 pods = pod_list.items if hasattr(pod_list, "items") else []
                 if pods:
-                    pod_name = pods[0].metadata.name
-                    break
+                    pod = pods[0]
+                    pod_name = pod.metadata.name
+                    phase: str = ""
+                    pod_status = getattr(pod, "status", None)
+                    if pod_status is not None:
+                        phase = getattr(pod_status, "phase", "") or ""
+                    if phase in ("Running", "Succeeded", "Failed"):
+                        container_terminal = phase in ("Succeeded", "Failed")
+                        container_ready = True
+                        break
+                    # Pod exists but container not yet started — keep polling.
             except Exception:
                 pass
-            await _asyncio.sleep(0.5)
+            await _asyncio.sleep(self._READINESS_POLL_SECONDS)
 
-        if pod_name is None:
+        if pod_name is None or not container_ready:
+            logger.warning(
+                "pod-log: pod %s (selector=%s) did not reach Running within deadline",
+                pod_name or "<not-found>",
+                label_selector,
+            )
             return
 
-        # Open the streaming response with follow=True, _preload_content=False.
-        # This returns a urllib3.response.HTTPResponse — not a requests.Response.
-        # urllib3.HTTPResponse does NOT have iter_lines(); use .read1() instead.
-        # Opening the response is a short blocking call; use the default executor.
-        try:
-            resp = await loop.run_in_executor(
-                None,
-                lambda: self._api.read_namespaced_pod_log(
-                    name=pod_name,
-                    namespace=namespace,
-                    follow=True,
-                    _preload_content=False,
-                ),
-            )
-        except Exception as exc:
+        # ------------------------------------------------------------------ #
+        # Phase 2: open the streaming response.  Retry on ApiException /
+        # NotFoundException: even after the readiness gate there is a small
+        # window where the container transitions from ContainerCreating to
+        # Running between the list_namespaced_pod call and the log-open.
+        # Only give up after the retry budget elapses.
+        # Use follow=False when the container is already terminated — some
+        # kubelets reject follow=True on a dead container.
+        # Opening the log is a short blocking call; use the default executor.
+        # ------------------------------------------------------------------ #
+        follow = not container_terminal
+
+        resp: Any = None
+        last_open_exc: Exception | None = None
+        for attempt in range(self._LOG_OPEN_MAX_RETRIES):
+            try:
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: self._api.read_namespaced_pod_log(
+                        name=pod_name,
+                        namespace=namespace,
+                        follow=follow,
+                        _preload_content=False,
+                    ),
+                )
+                last_open_exc = None
+                break
+            except Exception as exc:
+                last_open_exc = exc
+                if attempt < self._LOG_OPEN_MAX_RETRIES - 1:
+                    await _asyncio.sleep(self._LOG_OPEN_RETRY_SLEEP)
+
+        if resp is None:
             logger.warning(
-                "pod-log open failed for pod %s (selector=%s): %r",
+                "pod-log open failed for pod %s (selector=%s) after %d retries: %r",
                 pod_name,
                 label_selector,
-                exc,
+                self._LOG_OPEN_MAX_RETRIES,
+                last_open_exc,
             )
             return
 
