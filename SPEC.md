@@ -1277,12 +1277,13 @@ stateDiagram-v2
 
 ## §13 Known Issues
 
-**OQ-1 (resolved): `ci-red` recovery now re-polls all 6 blocking CI checks.** The former
-3-of-6 behaviour (inherited from the reference bash implementation) was a soundness hole:
-a PR that recovered Type Check / Lint / Integration Tests but still had red Docker Build,
-Helm Lint, or Helm Kubeconform could be auto-approved (P9). `Engine.converge §10.2` step
-4g now polls all `BLOCKING_CI_CHECKS` (§7) before approving. The negative test
-`test_converge_ci_red_docker_still_red_escalates` locks in the corrected behaviour.
+**OQ-1 (resolved): `ci-red` recovery re-polls every present check before approving.** The
+former subset behaviour (inherited from the reference bash implementation, which checked
+only a fixed 3-of-6 list) was a soundness hole: a PR that recovered some checks while
+others stayed red could be auto-approved (P9). Under the current CI-green definition (§7),
+the gate trusts the repo's actual checks and requires **all present checks** green —
+`Engine.converge §10.2` step 4g polls every check on the PR before approving, so a still-red
+check escalates rather than approves and no subset-approval hole remains.
 
 **OQ-2/OQ-3: `MAX_REDISPATCHES`** was duplicated in three places in the reference bash
 scripts; it is now single-sourced here. D3 removed the re-dispatch branch from
