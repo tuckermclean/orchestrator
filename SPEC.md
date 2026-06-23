@@ -154,32 +154,26 @@ finalize time.
 
 ### Verdict schema
 
-Each converge round produces a `Verdict` (written by the reviewer to `.converge-verdict.json`
-on the PR branch, read by the Engine via `ForgePort.get_file_contents`):
+Each converge round produces a `Verdict` emitted by the reviewer as **structured output**
+(a fenced ` ```json … ``` ` block in the reviewer's final message), captured by the
+harness in `RunEventStore` and read by the Engine via `harness.get_run_verdict(reviewer_handle)`.
+The verdict is **never committed to the PR branch** — the branch stays free of bot scratch state.
 
 ```json
 {"blockers": <int>, "suggestions": <int>, "nits": ["..."], "blocker_signatures": ["stable-slug"]}
 ```
 
-**Init sentinel** (seeded before each reviewer run):
-```json
-{"blockers": 1, "suggestions": 0, "nits": [], "blocker_signatures": ["verdict-file-not-written"]}
-```
-A reviewer that crashes before overwriting the sentinel leaves a phantom blocker (fail-safe).
-The string `"verdict-file-not-written"` is reserved; never use it as a real blocker slug.
-
-> **Reviewer-crash masking (accepted behavior).** If a reviewer crashes and leaves the
-> sentinel intact, `resolve_blockers` falls back to the comment footer (rows 2–3). If no
-> footer was posted (reviewer hung before commenting), `resolve_blockers` returns
-> `"unknown"`. At R1/R2 this produces `fix`; the fixer reads the sentinel and terminates
-> immediately (§9.1 converge-fixer.md Step 1). The next reviewer runs from the same
-> sentinel. At R3 with `"unknown"` blockers, `decide_round` returns `escalate:no-verdict`,
-> which correctly caps retries and escalates. The eventual outcome is human escalation,
-> not phantom approval. The `escalate:cap-reached` path can trigger at R3 if the reviewer
-> crash persists across all rounds and blockers from a non-sentinel prior round match; this
-> masks the root cause (reviewer crash) behind a cap-reached E5 label — acceptable because
-> the human reviewer will see the stuck state and can diagnose it. No spec change is
-> required; this is intentional design under the crash-only durability model.
+> **Reviewer-crash fail-safe.** If the reviewer crashes or omits the structured output block,
+> `harness.get_run_verdict` returns `None`.  `resolve_blockers` then falls back to the
+> comment-footer heuristic (rows 2–3).  If no footer was posted either (reviewer hung before
+> commenting), `resolve_blockers` returns `"unknown"`.  At R1/R2 this produces `fix` and the
+> fixer sees no prior verdict — it posts its own comment and exits clean.  At R3 with
+> `"unknown"` blockers, `decide_round` returns `escalate:no-verdict`, which correctly caps
+> retries and escalates to human review.  The eventual outcome is human escalation, not
+> phantom approval.  The `escalate:cap-reached` path can trigger at R3 if the reviewer crash
+> persists across all rounds and blockers from a non-None prior round match; this masks the
+> root cause behind a cap-reached E5 label — acceptable because the human reviewer will see
+> the stuck state and can diagnose it.
 
 `blocker_signatures` must be stable slugs (category:finding-key) that do not include
 line numbers. The engine compares consecutive rounds to detect no-progress.
@@ -385,20 +379,24 @@ inputs including unknown/empty.
 
 ### §8.2 `resolve_blockers`
 
-Resolves the effective blocker count for one converge round, falling back from the
-verdict JSON to the reviewer's comment footer when the sentinel survived.
+Resolves the effective blocker count for one converge round.  The primary source is
+the structured `Verdict` extracted from the reviewer run's output by the harness.
+When `verdict` is `None` (reviewer crashed or omitted structured output), falls back
+to the comment-footer heuristic so a human-readable review comment can still drive
+the decision.
 
-**Inputs**: `pr_ref`, `round: int`, `round_started: datetime | None`
+**Inputs**: `pr_ref`, `round: int`, `round_started: datetime | None`,
+`verdict: Verdict | None = None`
 **Output**: `int | Literal["unknown"]`
 
-The Engine reads the verdict via `ForgePort.get_file_contents(pr_ref, ".converge-verdict.json")`.
-A verdict is sentinel iff `blocker_signatures` contains `"verdict-file-not-written"`.
+A verdict is sentinel iff `blocker_signatures == ["verdict-file-not-written"]`; sentinel
+verdicts are treated as absent (fallback to comment footer).
 
 | # | Condition | Output |
 |---|---|---|
-| 1 | file present and not sentinel | `.blockers` from JSON, or `"unknown"` if missing/non-numeric |
-| 2 | sentinel or file absent; `round_started` is not None | pick most-recent comment footer posted after `round_started` |
-| 3 | sentinel or file absent; `round_started` is None | pick most-recent comment footer regardless of age |
+| 1 | `verdict` is not None and not sentinel | `.blockers` from `Verdict`, or `"unknown"` if non-numeric |
+| 2 | `verdict` is None or sentinel; `round_started` is not None | pick most-recent comment footer posted after `round_started` |
+| 3 | `verdict` is None or sentinel; `round_started` is None | pick most-recent comment footer regardless of age |
 | 4 | no footer resolved | `"unknown"` |
 
 `parse_comment_blockers` extracts `🔴 <N> blockers` via regex. The in-round filter
@@ -445,7 +443,9 @@ Decides the convergence action for one round.
 `round` is typed as `Literal[1, 2, 3]`; a value outside this set is a `TypeError` (Python)
 or compile error (Rust). Implementations must not accept arbitrary integers.
 
-Sentinel normalization: any list equal to `["verdict-file-not-written"]` → `[]`.
+Sentinel normalization: any `blocker_signatures` list equal to `["verdict-file-not-written"]` → `[]`.
+This handles reviewers that mistakenly output the reserved slug, and the comment-footer
+fallback path that produces no signatures at all.
 
 **`blocker_signatures` sort requirement.** Before comparing `curr_sigs == prev_sigs` (row 3
 no-progress check), both lists must be sorted lexicographically. The reviewer contract
@@ -754,8 +754,7 @@ transparently.
 overwrites. All paths are repo-root-relative POSIX.
 
 `copy_file_on_branch` — copies `src_path` → `dest_path` in a single commit; raises if
-`src_path` absent. Used by `Engine.converge` to archive `.converge-verdict.json` as
-`.converge-verdict-rN.json` (B3 verdict history).
+`src_path` absent.
 
 `get_closing_issue` — parses PR body for `Closes #N` / `Fixes #N` / `Resolves #N`
 (case-insensitive); returns `IssueRef` or `None`. `has_issue = get_closing_issue() is not None`.
@@ -946,9 +945,6 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
       the finalize-time follow-up issue.
    b. For each round `r` from `start` to `CONVERGE_ROUNDS`:
       - Record `round_started = now()` and persist: `converge_state.set_round_started(pr_ref, round_started)`.
-      - Seed init sentinel to `.converge-verdict.json` on the PR branch:
-        `forge.put_file_on_branch(pr, ".converge-verdict.json", SENTINEL_BYTES, "chore: init converge sentinel")`
-        where `SENTINEL_BYTES` is the JSON-encoded sentinel value (§7 `Verdict`). This is a crash fail-safe.
       - Compute `specialist_refs = decide_specialists(changed_paths, r)`.
       - Build reviewer `DispatchContext` with `allowed_agent_refs = specialist_refs` (I9/D2)
         and `model = ADJUDICATION_MODEL if r == CONVERGE_ROUNDS else repo_config.model_config.swarm`.
@@ -959,28 +955,27 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
       - **Dispatch reviewer**: `harness.dispatch(reviewer_context)` → `reviewer_handle`.
       - **Await reviewer**: poll `harness.get_run_status(reviewer_handle)` until `completed`
         or `CI_WAIT_S` elapses. On timeout: `await harness.cancel(reviewer_handle)` before
-        proceeding — prevents a ghost reviewer from completing later and overwriting the next
-        round's init sentinel or verdict file.
+        proceeding — prevents a ghost reviewer from completing later and posting a stale verdict.
+      - **Read verdict**: `verdict = await harness.get_run_verdict(reviewer_handle)`.
+        Returns the `Verdict` extracted from the reviewer's structured output (a fenced JSON
+        block in the run's final message), or `None` if the reviewer crashed / omitted it.
+        The verdict is **never committed to the PR branch** — it lives only in the harness
+        `RunEventStore` for the lifetime of this engine invocation.
       - Poll `forge.get_check_runs(pr)` for CI green/red.
-      - `resolve_blockers(pr_ref, r, round_started)` → `int | "unknown"`.
+      - `resolve_blockers(pr_ref, r, round_started, verdict)` → `int | "unknown"`.
       - Source signature inputs for `decide_round`:
-        - `curr_sigs = verdict.blocker_signatures` (from the current `.converge-verdict.json`
-          after sentinel normalization per §8.2).
-        - `prev_sigs`: if `r > 1`, read `forge.get_file_contents(pr, f".converge-verdict-r{r-1}.json")`
-          and parse its `blocker_signatures`; if `r == 1`, `prev_sigs = []`.
-        - **P11 retry behavior:** When round `r` is retried (P11 re-arm), `copy_file_on_branch`
-          overwrites `.converge-verdict-r{r}.json` with the new attempt's verdict; the prior
-          attempt's file is not preserved. `prev_sigs` always reads `.converge-verdict-r{r-1}.json`
-          regardless of retry count — the no-progress check compares against the prior-numbered
-          round, not a prior attempt of the same round.
-      - Append nits from this round: `accumulated_nits.extend(verdict.nits)`.
+        - `curr_sigs = verdict.blocker_signatures` (after sentinel normalization per §8.2)
+          when `verdict` is not None; else `curr_sigs = []`.
+        - `prev_sigs`: in-memory from the previous round's `curr_sigs`; `[]` for `r == 1`.
+          **P11 retry behavior:** When round `r` is retried (P11 re-arm), `prev_sigs` retains
+          the value from round `r-1` regardless of retry count — the no-progress check
+          compares against the prior-numbered round, not a prior attempt of the same round.
+      - Append nits from this round: `accumulated_nits.extend(verdict.nits)` when `verdict`
+        is not None.
       - `decide_round(r, blockers, ci_green, prev_sigs, curr_sigs)` → token.
       - **Conditionally persist round** (only for advancing decisions, NOT P11 re-arm):
         if token is NOT `escalate:no-verdict` with `retry_count < NO_VERDICT_RETRY_CAP`:
         `converge_state.set_converge_round(pr_ref, r)`.
-      - Copy verdict (for all decisions including P11): `forge.copy_file_on_branch(pr,
-        ".converge-verdict.json", f".converge-verdict-r{r}.json")` (B3: permanent per-round
-        history file for WEBUI and the next reviewer to diff against).
    c. Act on token:
 
    > **`terminal_escalate(Ecode)` — normative shorthand used below:**
@@ -1256,8 +1251,8 @@ stateDiagram-v2
 stateDiagram-v2
     direction LR
     [*] --> Seed : enter round N (1..3)
-    Seed --> Review : write init sentinel
-    Review --> CheckCI : write verdict last
+    Seed --> Review : dispatch reviewer
+    Review --> CheckCI : emit verdict (structured output)
     CheckCI --> Decide : poll ≤ 480s
     Decide --> Approved : approve
     Decide --> Fix : fix (R1 always / R2 not stuck)

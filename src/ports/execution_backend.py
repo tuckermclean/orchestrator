@@ -67,7 +67,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from src.domain.types import RunEvent, RunStatus
-from src.ports.agent_transcript import parse_jsonl_line
+from src.ports.agent_transcript import extract_verdict_from_events, parse_jsonl_line
 from src.ports.harness import (
     ProcessResult,
     ProcessRunner,
@@ -342,6 +342,13 @@ class SubprocessBackend:
                     event_store.append(run_id, event)
 
         exit_code = await process.wait()
+
+        # Extract the reviewer verdict from the collected events before marking
+        # completion — the verdict is needed by Engine.converge before it polls
+        # get_run_verdict (SPEC §5, §8.2).
+        verdict = extract_verdict_from_events(event_store.get_events(run_id))
+        event_store.store_verdict(run_id, verdict)
+
         event_store.set_status(
             run_id,
             RunStatus(
@@ -948,6 +955,8 @@ class K8sJobBackend:
             failed = int(status.get("failed") or 0)
 
             if succeeded > 0:
+                verdict = extract_verdict_from_events(event_store.get_events(run_id))
+                event_store.store_verdict(run_id, verdict)
                 event_store.set_status(
                     run_id,
                     RunStatus(state="completed", conclusion="success"),
@@ -956,6 +965,8 @@ class K8sJobBackend:
                 break
 
             if failed > 0:
+                verdict = extract_verdict_from_events(event_store.get_events(run_id))
+                event_store.store_verdict(run_id, verdict)
                 event_store.set_status(
                     run_id,
                     RunStatus(state="completed", conclusion="failure"),

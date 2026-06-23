@@ -32,6 +32,14 @@ Dropped (returns None):
   Any line that does not parse as JSON.
   Any assistant message with no meaningful content blocks.
 
+Verdict extraction (SPEC §5, §8.2):
+  ``extract_verdict_from_events`` scans a completed run's events for a fenced
+  JSON verdict block (```json ... ```) embedded in an ``agent_message`` or
+  ``agent_result`` event.  The reviewer emits one such block as its final output;
+  the engine reads it from the run result rather than from a committed file.
+  Returns a ``Verdict`` or ``None`` when no parseable verdict is found
+  (crash fail-safe: the engine treats ``None`` as ``"unknown"`` blockers).
+
 This module contains only pure functions (no async, no I/O) — consistent with
 the spec's decision-function purity contract (AGENTS.md §5).
 """
@@ -43,7 +51,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from src.domain.types import RunEvent
+from src.domain.types import RunEvent, Verdict
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -335,4 +343,82 @@ def parse_jsonl_line(line: str) -> RunEvent | None:
     # ------------------------------------------------------------------
     # Unknown type — drop
     # ------------------------------------------------------------------
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Verdict extraction from run events (SPEC §5, §8.2)
+# ---------------------------------------------------------------------------
+
+# Matches a fenced ```json ... ``` block (non-greedy, DOTALL).
+# The reviewer emits exactly one such block as its final output.
+_VERDICT_FENCE_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+# Reserved sentinel signature — a verdict containing only this slug is not a
+# real verdict (it is the init sentinel the Engine formerly seeded on the
+# branch before dispatching the reviewer).  It must not be treated as a valid
+# reviewer result.  Since the sentinel commit path is now removed, a block
+# containing this slug means the reviewer reproduced the sentinel verbatim
+# (which should not happen in practice, but the check is retained as defence
+# in depth and for backward compatibility with SPEC §5 sentinel semantics).
+_SENTINEL_SIG = "verdict-file-not-written"
+
+
+def _is_sentinel_verdict(v: Verdict) -> bool:
+    """True when the verdict is the init sentinel (not a real reviewer output)."""
+    return v.blocker_signatures == [_SENTINEL_SIG]
+
+
+def extract_verdict_from_events(events: list[RunEvent]) -> Verdict | None:
+    """Scan a completed run's events for a fenced JSON verdict block.
+
+    The converge reviewer emits its ``Verdict`` as a single fenced JSON block
+    (``` ``json`` ... ```) in its final message.  This function scans all
+    ``agent_message`` and ``agent_result`` events in reverse order (most-recent
+    first) and returns the first parseable, non-sentinel ``Verdict`` found.
+
+    Returns ``None`` when no parseable verdict is found — the engine treats this
+    as ``"unknown"`` blockers (crash fail-safe, SPEC §5).
+
+    Pure function: no I/O, no async (AGENTS.md §5).
+
+    Security (I3): the events contain UNTRUSTED agent output.  This function
+    only JSON-parses the fenced block and validates it through the ``Verdict``
+    Pydantic model; it does not evaluate any code or interpret the output as HTML.
+    """
+    # Scan in reverse order so the reviewer's final (most-recent) message wins.
+    for event in reversed(events):
+        if event.event_type not in ("agent_message", "agent_result"):
+            continue
+
+        # Extract the text payload from the event data.
+        text: str | None = None
+        if event.event_type == "agent_message":
+            raw = event.data.get("text", "")
+            text = str(raw) if raw else None
+        elif event.event_type == "agent_result":
+            raw = event.data.get("result", "")
+            text = str(raw) if raw else None
+
+        if not text:
+            continue
+
+        # Search for a fenced JSON block within the text.
+        match = _VERDICT_FENCE_RE.search(text)
+        if match is None:
+            continue
+
+        json_str = match.group(1)
+        try:
+            verdict = Verdict.model_validate_json(json_str)
+        except (ValueError, TypeError):
+            # Malformed JSON or schema mismatch — try the next event.
+            continue
+
+        if _is_sentinel_verdict(verdict):
+            # Sentinel reproduced verbatim by the reviewer — not a real verdict.
+            continue
+
+        return verdict
+
     return None
