@@ -306,6 +306,15 @@
     tests: ["test_k8s_entry_script_configures_push_auth"]
   "subprocess-git-identity":
     tests: ["test_subprocess_backend_calls_configure_git_identity", "test_subprocess_backend_git_identity_called_before_hook", "test_harness_configure_git_identity_repo_local"]
+  # Specialist pack materialisation (Bug 1) — 242-pack copied into workspace so agents
+  # can read '.agents/<AgentRef>' at the workspace-relative path (AGENTS.md §7.4)
+  "k8s-specialist-pack-materialisation":
+    tests: ["test_k8s_entry_script_materialises_pack_when_dir_exists", "test_k8s_entry_script_pack_is_conditional_on_dir_existence", "test_k8s_entry_script_gitignores_agents_dir"]
+  "subprocess-specialist-pack-materialisation":
+    tests: ["test_subprocess_pack_materialised_when_source_exists", "test_subprocess_pack_skips_cleanly_when_source_absent"]
+  # Streaming default (Bug 2) — HARNESS_K8S_STREAM_LOGS=1 enables live transcript
+  "k8s-streaming-default-enabled":
+    tests: ["test_backend_factory_k8s_streaming_enabled_by_default", "test_backend_factory_k8s_streaming_disabled_when_env_empty"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":

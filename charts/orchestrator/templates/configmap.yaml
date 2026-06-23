@@ -36,3 +36,6 @@ data:
   # the SA job-manager in the release namespace), so no operator input needed.
   HARNESS_K8S_NAMESPACE: {{ .Release.Namespace | quote }}
   HARNESS_K8S_SERVICE_ACCOUNT: {{ include "orchestrator.serviceAccountName" . | quote }}
+  # Live pod-log streaming for the run view (issue #118).  "1" = enabled (default).
+  # Set to "" in values to disable (e.g. if CoreV1Api log streaming is unsupported).
+  HARNESS_K8S_STREAM_LOGS: {{ .Values.config.HARNESS_K8S_STREAM_LOGS | quote }}

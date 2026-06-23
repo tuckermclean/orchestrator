@@ -56,6 +56,7 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import signal
 import time
 import uuid
@@ -74,6 +75,17 @@ from src.domain.types import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _get_package_pack_dir() -> pathlib.Path:
+    """Return the package root's .agents/ directory path.
+
+    Extracted as a module-level function so tests can patch it without
+    fighting pathlib.Path.  The real implementation resolves relative to
+    this file: src/ports/harness.py → src/ports → src → package root → .agents/.
+    """
+    return pathlib.Path(__file__).parent.parent.parent / ".agents"
+
 
 # ---------------------------------------------------------------------------
 # GitHub API constants (shared with github.py — keep in sync)
@@ -542,6 +554,42 @@ class ClaudeCodeHarnessPort:
             # Best-effort: a missing .git/info is non-fatal; the converge E1 check
             # remains the backstop.
             pass
+
+        # Best-effort: copy the specialist pack from the package root's .agents/ dir
+        # into the cloned workspace so agents can read ".agents/<AgentRef>" at the
+        # workspace-relative path that orchestration contracts specify (AGENTS.md §7.4).
+        #
+        # The pack is external/baked (fetched at image build time) and is normally
+        # ABSENT in dev/CI — the repo has no .agents/ directory.  This copy is
+        # intentionally best-effort:
+        #   - If the pack source is absent, skip silently (no raise).  Dev/CI
+        #     dispatches may not need specialists; the fail-loud contract guarantee
+        #     applies only to the dispatched orchestration contract above.
+        #   - If the copy fails for any other OS reason, log and continue — the
+        #     agent will simply see no .agents/ dir and specialisation will degrade
+        #     gracefully rather than blocking the dispatch.
+        # .agents/** is a PROTECTED_PATH; add /.agents/** to .git/info/exclude so
+        # the agent's `git add -A` can never sweep the pack into a PR.
+        package_pack_dir = _get_package_pack_dir()
+        if package_pack_dir.is_dir():
+            dest_pack_dir = pathlib.Path(repo_dir) / ".agents"
+            try:
+                dest_pack_dir.mkdir(parents=True, exist_ok=True)
+                for src_path in package_pack_dir.glob("*.md"):
+                    shutil.copy2(str(src_path), str(dest_pack_dir / src_path.name))
+                # Git-ignore the materialised pack — .agents/** is a PROTECTED_PATH.
+                pack_exclude_line = "/.agents/**\n"
+                try:
+                    existing2 = exclude_path.read_text() if exclude_path.exists() else ""
+                    if pack_exclude_line not in existing2:
+                        with exclude_path.open("a") as fh:
+                            fh.write(pack_exclude_line)
+                except OSError:
+                    pass
+            except OSError:
+                # Non-fatal: pack copy failure degrades specialist availability
+                # but must never block the dispatch.
+                pass
 
     async def _configure_git_identity(self, repo_dir: str, gh_token: str) -> None:
         """Configure repo-local git identity and push credentials for the agent (#112).
