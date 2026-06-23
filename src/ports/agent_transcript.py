@@ -14,7 +14,7 @@ Security (I3):
   All agent output is UNTRUSTED.  This module:
     1. Redacts secret-like strings (``ghp_*``, ``sk-ant-*``, ``Bearer <token>``
        patterns) from text payloads before emitting them.
-    2. Caps every text field at ``_MAX_TEXT_BYTES`` (4 KiB) so a single verbose
+    2. Caps every text field at ``_MAX_TEXT_BYTES`` (32 KiB) so a single verbose
        tool output cannot inflate SSE frames to unbounded size.
     3. Never evaluates agent output as code or HTML — treated as opaque text.
 
@@ -58,8 +58,12 @@ from src.domain.types import RunEvent, Verdict
 # ---------------------------------------------------------------------------
 
 # Maximum bytes for any single text payload before truncation.
-# 4 KiB is generous for a UI line while preventing runaway SSE frames.
-_MAX_TEXT_BYTES = 4096
+# 32 KiB is the hard upper bound: large enough to store virtually all real
+# tool results and agent messages in full, while preventing unbounded SSE
+# frames and in-memory RunEventStore growth.  The …[truncated] suffix is
+# retained for the rare payload that exceeds this cap.
+# I3: redact_secrets() always runs BEFORE this truncation — never after.
+_MAX_TEXT_BYTES = 32768
 
 # Truncation suffix appended when a payload is cut short.
 _TRUNCATION_SUFFIX = "…[truncated]"
@@ -181,7 +185,7 @@ def _extract_tool_use_block(block: dict[str, Any]) -> dict[str, object] | None:
         input_summary = str(tool_input)
     return {
         "name": name,
-        "input_summary": _safe_text(input_summary, max_bytes=512),
+        "input_summary": _safe_text(input_summary),
     }
 
 
@@ -314,7 +318,7 @@ def parse_jsonl_line(line: str) -> RunEvent | None:
 
                 return RunEvent(
                     event_type="agent_tool_result",
-                    data={"content": _safe_text(content_str, max_bytes=512)},
+                    data={"content": _safe_text(content_str)},
                     timestamp=ts,
                 )
 

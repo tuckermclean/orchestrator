@@ -448,10 +448,35 @@ def test_truncate_text_short_string_unchanged() -> None:
 
 @pytest.mark.covers("§9.2-agent-transcript", "agent-transcript-i3-truncation")
 def test_truncate_text_exactly_at_limit_unchanged() -> None:
-    """String at exactly max_bytes is returned unchanged."""
+    """String at exactly max_bytes (32 KiB) is returned unchanged."""
     text = "a" * _MAX_TEXT_BYTES
     result = truncate_text(text)
     assert result == text
+
+
+@pytest.mark.covers("§9.2-agent-transcript", "agent-transcript-i3-truncation")
+def test_truncate_text_32kb_boundary() -> None:
+    """Content ≤32 KiB passes through in full; content >32 KiB gets the suffix.
+
+    This test locks in the 32 KiB (_MAX_TEXT_BYTES = 32768) hard upper bound.
+    Content within the bound must NOT be truncated; content beyond it must be.
+    """
+    # Exactly at 32 KiB — no truncation.
+    at_limit = "b" * 32768
+    assert truncate_text(at_limit) == at_limit
+
+    # One byte over — must be truncated.
+    over_limit = "b" * 32769
+    result = truncate_text(over_limit)
+    assert result.endswith(_TRUNCATION_SUFFIX), "content >32 KiB must end with truncation suffix"
+    assert len(result.encode("utf-8")) <= 32768 + len(_TRUNCATION_SUFFIX.encode("utf-8"))
+
+    # Well within the old 4 KiB boundary (5 KiB) — must NOT be truncated at 32 KiB cap.
+    within_new_cap = "c" * 5120
+    assert truncate_text(within_new_cap) == within_new_cap, (
+        "5 KiB content must pass through unchanged with the 32 KiB cap "
+        "(was erroneously truncated under the old 4 KiB cap)"
+    )
 
 
 @pytest.mark.covers("§9.2-agent-transcript", "agent-transcript-i3-truncation")
@@ -475,22 +500,22 @@ def test_long_agent_message_is_truncated() -> None:
 
 @pytest.mark.covers("§9.2-agent-transcript", "agent-transcript-i3-truncation")
 def test_long_tool_input_is_truncated() -> None:
-    """Large tool_use input summary is truncated (capped at 512 bytes)."""
-    large_input = {"data": "x" * 10000}
+    """Large tool_use input summary is truncated at _MAX_TEXT_BYTES (32 KiB)."""
+    large_input = {"data": "x" * 100_000}
     event = parse_jsonl_line(_make_assistant_tool_use("Write", large_input))
     assert event is not None
-    assert len(str(event.data["input_summary"]).encode("utf-8")) <= 512 + len(
+    assert len(str(event.data["input_summary"]).encode("utf-8")) <= _MAX_TEXT_BYTES + len(
         _TRUNCATION_SUFFIX.encode("utf-8")
     ) + 10
 
 
 @pytest.mark.covers("§9.2-agent-transcript", "agent-transcript-i3-truncation")
 def test_long_tool_result_is_truncated() -> None:
-    """Long tool_result content is truncated (capped at 512 bytes)."""
-    long_content = "result line\n" * 1000
+    """Long tool_result content is truncated at _MAX_TEXT_BYTES (32 KiB)."""
+    long_content = "result line\n" * 10_000
     event = parse_jsonl_line(_make_user_tool_result(long_content))
     assert event is not None
-    assert len(str(event.data["content"]).encode("utf-8")) <= 512 + len(
+    assert len(str(event.data["content"]).encode("utf-8")) <= _MAX_TEXT_BYTES + len(
         _TRUNCATION_SUFFIX.encode("utf-8")
     ) + 10
 
