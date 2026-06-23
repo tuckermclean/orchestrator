@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from src.domain.types import (
     LABEL_AGENT_WORK,
     LABEL_AWAITING_PROMOTION,
     LABEL_CONVERGE,
+    LABEL_IMPLEMENTING,
     LABEL_NEEDS_HUMAN,
     LABEL_TRIAGE,
     RECONCILER_CRON,
@@ -208,6 +210,56 @@ def _extract_repo(payload: dict[str, object]) -> RepoRef | None:
         str(owner_data.get("login", "")) if isinstance(owner_data, dict) else str(owner_data or "")
     )
     return RepoRef(owner=owner, name=str(repo_data.get("name", "")))
+
+
+def _get_mention_trigger() -> str:
+    """Return the @-mention trigger string for the configured bot login.
+
+    Reads GITHUB_BOT_LOGIN from the environment.  If unset, falls back to
+    "@claude" for backward compatibility.  The trigger is matched
+    case-insensitively as a substring of the comment body.
+
+    Example: GITHUB_BOT_LOGIN=orecchiette1111 → trigger "@orecchiette1111".
+    """
+    bot_login = os.environ.get("GITHUB_BOT_LOGIN", "").strip()
+    return f"@{bot_login}" if bot_login else "@claude"
+
+
+def _is_bot_author(
+    comment_data: dict[str, object],
+    payload: dict[str, object],
+) -> bool:
+    """Return True if the comment author is a bot and should be ignored.
+
+    Filters on:
+    - comment.user.type == "Bot"  (name-agnostic; orchestrator always comments as Bot)
+    - comment.user.login == GITHUB_BOT_LOGIN or "<GITHUB_BOT_LOGIN>[bot]"
+
+    The ``user.type == "Bot"`` check alone is sufficient to break the self-trigger
+    loop (the orchestrator always comments as a Bot user), but we also check the
+    login as belt-and-suspenders to guard against other Bot logins that might be
+    intentional command-issuers.
+    """
+    bot_login = os.environ.get("GITHUB_BOT_LOGIN", "").strip()
+
+    # Prefer comment.user fields; fall back to top-level sender.
+    user_data = comment_data.get("user")
+    if not isinstance(user_data, dict):
+        user_data = payload.get("sender")
+    if not isinstance(user_data, dict):
+        return False
+
+    user_type = str(user_data.get("type", "")).lower()
+    if user_type == "bot":
+        return True
+
+    # Belt-and-suspenders: also filter by login when GITHUB_BOT_LOGIN is set.
+    if bot_login:
+        login = str(user_data.get("login", ""))
+        if login in (bot_login, f"{bot_login}[bot]"):
+            return True
+
+    return False
 
 
 class OrchestratorService:
@@ -529,13 +581,84 @@ class OrchestratorService:
                 )
                 if label_name == LABEL_CONVERGE:
                     self._spawn_converge(pr_ref)
-        else:
+        elif event_name in ("issue_comment", "pull_request_review_comment"):
+            # SPEC §11.1 — comment events gate (fix: stop per-comment orchestrator spawn).
+            #
+            # Dispatch the orchestrator ONLY when ALL of these conditions hold:
+            #   1. action == "created"  (not edited / deleted)
+            #   2. Comment body contains the configured bot-mention (case-insensitive substring)
+            #   3. Author is NOT a bot / NOT the orchestrator itself — kills self-trigger loop
+            #   4. Actor is authorized: repo allowlist empty OR author ∈ allowlist
+            #   5. Subject carries the work label: issue→LABEL_AGENT_WORK, PR→LABEL_IMPLEMENTING
+            #   6. _try_claim_dispatch guard passes (in-flight dedup)
+            #
+            # Any other combination → no-op.  Unknown events fall through to no-op below.
+            action = str(payload.get("action", ""))
+            if action != "created":
+                return {"handled": True}
+
+            mention = _get_mention_trigger()
+            if comment_body is None or mention.lower() not in comment_body.lower():
+                return {"handled": True}
+
+            comment_data = payload.get("comment", {})
+            if not isinstance(comment_data, dict):
+                comment_data = {}
+            if _is_bot_author(comment_data, payload):
+                return {"handled": True}
+
+            # 4. Actor allowlist (SPEC §11.1): when the allowlist is non-empty the
+            #    comment author must be in it (authorization control — without this any
+            #    user could @-mention to trigger a dispatch).
+            actor = ""
+            user_obj = comment_data.get("user")
+            if isinstance(user_obj, dict):
+                actor = str(user_obj.get("login", ""))
+            if not actor:
+                sender = payload.get("sender")
+                if isinstance(sender, dict):
+                    actor = str(sender.get("login", ""))
+            if self._allowlist and actor not in self._allowlist:
+                return {"handled": True}
+
+            # 5. Subject must carry the work label (SPEC §11.1): an issue_comment's
+            #    issue must carry LABEL_AGENT_WORK; a review comment's PR must carry
+            #    LABEL_IMPLEMENTING.  Labels come from the webhook payload — no extra
+            #    forge round-trip.
+            if event_name == "issue_comment":
+                subject = payload.get("issue", {})
+                required_label = LABEL_AGENT_WORK
+            else:  # pull_request_review_comment
+                subject = payload.get("pull_request", {})
+                required_label = LABEL_IMPLEMENTING
+            subject_labels = subject.get("labels", []) if isinstance(subject, dict) else []
+            label_names = {
+                str(lbl.get("name", ""))
+                for lbl in subject_labels
+                if isinstance(lbl, dict)
+            }
+            if required_label not in label_names:
+                return {"handled": True}
+
+            # Only apply the in-flight claim guard when we have an issue_ref
+            # (issue_comment events always carry one; pull_request_review_comment
+            # events carry a pr_ref — use it as the claim key via a synthetic
+            # IssueRef so the dedup guard covers both event types).
+            ref_for_guard: IssueRef | None = issue_ref
+            if ref_for_guard is None and pr_ref is not None:
+                # Synthesize an IssueRef from the PR number for claim purposes.
+                ref_for_guard = IssueRef(repo=pr_ref.repo, number=pr_ref.number)
+
+            if ref_for_guard is not None and not self._try_claim_dispatch(ref_for_guard):
+                return {"handled": True}  # in-flight dedup: skip duplicate command
+
             await self.engine.dispatch(
                 event_name,
                 issue_ref=issue_ref,
                 pr_ref=pr_ref,
                 comment_body=comment_body,
             )
+        # Any other / unknown event → no-op (SPEC §11.1 "anything else → no-op")
 
         return {"handled": True}
 

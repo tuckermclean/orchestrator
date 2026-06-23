@@ -1157,13 +1157,22 @@ Entry on `issues:opened`/`issues:reopened` when `repo.intake_enabled == true`.
 |---|---|---|---|
 | `issues` | `opened` / `reopened` | `intake_enabled == true` | `Engine.intake` |
 | `issues` | `labeled` | `label == LABEL_AGENT_WORK` | `Engine.dispatch` |
-| `issue_comment` | any | body contains `@claude` AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
-| `pull_request_review_comment` | any | body contains `@claude` AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
+| `issue_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
+| `pull_request_review_comment` | `created` | body contains the bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor ∈ allowlist`) AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
 | `pull_request` | `ready_for_review` | — | `Engine.converge` |
 | `pull_request` | `labeled` | `label == LABEL_CONVERGE` | `Engine.converge` |
 | `pull_request` | `synchronize` | — | `Engine.converge` |
 | cron tick | — | — | `Engine.reconcile` per enabled repo |
 | anything else | — | — | no-op |
+
+The **bot mention** is `@<GITHUB_BOT_LOGIN>` — the configured GitHub login of the
+orchestrator's own App (e.g. `@orecchiette1111`), matched case-insensitively. When
+`GITHUB_BOT_LOGIN` is unset it falls back to `@claude`. The **author-is-not-a-bot**
+condition filters comments whose author `user.type == "Bot"` (and the bot's own
+`<login>`/`<login>[bot]`): the orchestrator posts its own comments as a Bot, so this
+breaks the self-trigger loop where an agent's comment would spawn another orchestrator
+run. Comment events route only on `action == created` (not `edited`/`deleted`) and are
+guarded by the per-entity in-flight claim so rapid duplicate commands dispatch once.
 
 `synchronize` is safe: the idempotency gate returns immediately for draft PRs (§3, §10.2).
 
