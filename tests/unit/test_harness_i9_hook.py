@@ -11,13 +11,19 @@ Named tests from SPEC §9.2 (test names must match coverage_map.yaml):
   test_security_spawn_ref_outside_allowset_rejected
   test_security_spawn_rejected_when_allowed_refs_none  (None → no hook, no env var)
 
-SPEC §9.2 / SECURITY.md §3 I9 fail-closed semantics:
-  - Missing ORCHESTRATOR_ALLOWED_AGENT_REFS env var → DENY
-  - Empty allow-set                                  → DENY
-  - Unparseable stdin                                → DENY
-  - subagent_type absent from payload                → DENY
-  - subagent_type NOT in allow-set                   → DENY
-  - subagent_type IN allow-set                       → ALLOW
+SPEC §9.2 / SECURITY.md §3 I9 fail-closed semantics (AGENTS.md §7.4 spawn model):
+  Correct specialist spawns always use subagent_type "general-purpose" and embed the
+  AgentRef in the prompt: "Act as the agent defined in .agents/<AgentRef>. ..."
+
+  Fail-closed cases (all must deny with exit code 2):
+  - Missing ORCHESTRATOR_ALLOWED_AGENT_REFS env var → DENY (exit 2)
+  - Empty allow-set                                  → DENY (exit 2)
+  - Unparseable stdin                                → DENY (exit 2)
+  - tool_input/prompt absent from payload            → DENY (exit 2)
+  - subagent_type NOT "general-purpose"              → DENY (exit 2)
+  - No ".agents/<ref>" in prompt                     → DENY (exit 2)
+  - AgentRef NOT in allow-set                        → DENY (exit 2)
+  Only ALLOW (exit 0): subagent_type == "general-purpose" AND AgentRef in allow-set
 """
 
 from __future__ import annotations
@@ -90,14 +96,26 @@ def _run_hook(
         os.environ.update(saved_env)
 
 
-def _make_task_payload(subagent_type: str) -> dict[str, Any]:
-    """Build a Task tool input payload as Claude Code delivers it."""
+def _make_task_payload(
+    agent_ref: str,
+    subagent_type: str = "general-purpose",
+    prompt: str | None = None,
+) -> dict[str, Any]:
+    """Build a Task tool input payload as Claude Code delivers it.
+
+    Per AGENTS.md §7.4, specialist spawns use subagent_type "general-purpose"
+    and embed the AgentRef in the prompt via ".agents/<AgentRef>".
+    """
+    if prompt is None:
+        prompt = (
+            f"Act as the agent defined in .agents/{agent_ref}. Read that file first."
+        )
     return {
         "tool_name": "Task",
         "tool_input": {
             "subagent_type": subagent_type,
-            "description": "do work",
-            "prompt": "please implement feature X",
+            "description": "run specialist review",
+            "prompt": prompt,
         },
     }
 
@@ -110,7 +128,7 @@ def _make_task_payload(subagent_type: str) -> dict[str, Any]:
 
 def test_hook_denies_when_env_var_missing() -> None:
     """Missing ORCHESTRATOR_ALLOWED_AGENT_REFS → DENY (fail closed)."""
-    payload = _make_task_payload("agents/reviewer.md")
+    payload = _make_task_payload("engineering-security-engineer.md")
     result = _run_hook(allowed_refs=None, stdin_payload=payload)
     assert result == 2
 
@@ -119,14 +137,14 @@ def test_hook_denies_when_env_var_missing() -> None:
 
 def test_hook_denies_when_allow_set_is_empty_string() -> None:
     """Empty string env var → empty allow-set → DENY all Task spawns."""
-    payload = _make_task_payload("agents/reviewer.md")
+    payload = _make_task_payload("engineering-security-engineer.md")
     result = _run_hook(allowed_refs="", stdin_payload=payload)
     assert result == 2
 
 
 def test_hook_denies_when_allow_set_is_whitespace_only() -> None:
     """Env var containing only commas/whitespace → empty allow-set → DENY."""
-    payload = _make_task_payload("agents/reviewer.md")
+    payload = _make_task_payload("engineering-security-engineer.md")
     result = _run_hook(allowed_refs=",,,", stdin_payload=payload)
     assert result == 2
 
@@ -135,13 +153,19 @@ def test_hook_denies_when_allow_set_is_whitespace_only() -> None:
 
 def test_hook_denies_on_invalid_json_stdin() -> None:
     """Unparseable stdin JSON → DENY (fail closed)."""
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_raw="NOT JSON {{{{")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_raw="NOT JSON {{{{",
+    )
     assert result == 2
 
 
 def test_hook_denies_on_empty_stdin() -> None:
     """Empty stdin → JSON parse error → DENY."""
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_raw="")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_raw="",
+    )
     assert result == 2
 
 
@@ -149,22 +173,124 @@ def test_hook_denies_on_empty_stdin() -> None:
 
 def test_hook_denies_when_subagent_type_absent() -> None:
     """tool_input without subagent_type → DENY."""
-    payload = {"tool_name": "Task", "tool_input": {"description": "oops"}}
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "description": "oops",
+            "prompt": (
+                "Act as the agent defined in .agents/engineering-security-engineer.md."
+            ),
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
 
 
 def test_hook_denies_when_tool_input_missing() -> None:
     """Payload without tool_input → DENY."""
     payload = {"tool_name": "Task"}
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
 
 
 def test_hook_denies_when_tool_input_not_a_dict() -> None:
     """tool_input is a non-dict → DENY."""
     payload = {"tool_name": "Task", "tool_input": ["not", "a", "dict"]}
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2
+
+
+# --- Fail-closed: subagent_type not "general-purpose" ---
+
+def test_hook_denies_when_subagent_type_not_general_purpose() -> None:
+    """subagent_type other than 'general-purpose' → DENY (per AGENTS.md §7.4).
+
+    Even if the AgentRef is in the allow-set, a non-general-purpose subagent_type
+    is a misconfigured or malicious spawn and must be denied.
+    """
+    payload = _make_task_payload(
+        "engineering-security-engineer.md",
+        # Old (buggy) style: putting the AgentRef in subagent_type directly.
+        subagent_type="engineering-security-engineer.md",
+    )
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2
+
+
+def test_hook_denies_when_subagent_type_is_arbitrary_string() -> None:
+    """Any non-'general-purpose' subagent_type → DENY (exit 2)."""
+    payload = _make_task_payload(
+        "engineering-security-engineer.md",
+        subagent_type="rogue-type",
+    )
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2
+
+
+# --- Fail-closed: prompt absent or no .agents/ marker ---
+
+def test_hook_denies_when_prompt_absent() -> None:
+    """tool_input without prompt field → DENY."""
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "subagent_type": "general-purpose",
+            "description": "do work",
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2
+
+
+def test_hook_denies_when_prompt_has_no_agents_marker() -> None:
+    """Prompt without '.agents/<ref>' → DENY (AgentRef cannot be parsed)."""
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "subagent_type": "general-purpose",
+            "description": "do work",
+            "prompt": "Please implement feature X according to the spec.",
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2
+
+
+def test_hook_denies_when_prompt_empty_string() -> None:
+    """Empty prompt string → DENY."""
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "subagent_type": "general-purpose",
+            "description": "do work",
+            "prompt": "",
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
 
 
@@ -172,17 +298,45 @@ def test_hook_denies_when_tool_input_not_a_dict() -> None:
 
 @pytest.mark.covers("§9.2", "spawn-hook-in-set-allow")
 def test_hook_allows_when_subagent_type_in_set() -> None:
-    """subagent_type in allow-set → ALLOW (exit 0)."""
-    payload = _make_task_payload("agents/reviewer.md")
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    """general-purpose + AgentRef in allow-set → ALLOW (exit 0).
+
+    This is the expected correct spawn per AGENTS.md §7.4: subagent_type is
+    'general-purpose' and the AgentRef is embedded in the prompt.
+    """
+    payload = _make_task_payload("engineering-security-engineer.md")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 0
 
 
-def test_hook_allows_when_subagent_type_in_multi_entry_set() -> None:
-    """Allow-set with multiple entries; subagent_type matches one → ALLOW."""
-    payload = _make_task_payload("agents/fixer.md")
+def test_hook_allows_when_agent_ref_in_multi_entry_set() -> None:
+    """Allow-set with multiple entries; AgentRef matches one → ALLOW."""
+    payload = _make_task_payload("engineering-code-reviewer.md")
     result = _run_hook(
-        allowed_refs="agents/reviewer.md,agents/fixer.md",
+        allowed_refs="engineering-security-engineer.md,engineering-code-reviewer.md",
+        stdin_payload=payload,
+    )
+    assert result == 0
+
+
+def test_hook_allows_prompt_with_surrounding_text() -> None:
+    """AgentRef extracted even when prompt has surrounding text → ALLOW."""
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "subagent_type": "general-purpose",
+            "description": "security review",
+            "prompt": (
+                "You are a sub-agent. "
+                "Act as the agent defined in .agents/engineering-security-engineer.md. "
+                "Read that file first before doing anything else."
+            ),
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
         stdin_payload=payload,
     )
     assert result == 0
@@ -192,28 +346,86 @@ def test_hook_allows_when_subagent_type_in_multi_entry_set() -> None:
 
 @pytest.mark.covers("§9.2", "spawn-hook-out-of-set-deny")
 def test_security_spawn_ref_outside_allowset_rejected() -> None:
-    """SPEC §9.2 / SECURITY I9: subagent_type not in allow-set → DENY.
+    """SPEC §9.2 / SECURITY I9: AgentRef not in allow-set → DENY (exit code 2).
 
-    This is the primary I9 enforcement test.  A spawned sub-agent whose
-    ref is outside the allow-set must be hard-rejected by the hook.
+    This is the primary I9 enforcement test.  A spawn whose AgentRef (in the
+    prompt's ".agents/<ref>") is outside the allow-set must be hard-rejected.
     """
     payload = _make_task_payload("rogue-agent.md")
-    result = _run_hook(allowed_refs="agents/reviewer.md,agents/fixer.md", stdin_payload=payload)
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md,engineering-code-reviewer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
 
 
 def test_hook_denies_out_of_set_single_entry_allow_set() -> None:
-    """Single-entry allow-set; different subagent_type → DENY."""
-    payload = _make_task_payload("agents/different.md")
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    """Single-entry allow-set; different AgentRef in prompt → DENY."""
+    payload = _make_task_payload("engineering-database-optimizer.md")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
 
 
 def test_hook_deny_is_case_sensitive() -> None:
-    """Allow-set matching is case-sensitive: 'Agents/Reviewer.md' != 'agents/reviewer.md'."""
-    payload = _make_task_payload("Agents/Reviewer.md")
-    result = _run_hook(allowed_refs="agents/reviewer.md", stdin_payload=payload)
+    """Allow-set matching is case-sensitive: different case → DENY."""
+    payload = _make_task_payload("Engineering-Security-Engineer.md")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
     assert result == 2
+
+
+# --- Security: verify exit code 2 is returned, not just any truthy int ---
+
+def test_hook_deny_exit_code_is_exactly_2_for_missing_env() -> None:
+    """Deny exit code must be exactly 2 (Claude Code blocks only on 2, not 1)."""
+    payload = _make_task_payload("engineering-security-engineer.md")
+    result = _run_hook(allowed_refs=None, stdin_payload=payload)
+    assert result == 2, f"Expected exit 2, got {result}"
+
+
+def test_hook_deny_exit_code_is_exactly_2_for_out_of_set() -> None:
+    """Deny exit code must be exactly 2 for out-of-set AgentRef."""
+    payload = _make_task_payload("malicious-agent.md")
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2, f"Expected exit 2, got {result}"
+
+
+def test_hook_deny_exit_code_is_exactly_2_for_non_general_purpose() -> None:
+    """Deny exit code must be exactly 2 for non-general-purpose subagent_type."""
+    payload = _make_task_payload(
+        "engineering-security-engineer.md",
+        subagent_type="engineering-security-engineer.md",
+    )
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2, f"Expected exit 2, got {result}"
+
+
+def test_hook_deny_exit_code_is_exactly_2_for_no_agents_marker() -> None:
+    """Deny exit code must be exactly 2 when prompt has no .agents/ marker."""
+    payload = {
+        "tool_name": "Task",
+        "tool_input": {
+            "subagent_type": "general-purpose",
+            "description": "do work",
+            "prompt": "Implement feature X.",
+        },
+    }
+    result = _run_hook(
+        allowed_refs="engineering-security-engineer.md",
+        stdin_payload=payload,
+    )
+    assert result == 2, f"Expected exit 2, got {result}"
 
 
 # ===========================================================================
@@ -382,7 +594,12 @@ async def test_dispatch_injects_allowed_refs_env_var_when_set() -> None:
         repo_name=_REPO_NAME,
         process_runner=_spy_runner,
     )
-    ctx = _make_context(allowed_agent_refs=["agents/reviewer.md", "agents/fixer.md"])
+    ctx = _make_context(
+        allowed_agent_refs=[
+            "engineering-security-engineer.md",
+            "engineering-code-reviewer.md",
+        ]
+    )
     with _patch_mint(), _patch_clone(), patch.object(
         ClaudeCodeHarnessPort, "_write_spawn_hook"
     ):
@@ -392,8 +609,8 @@ async def test_dispatch_injects_allowed_refs_env_var_when_set() -> None:
         "ORCHESTRATOR_ALLOWED_AGENT_REFS not found in child env"
     )
     env_val = captured_env["ORCHESTRATOR_ALLOWED_AGENT_REFS"]
-    assert "agents/reviewer.md" in env_val
-    assert "agents/fixer.md" in env_val
+    assert "engineering-security-engineer.md" in env_val
+    assert "engineering-code-reviewer.md" in env_val
 
 
 @pytest.mark.covers("§9.2", "hook-env-var-absent-when-none")
@@ -450,7 +667,7 @@ async def test_dispatch_calls_write_spawn_hook_when_refs_given() -> None:
     def _record_call(repo_dir: str) -> None:
         write_hook_calls.append(repo_dir)
 
-    ctx = _make_context(allowed_agent_refs=["agents/reviewer.md"])
+    ctx = _make_context(allowed_agent_refs=["engineering-security-engineer.md"])
     with _patch_mint(), _patch_clone(), patch.object(
         ClaudeCodeHarnessPort, "_write_spawn_hook", side_effect=_record_call
     ):
@@ -534,7 +751,7 @@ def test_build_child_env_no_allowed_refs_omits_env_var() -> None:
 def test_build_child_env_with_refs_injects_env_var() -> None:
     """When allowed_agent_refs is a list, env var is comma-joined refs."""
     port = _make_port()
-    refs = ["agents/reviewer.md", "agents/fixer.md"]
+    refs = ["engineering-security-engineer.md", "engineering-code-reviewer.md"]
     env = port._build_child_env("scoped-token", allowed_agent_refs=refs)
     assert "ORCHESTRATOR_ALLOWED_AGENT_REFS" in env
     parts = set(env["ORCHESTRATOR_ALLOWED_AGENT_REFS"].split(","))
@@ -551,7 +768,7 @@ def test_build_child_env_with_empty_refs_injects_empty_string() -> None:
 def test_build_child_env_always_has_required_keys() -> None:
     """Regardless of allowed_agent_refs, I3 keys are always present."""
     port = _make_port()
-    for refs in [None, [], ["agents/reviewer.md"]]:
+    for refs in [None, [], ["engineering-security-engineer.md"]]:
         env = port._build_child_env("gh-token", allowed_agent_refs=refs)
         assert "CLAUDE_CODE_OAUTH_TOKEN" in env
         assert "GH_TOKEN" in env

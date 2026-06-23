@@ -113,7 +113,14 @@ bodies must never be used to construct, select, or modify an `AgentRef` string.
 
 **Mechanisation (D2 / `SPEC.md §9.2`).** Engine sets `allowed_agent_refs =
 decide_specialists(changed_paths, round)` in `DispatchContext`. Harness adapter **must
-reject** out-of-set spawns. When `None` (implementer/orchestrator dispatches), harness-level
+reject** out-of-set spawns. The hook (baked into the agent-runner image at
+`/opt/orchestrator/i9_spawn_hook.py`) validates spawns as follows:
+1. `subagent_type` must equal `"general-purpose"` (per `AGENTS.md §7.4`); any other value → DENY.
+2. The `AgentRef` is parsed from the prompt's `.agents/<AgentRef>` marker (requires the
+   `.agents/` prefix; robust to surrounding text); absent marker → DENY.
+3. The parsed `AgentRef` must be in the allow-set derived from `decide_specialists`; absent → DENY.
+All deny paths exit 2 (the only Claude Code PreToolUse blocking exit code; exit 1 is non-blocking).
+When `allowed_agent_refs` is `None` (implementer/orchestrator dispatches), harness-level
 enforcement is disabled; I9 is enforced via agent-contract discipline instead (those agents
 select from hardcoded routing tables, not contributor text).
 
