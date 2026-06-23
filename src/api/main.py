@@ -13,6 +13,9 @@ import uvicorn
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import FileResponse
+from starlette.types import Scope
 
 from src.api.auth import hash_password
 from src.api.auth_routes import _make_auth_router
@@ -48,6 +51,42 @@ _log = logging.getLogger(__name__)
 
 _VERSION: str = os.environ.get("ORCHESTRATOR_VERSION", "0.0.0-dev")
 _GIT_SHA: str = (os.environ.get("ORCHESTRATOR_GIT_SHA", "unknown") or "unknown")[:7]
+
+
+class SPAStaticFiles(StaticFiles):
+    """StaticFiles subclass that serves index.html for any unmatched client path.
+
+    BrowserRouter (history-mode routing) requires the server to return
+    index.html for every client-side route so the SPA can render the correct
+    page on a full-page load or refresh.  The standard StaticFiles raises a
+    404 for paths that don't map to a real file; this subclass catches that
+    404 and returns index.html instead, letting the client router take over.
+
+    Starlette's Mount("/", ...) matches every request that falls through the
+    FastAPI route table — including unmatched /api/* paths.  To preserve the
+    API's own 404 semantics, paths under "api/" are never served index.html;
+    the 404 is re-raised so Starlette's exception handler converts it to JSON.
+    """
+
+    # Prefixes that must NOT fall back to index.html.  These paths carry API
+    # semantics: a 404 means "resource not found", not "unknown client route".
+    _API_PREFIXES: tuple[str, ...] = ("api/",)
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            # Do not swallow 404s from API paths — they mean "resource not found".
+            # Starlette strips the mount prefix, so "/api/foo" arrives as "api/foo".
+            if any(path.startswith(prefix) for prefix in self._API_PREFIXES):
+                raise
+            # Serve index.html so the SPA router can handle the path.
+            # self.directory is a str (set by StaticFiles.__init__); use Path()
+            # to join safely.
+            index = Path(str(self.directory)) / "index.html"
+            return FileResponse(str(index), media_type="text/html")
 
 
 def _has_prod_creds() -> bool:
@@ -177,10 +216,14 @@ def create_app(
     if webhook_secret:
         app.include_router(_make_webhook_router(service, webhook_secret))
 
-    # Serve Vite build if it exists
+    # Serve Vite build if it exists.  SPAStaticFiles is used instead of the
+    # bare StaticFiles so that any GET that doesn't match a real file in dist/
+    # receives index.html (200) rather than a 404 — this is required for
+    # BrowserRouter (history-mode) deep-links and refreshes.  API routes are
+    # registered above and will never reach this mount.
     ui_dist = Path(__file__).parent.parent.parent / "ui" / "dist"
     if ui_dist.exists():
-        app.mount("/", StaticFiles(directory=str(ui_dist), html=True), name="static")
+        app.mount("/", SPAStaticFiles(directory=str(ui_dist), html=True), name="static")
 
     return app
 
