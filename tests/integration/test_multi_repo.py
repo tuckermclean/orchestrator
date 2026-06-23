@@ -89,7 +89,14 @@ def _make_service(
 
 @pytest.mark.asyncio
 async def test_per_repo_allowlist_routing_admits_listed_author() -> None:
-    """Event for repo A uses repo A's allowlist — listed author admitted."""
+    """Event for repo A uses repo A's allowlist — listed author admitted by Gate 1.
+
+    Two-gate flow: Gate 1 (trust) sets [LABEL_TRIAGE] only.
+    LABEL_AGENT_WORK is applied by Gate 2 after the triager verdict.
+    This test verifies Gate 1 runs and LABEL_AWAITING_PROMOTION is NOT set.
+    """
+    from src.domain.types import LABEL_TRIAGE
+
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     audit = await _fresh_audit()
@@ -107,8 +114,12 @@ async def test_per_repo_allowlist_routing_admits_listed_author() -> None:
 
     assert result["handled"] is True
     issue = await forge.get_issue(issue_ref)
-    assert LABEL_AGENT_WORK in issue.labels, "alice should be admitted (allowlisted)"
+    # Gate 1 sets [LABEL_TRIAGE] only for admitted authors (two-gate flow)
+    assert LABEL_TRIAGE in issue.labels, "Gate 1 must set LABEL_TRIAGE"
     assert LABEL_AWAITING_PROMOTION not in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "LABEL_AGENT_WORK set by Gate 2 (not Gate 1) — triager verdict required"
+    )
 
 
 @pytest.mark.asyncio
@@ -158,15 +169,25 @@ async def test_per_repo_allowlist_routing_repo_b_different_allowlist() -> None:
     a_issue = await forge.get_issue(issue_a)
     assert LABEL_AWAITING_PROMOTION in a_issue.labels
 
-    # Event for repo B — bob should be admitted
+    # Event for repo B — bob should be admitted by Gate 1 → [LABEL_TRIAGE] only
+    # (LABEL_AGENT_WORK comes later from Gate 2 after triager verdict)
+    from src.domain.types import LABEL_TRIAGE
+
     await service.handle_event("issues", _issue_payload(_REPO_B, issue_number=2))
     b_issue = await forge.get_issue(issue_b)
-    assert LABEL_AGENT_WORK in b_issue.labels
+    assert LABEL_TRIAGE in b_issue.labels
+    assert LABEL_AWAITING_PROMOTION not in b_issue.labels
 
 
 @pytest.mark.asyncio
 async def test_owner_always_admitted_per_repo() -> None:
-    """Repo owner is admitted even with an empty allowlist (default-deny, owner-always-in)."""
+    """Repo owner is admitted by Gate 1 even with empty allowlist (owner-always-in).
+
+    Two-gate flow: Gate 1 sets [LABEL_TRIAGE] only for admitted owner.
+    LABEL_AWAITING_PROMOTION must not appear after Gate 1 for the owner.
+    """
+    from src.domain.types import LABEL_TRIAGE
+
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     audit = await _fresh_audit()
@@ -183,7 +204,12 @@ async def test_owner_always_admitted_per_repo() -> None:
     await service.handle_event("issues", payload)
 
     issue = await forge.get_issue(issue_ref)
-    assert LABEL_AGENT_WORK in issue.labels
+    # Gate 1: owner admitted → [LABEL_TRIAGE] only; AWAITING_PROMOTION not set
+    assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
+    assert LABEL_AGENT_WORK not in issue.labels, (
+        "Gate 2 applies LABEL_AGENT_WORK after triager verdict, not Gate 1"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +349,13 @@ async def test_reconcile_now_empty_registry_returns_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_no_registry_backward_compat_handle_event() -> None:
-    """Without a registry, handle_event works as before (uses global allowlist/owner)."""
+    """Without a registry, handle_event runs Gate 1 (uses global allowlist/owner).
+
+    Two-gate flow: Gate 1 sets [LABEL_TRIAGE] only for admitted author.
+    The test verifies Gate 1 ran (LABEL_TRIAGE present, AWAITING_PROMOTION absent).
+    """
+    from src.domain.types import LABEL_TRIAGE
+
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     audit = await _fresh_audit()
@@ -347,7 +379,9 @@ async def test_no_registry_backward_compat_handle_event() -> None:
 
     assert result["handled"] is True
     issue = await forge.get_issue(issue_ref)
-    assert LABEL_AGENT_WORK in issue.labels
+    # Gate 1 admits alice → [LABEL_TRIAGE] only (Gate 2 applies LABEL_AGENT_WORK)
+    assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
 
 
 @pytest.mark.asyncio
@@ -397,9 +431,12 @@ async def test_run_intake_uses_per_repo_allowlist() -> None:
     handle = await service.run_intake(issue_ref)
     assert handle is not None
 
+    from src.domain.types import LABEL_TRIAGE
+
     issue = await forge.get_issue(issue_ref)
-    # carol is in repo A's allowlist — should be admitted despite empty global list
-    assert LABEL_AGENT_WORK in issue.labels
+    # carol is in repo A's allowlist — admitted by Gate 1 → [LABEL_TRIAGE] only
+    assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
 
 
 @pytest.mark.asyncio
@@ -425,8 +462,12 @@ async def test_run_intake_fallback_without_registry() -> None:
     handle = await service.run_intake(issue_ref)
     assert handle is not None
 
+    from src.domain.types import LABEL_TRIAGE
+
     issue = await forge.get_issue(issue_ref)
-    assert LABEL_AGENT_WORK in issue.labels
+    # Gate 1 admits alice → [LABEL_TRIAGE] only (Gate 2 deferred)
+    assert LABEL_TRIAGE in issue.labels
+    assert LABEL_AWAITING_PROMOTION not in issue.labels
 
 
 # ---------------------------------------------------------------------------

@@ -365,10 +365,10 @@ class OrchestratorService:
         # dispatch does not permanently block re-dispatch.
         self._dispatch_guards: dict[str, asyncio.Task[None]] = {}
 
-        # In-flight triager-divergence reconciliation tasks, keyed by issue.
-        # Reconciliation runs after a delay (to give the triager time to post its
-        # comment) and is idempotent — spawned at most once per intake run.
-        self._triager_reconcile_tasks: dict[str, asyncio.Task[bool]] = {}
+        # In-flight triager-gate tasks, keyed by issue.
+        # Gate 2 runs after a delay (to give the triager time to post its comment)
+        # and is idempotent — spawned at most once per intake run.
+        self._triager_reconcile_tasks: dict[str, asyncio.Task[str]] = {}
 
     # -----------------------------------------------------------------------
     # Lifecycle
@@ -434,7 +434,7 @@ class OrchestratorService:
                 pass
         self._dispatch_guards.clear()
 
-        # Drain in-flight triager-divergence reconciliation tasks.
+        # Drain in-flight triager-gate tasks.
         for rtask in list(self._triager_reconcile_tasks.values()):
             rtask.cancel()
         for rtask in list(self._triager_reconcile_tasks.values()):
@@ -763,17 +763,22 @@ class OrchestratorService:
         issue_ref: IssueRef,
         intake_decision: str,
     ) -> bool:
-        """Spawn a background task to detect/surface intake–triager recommendation divergence.
+        """Spawn the deferred triager gate (Gate 2) as a background task.
 
         Waits ``triager_reconcile_delay_s`` seconds before calling
-        ``intake_engine.reconcile_triager_divergence`` — giving the triager agent
-        time to complete and post its structured comment.
+        ``intake_engine.apply_triager_gate`` — giving the triager agent time to
+        complete and post its structured comment with the machine-readable verdict.
 
-        De-duplicated per issue: if a reconciliation for this issue is already
-        in flight, returns False (idempotent on re-delivery).
+        Gate 2 reads the verdict and:
+          - actionable     → adds LABEL_AGENT_WORK (fires orchestrator via issues:labeled).
+          - not-actionable → adds LABEL_AWAITING_PROMOTION + comment.
+          - no verdict     → adds LABEL_AWAITING_PROMOTION + fallback comment (safe).
+
+        De-duplicated per issue: if a gate task for this issue is already in flight,
+        returns False (idempotent on re-delivery).
 
         Returns True if a new task was spawned, False if one was already in flight.
-        SPEC §10.4 step 6.
+        SPEC §10.4 two-gate flow.
         """
         key = f"{issue_ref.repo.owner}/{issue_ref.repo.name}#{issue_ref.number}"
         existing = self._triager_reconcile_tasks.get(key)
@@ -782,24 +787,24 @@ class OrchestratorService:
 
         delay = self._triager_reconcile_delay_s
 
-        async def _reconcile() -> bool:
+        async def _gate() -> str:
             import asyncio as _asyncio
 
             await _asyncio.sleep(delay)
             try:
-                return await intake_engine.reconcile_triager_divergence(
+                return await intake_engine.apply_triager_gate(
                     issue_ref, intake_decision
                 )
             except Exception:
                 _log.exception(
-                    "Triager divergence reconciliation failed for %s", key
+                    "Triager gate failed for %s", key
                 )
-                return False
+                return "error"
 
-        task: asyncio.Task[bool] = asyncio.create_task(_reconcile())
+        task: asyncio.Task[str] = asyncio.create_task(_gate())
         self._triager_reconcile_tasks[key] = task
 
-        def _done(t: asyncio.Task[bool]) -> None:
+        def _done(t: asyncio.Task[str]) -> None:
             if self._triager_reconcile_tasks.get(key) is t:
                 del self._triager_reconcile_tasks[key]
 

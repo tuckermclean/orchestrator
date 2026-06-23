@@ -1,4 +1,21 @@
-"""Engine.intake — intake decision + atomic label swap + triager dispatch + audit."""
+"""Engine.intake — intake decision + atomic label swap + triager dispatch + triager gate.
+
+Two-gate flow (SPEC §10.4):
+
+  Gate 1 — Trust (decide_intake):  pure, synchronous, owner/allowlist check.
+    admit  → set [LABEL_TRIAGE], dispatch triager.  Do NOT add LABEL_AGENT_WORK yet.
+    queue  → set [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION].  (No triager gate needed —
+             already conservative; human must promote.)
+
+  Gate 2 — Content (apply_triager_gate):  deferred, reads triager verdict comment.
+    actionable     → add LABEL_AGENT_WORK → fires issues:labeled → orchestrator.
+    not-actionable → add LABEL_AWAITING_PROMOTION → issue enters human triage queue.
+    no verdict yet → safe fallback — leave [LABEL_TRIAGE] only (awaiting human).
+
+The triager is read-only (I5): it posts one structured comment containing a
+``<!-- triager-verdict: actionable|not-actionable -->`` marker.  The control plane
+(apply_triager_gate) reads that marker and applies the work label — never the triager.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +24,9 @@ from dataclasses import dataclass
 from src.db.audit import AuditLog
 from src.decisions.intake import decide_intake
 from src.decisions.triager_reconcile import (
-    TRIAGER_REC_QUEUE,
+    TRIAGER_VERDICT_ACTIONABLE,
     is_triager_comment,
-    parse_triager_recommendation,
+    parse_triager_verdict,
 )
 from src.domain.types import (
     DEFAULT_SWARM_MODEL,
@@ -28,8 +45,7 @@ class IntakeResult:
     """Result of ``IntakeEngine.intake``.
 
     Carries both the triager ``RunHandle`` and the ``decision`` so callers can
-    spawn the divergence-reconciliation background task with the correct decision
-    string without re-deriving it.
+    spawn the triager-gate background task with the correct decision string.
     """
 
     handle: RunHandle | None
@@ -45,14 +61,21 @@ _TRIAGER_CONTRACT = "agents/triager.md"
 # Triager max turns — a single structured comment; low cap
 _TRIAGER_MAX_TURNS = 10
 
-# Reconciliation comment template — posted on the issue when intake auto-admits
-# despite the triager recommending caution (SPEC §10.4 reconciliation step).
-_RECONCILIATION_COMMENT = (
-    "<!-- orchestrator:intake-reconciliation -->\n"
-    "**Intake reconciliation note:** this issue was auto-admitted ({reason}) "
-    "despite the triager recommending *{triager_rec}*. "
-    "The intake decision (trust axis) takes precedence; the triager recommendation "
-    "is advisory (scope/risk axis). No action required — recorded for audit transparency."
+# Comment posted when gate falls back to awaiting-human (no verdict in window).
+_NO_VERDICT_COMMENT = (
+    "<!-- orchestrator:intake-no-verdict -->\n"
+    "**Intake gate:** the triager did not post a machine-readable verdict within the "
+    "expected window. This issue has been placed in the human triage queue "
+    "(`awaiting-promotion`) as a safe fallback. An operator can promote it once "
+    "they have reviewed the issue."
+)
+
+# Comment posted when gate is not actionable (triager says not-actionable or no verdict).
+_NOT_ACTIONABLE_COMMENT = (
+    "<!-- orchestrator:intake-not-actionable -->\n"
+    "**Intake gate:** the triager classified this issue as **not actionable for "
+    "autonomous dispatch** ({reason}). It has been placed in the human triage queue "
+    "(`awaiting-promotion`). An operator can promote it after review."
 )
 
 
@@ -76,36 +99,31 @@ class IntakeEngine:
         self.owner = owner
 
     async def intake(self, issue_ref: IssueRef) -> IntakeResult:
-        """Run the intake gate for one issue.
+        """Run the intake gate for one issue — Gate 1 (trust) only.
 
-        Steps (SPEC §10.4):
+        Steps (SPEC §10.4 two-gate flow):
           1. Fetch the issue.
-          1a. Idempotency guard (SPEC §10 intent): if the issue already carries
-              LABEL_TRIAGE, intake has already run — skip to avoid re-dispatching
-              a second triager.  This protects against re-delivery of opened events
-              and the labeled-feedback loop fixed in issue #108.
+          1a. Idempotency guard: if the issue already carries LABEL_TRIAGE, intake
+              has already run — skip to avoid re-dispatching a redundant triager.
           2. decide_intake(issue, allowlist) → 'admit' | 'queue'  [pure, sync — I4]
           3. Dispatch triager (forge_token_scope='repo-comment' — I5).
-          4. set_labels([LABEL_TRIAGE, LABEL_AGENT_WORK | LABEL_AWAITING_PROMOTION])  (atomic — I7)
+          4. admit → set_labels([LABEL_TRIAGE])             — I7: no LABEL_AGENT_WORK yet;
+                                                               orchestrator must NOT fire.
+             queue → set_labels([LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])  — unchanged.
           5. Write audit record to DB (I6) — after observable state is committed.
-          6. Return IntakeResult(handle, decision) so callers can spawn the divergence-
-             reconciliation background task (SPEC §10.4 step 6).
+          6. Return IntakeResult(handle, decision) so the caller (OrchestratorService)
+             can spawn the deferred Gate 2 (apply_triager_gate) as a background task.
 
-        Returns ``IntakeResult(handle=None, decision=None)`` when intake was skipped
-        (idempotency guard fired) or ``IntakeResult(handle, decision)`` otherwise.
+        Gate 2 (apply_triager_gate) runs after triager_reconcile_delay_s, reads the
+        triager verdict, and conditionally adds LABEL_AGENT_WORK.
 
-        Note: triager divergence reconciliation (SPEC §10.4 step 6) is performed
-        asynchronously via ``reconcile_triager_divergence`` after the triager agent
-        has posted its comment.  The caller (OrchestratorService) spawns that step
-        as a background task so intake itself remains non-blocking.
+        Returns IntakeResult(handle=None, decision=None) when intake was skipped
+        (idempotency guard fired) or IntakeResult(handle, decision) otherwise.
         """
         issue = await self.forge.get_issue(issue_ref)
 
-        # Step 1a: idempotency guard — LABEL_TRIAGE is set atomically in step 4 of
-        # the first intake run.  Its presence means intake already completed for this
-        # issue; re-running would dispatch a redundant triager and override labels.
-        # This is the defence-in-depth guard required by SPEC §10's idempotency intent
-        # and the fix for the labeled-feedback loop in issue #108.
+        # Step 1a: idempotency guard — LABEL_TRIAGE is set atomically in step 4.
+        # Its presence means intake already completed for this issue.
         if LABEL_TRIAGE in issue.labels:
             return IntakeResult(handle=None, decision=None)
 
@@ -123,9 +141,12 @@ class IntakeEngine:
         )
         triager_handle = await self.harness.dispatch(triager_context)
 
-        # Step 4: atomic label swap (I7 — set_labels has PUT semantics; no TOCTOU window)
+        # Step 4: atomic label swap (I7 — set_labels has PUT semantics; no TOCTOU window).
+        # IMPORTANT: for 'admit', we set ONLY [LABEL_TRIAGE] — NOT LABEL_AGENT_WORK.
+        # The orchestrator must NOT fire yet; Gate 2 (apply_triager_gate) applies
+        # LABEL_AGENT_WORK only after the triager classifies the issue as actionable.
         if decision == "admit":
-            await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AGENT_WORK])
+            await self.forge.set_labels(issue_ref, [LABEL_TRIAGE])
         else:
             await self.forge.set_labels(issue_ref, [LABEL_TRIAGE, LABEL_AWAITING_PROMOTION])
 
@@ -138,83 +159,107 @@ class IntakeEngine:
 
         return IntakeResult(handle=triager_handle, decision=decision)
 
-    async def reconcile_triager_divergence(
+    async def apply_triager_gate(
         self,
         issue_ref: IssueRef,
         intake_decision: str,
-    ) -> bool:
-        """Detect and surface intake/triager recommendation divergence (SPEC §10.4 step 6).
+    ) -> str:
+        """Gate 2 — read the triager verdict and apply the work label (or queue).
 
-        Called AFTER the triager agent has completed and posted its structured comment.
-        Reads the issue's comments, finds the triager comment (identified by the
-        ``## Triage Summary`` header), parses its ``**Recommended action**`` field, and
-        compares it against ``intake_decision``.
+        Called AFTER the triager agent has completed and posted its structured comment
+        (after a delay of triager_reconcile_delay_s).
 
-        Divergence condition: ``intake_decision == "admit"`` AND triager recommends
-        ``"queue for human review"``.  The inverse (decision=queue, triager=admit)
-        is not a concern — the system is conservative when it queues.
+        This replaces the former ``reconcile_triager_divergence`` advisory behavior
+        with a true dispatch gate (SPEC §10.4 two-gate flow).
 
-        When divergence is detected:
-          - Posts a reconciliation comment on the issue (human-visible; the control plane
-            posts it directly, not the triager agent, so I5 is preserved).
-          - Writes an ``"intake:triager-divergence"`` audit record (I6) with the
-            triager recommendation in the ``escalation_cause`` field.
+        Logic:
+          - Read issue comments; find the triager comment.
+          - Parse the ``<!-- triager-verdict: ... -->`` marker.
+          - actionable  → forge.add_label(LABEL_AGENT_WORK) → issues:labeled → I2.
+          - not-actionable → forge.add_label(LABEL_AWAITING_PROMOTION) + short comment.
+          - no verdict in window → forge.add_label(LABEL_AWAITING_PROMOTION) + fallback
+            comment; do NOT auto-admit (safe fallback — the whole point is the triager
+            gates; SPEC §10.4 gate constraint).
 
-        When they agree, this method is a no-op (returns False).
+        Only runs when intake_decision == 'admit' (Gate 1 admitted the author by trust).
+        If intake_decision == 'queue', the issue is already in AWAITING_PROMOTION —
+        Gate 2 is a no-op.
 
-        Returns True if a divergence was detected and surfaced, False otherwise.
+        Returns one of: 'applied-agent-work', 'applied-awaiting-promotion', 'no-op'.
 
-        Ordering: this method must be called after the triager agent has posted its
-        comment (i.e. after the triager run completes).  In ``OrchestratorService``,
-        it is spawned as a background task (``_spawn_triager_reconcile``) that waits
-        ``triager_reconcile_delay_s`` seconds before reading comments, giving the
-        triager time to complete.  See SPEC §10.4 step 6.
+        Preserves I5: the triager only comments; this method (the control plane)
+        applies the work label.
+        Preserves I1: non-actionable verdict → awaiting-promotion; human must promote.
+        Preserves I7: LABEL_AGENT_WORK and LABEL_AWAITING_PROMOTION never coexist
+        (set_labels was PUT-semantics at intake; here we add_label onto [LABEL_TRIAGE]
+        only — no overlap risk).
+        Audit record I6: written after every label mutation.
         """
         if intake_decision != "admit":
-            # Only admit decisions can diverge from a "queue" recommendation.
-            # If intake decided queue, we're already conservative — no reconciliation needed.
-            return False
+            # Gate 1 already queued the issue — Gate 2 is a no-op.
+            return "no-op"
 
+        # Verify the issue is still in the expected post-admit state:
+        # [LABEL_TRIAGE] only (Gate 1 set this, Gate 2 not yet run).
+        # If LABEL_AGENT_WORK or LABEL_AWAITING_PROMOTION is already present,
+        # Gate 2 already ran (re-delivery) — idempotency: skip.
+        issue = await self.forge.get_issue(issue_ref)
+        if LABEL_AGENT_WORK in issue.labels or LABEL_AWAITING_PROMOTION in issue.labels:
+            return "no-op"
+
+        # Read the triager's structured comment and parse the machine-readable verdict.
         comments = await self.forge.list_comments(issue_ref)
-        triager_rec: str | None = None
+        verdict: str | None = None
         for comment in comments:
             if is_triager_comment(comment.body):
-                triager_rec = parse_triager_recommendation(comment.body)
-                break  # first triager comment wins (should be exactly one per SPEC §10.4)
+                verdict = parse_triager_verdict(comment.body)
+                break  # first triager comment wins (exactly one per SPEC §10.4)
 
-        if triager_rec is None:
-            # Triager comment not yet posted or not parseable — no divergence to surface.
-            return False
+        if verdict == TRIAGER_VERDICT_ACTIONABLE:
+            # Triager classified the issue as actionable for autonomous dispatch.
+            # Add LABEL_AGENT_WORK → fires issues:labeled → I2 → orchestrator.
+            # I5 preserved: the control plane (not the triager) applies the label.
+            await self.forge.add_label(issue_ref, LABEL_AGENT_WORK)
+            await self.audit.record(
+                repo=issue_ref.repo,
+                entity_ref=issue_ref,
+                action="intake:gate-actionable",
+            )
+            return "applied-agent-work"
 
-        if triager_rec != TRIAGER_REC_QUEUE:
-            # Triager also recommends admit (or close) — no divergence.
-            return False
+        elif verdict is not None:
+            # Triager explicitly said not-actionable (risk flag, scope unclear, etc.)
+            reason = "triager classified this issue as not actionable"
+            await self.forge.add_label(issue_ref, LABEL_AWAITING_PROMOTION)
+            await self.forge.post_comment(
+                issue_ref,
+                _NOT_ACTIONABLE_COMMENT.format(reason=reason),
+            )
+            await self.audit.record(
+                repo=issue_ref.repo,
+                entity_ref=issue_ref,
+                action="intake:gate-not-actionable",
+                escalation_cause=f"triager_verdict={verdict}",
+            )
+            return "applied-awaiting-promotion"
 
-        # Divergence detected: intake admitted, triager recommends caution.
-        # Determine the admission reason for the reconciliation note.
-        reason = _admission_reason(self.allowlist)
-
-        body = _RECONCILIATION_COMMENT.format(
-            reason=reason,
-            triager_rec=triager_rec,
-        )
-        await self.forge.post_comment(issue_ref, body)
-
-        # Audit the divergence (I6) — escalation_cause field carries the triager rec.
-        await self.audit.record(
-            repo=issue_ref.repo,
-            entity_ref=issue_ref,
-            action="intake:triager-divergence",
-            escalation_cause=f"triager_rec={triager_rec}",
-        )
-
-        return True
+        else:
+            # No triager verdict found within the window — safe fallback.
+            # Do NOT auto-admit; leave issue awaiting human (I1 preserved).
+            await self.forge.add_label(issue_ref, LABEL_AWAITING_PROMOTION)
+            await self.forge.post_comment(issue_ref, _NO_VERDICT_COMMENT)
+            await self.audit.record(
+                repo=issue_ref.repo,
+                entity_ref=issue_ref,
+                action="intake:gate-no-verdict",
+            )
+            return "applied-awaiting-promotion"
 
 
 def _admission_reason(allowlist: list[str]) -> str:
     """Return a short human-readable description of why the issue was auto-admitted.
 
-    Used in the reconciliation comment body.  Pure, synchronous.
+    Used in gate comment bodies.  Pure, synchronous.
     """
     if not allowlist:
         return "owner-only default — empty allowlist admits the repo owner"

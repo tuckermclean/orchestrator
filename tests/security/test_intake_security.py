@@ -123,6 +123,8 @@ async def test_security_triage_agent_read_only() -> None:
 
     This applies to BOTH the admit path and the queue path — in both cases the
     triager posts a structured comment and must never have branch-write access.
+    Gate 1 (trust) dispatches the triager; Gate 2 (apply_triager_gate) applies labels.
+    The triager itself never applies any labels (I5 preserved).
     """
     forge = FakeForgePort()
     harness = FakeHarnessPort()
@@ -159,6 +161,55 @@ async def test_security_triage_agent_read_only() -> None:
         assert ctx.forge_token_scope == "repo-comment", (
             f"Triager dispatched with scope {ctx.forge_token_scope!r} instead of 'repo-comment'"
         )
+
+
+async def test_security_gate2_applies_agent_work_not_triager() -> None:
+    """I5 preserved: LABEL_AGENT_WORK is applied by the control plane (Gate 2), not the triager.
+
+    The triager only posts a comment with a machine-readable verdict.  Gate 2
+    (apply_triager_gate, running in the control plane) reads that verdict and
+    applies the label.  Zero repo-branch dispatches happen during Gate 2.
+    """
+    from src.domain.types import LABEL_AGENT_WORK, LABEL_TRIAGE
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    audit = await _fresh_audit()
+
+    issue_ref = IssueRef(repo=_REPO, number=12)
+    # Post-Gate-1 state: [LABEL_TRIAGE] only
+    forge.seed_issue(issue_ref, author="alice", labels=[LABEL_TRIAGE])
+
+    engine = IntakeEngine(
+        forge=forge,
+        harness=harness,
+        session=session,
+        audit=audit,
+        allowlist=["alice"],
+        owner=_REPO.owner,
+    )
+
+    # Seed actionable triager comment
+    _ACTIONABLE = (
+        "## Triage Summary\n"
+        "**Recommended action**: admit for autonomous dispatch\n"
+        "\n<!-- triager-verdict: actionable -->"
+    )
+    await forge.post_comment(issue_ref, _ACTIONABLE)
+
+    # Gate 2 runs (no harness dispatch occurs — it only mutates forge labels)
+    dispatch_count_before = len(harness.dispatch_calls)
+    await engine.apply_triager_gate(issue_ref, "admit")
+
+    # No new dispatch (Gate 2 applies labels directly, does not dispatch any agent)
+    assert len(harness.dispatch_calls) == dispatch_count_before, (
+        "Gate 2 must not dispatch any agent — it applies labels directly (I5)"
+    )
+
+    # LABEL_AGENT_WORK was applied by Gate 2 (control plane)
+    issue = await forge.get_issue(issue_ref)
+    assert LABEL_AGENT_WORK in issue.labels
 
 
 # ---------------------------------------------------------------------------
