@@ -21,6 +21,9 @@ export interface RunSummary {
   started_at: string;
   completed_at: string | null;
   model?: string | null;
+  // ISO-8601 UTC timestamp at which the session/usage quota resets.
+  // Non-null only when status === "awaiting_quota".
+  quota_reset_at?: string | null;
 }
 
 export interface RunEvent {
@@ -46,6 +49,7 @@ export interface RunDetail extends RunSummary {
   issue_ref?: { repo: { owner: string; name: string }; number: number } | null;
   build_status?: string | null;
   changed_files?: number | null;
+  // Inherited from RunSummary: quota_reset_at?: string | null
 }
 
 // Converge detail (WEBUI.md §5.4) — per-round verdicts, specialists, CI grid.

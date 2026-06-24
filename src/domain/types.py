@@ -62,12 +62,17 @@ class RunHandle(BaseModel):
 # ---------------------------------------------------------------------------
 
 RunState = Literal["queued", "in_progress", "completed"]
-RunConclusion = Literal["success", "failure", "cancelled"]
+RunConclusion = Literal["success", "failure", "cancelled", "awaiting_quota"]
 
 
 class RunStatus(BaseModel):
     state: RunState
     conclusion: RunConclusion | None = None
+    # ISO-8601 UTC timestamp at which the session/usage limit is expected to reset.
+    # Set when conclusion == "awaiting_quota" and the reset time was parseable from
+    # Claude Code's output.  None means the reset time is unknown; the reconciler
+    # falls back to HARNESS_COOLDOWN_S in that case.
+    quota_reset_at: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +189,9 @@ class RunSummary(BaseModel):
     started_at: datetime
     completed_at: datetime | None = None
     model: str | None = None  # dispatched model id (e.g. "claude-opus-4-8"); None on older rows
+    # ISO-8601 UTC timestamp at which the session/usage quota is expected to reset.
+    # Non-None only when status == "awaiting_quota" (SPEC §14.8).
+    quota_reset_at: str | None = None
 
 
 class RunEvent(BaseModel):
@@ -206,6 +214,9 @@ class RunDetail(BaseModel):
     issue_ref: IssueRef | None = None
     build_status: str | None = None  # "BUILDING", "CONVERGING", "APPROVED", etc.
     changed_files: int | None = None
+    # ISO-8601 UTC timestamp at which the session/usage quota is expected to reset.
+    # Non-None only when status == "awaiting_quota" (SPEC §14.8).
+    quota_reset_at: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +255,10 @@ _IMPLEMENTER_MAX_TURNS = 80
 # Harness registry & failover constants (SPEC §14, §7)
 HARNESS_COOLDOWN_S = 300  # 5 min; cooldown after quota/rate-limit exhaustion
 HARNESSES_JSON_ENV = "HARNESSES_JSON"  # env var name for multi-harness config array
+# Minimum cooldown applied when a session-limit reset time is parsed but is in the
+# past (clock skew / already elapsed).  Gives the harness a brief breathing window
+# before the next dispatch attempt (SPEC §14.8).
+SESSION_LIMIT_COOLDOWN_FLOOR_S = 60  # 1 min floor for reset-time-aware cooldown
 
 # ---------------------------------------------------------------------------
 # Labels

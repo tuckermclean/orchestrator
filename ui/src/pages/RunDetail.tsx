@@ -406,7 +406,20 @@ export default function RunDetail() {
       {detail && (
         <div style={card}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", fontSize: "14px" }}>
-            <div><span style={{ color: "#8b949e" }}>Status: </span>{detail.status}</div>
+            <div>
+              <span style={{ color: "#8b949e" }}>Status: </span>
+              <span style={{
+                color: detail.status === "awaiting_quota" ? "#d29922" : "inherit",
+                fontWeight: detail.status === "awaiting_quota" ? 600 : "inherit",
+              }}>
+                {detail.status === "awaiting_quota" ? "quota: waiting" : detail.status}
+              </span>
+              {detail.status === "awaiting_quota" && detail.quota_reset_at && (
+                <span style={{ color: "#8b949e", fontSize: "12px", marginLeft: "8px" }}>
+                  (retries at {new Date(detail.quota_reset_at).toLocaleString()})
+                </span>
+              )}
+            </div>
             <div><span style={{ color: "#8b949e" }}>Type: </span>{detail.type}</div>
             {modelLabel(detail.model) && (
               <div><span style={{ color: "#8b949e" }}>Model: </span>{modelLabel(detail.model)}</div>

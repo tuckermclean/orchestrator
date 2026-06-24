@@ -76,6 +76,7 @@ from src.ports.harness import (
     RunEventStore,
     _default_process_runner,
 )
+from src.ports.session_limit import is_session_limit, parse_reset_time
 
 logger = logging.getLogger(__name__)
 
@@ -454,11 +455,41 @@ class SubprocessBackend:
         verdict = extract_verdict_from_events(event_store.get_events(run_id))
         event_store.store_verdict(run_id, verdict)
 
+        # Determine the run conclusion.
+        # Session/usage-limit detection (SPEC §14.8):
+        #   When claude exits non-zero AND the collected event text carries a
+        #   session-limit or usage-limit signature, classify this as
+        #   ``awaiting_quota`` (not ``failure``).  Parse the reset timestamp
+        #   when present so the cooldown can be time-aware.
+        if exit_code == 0:
+            conclusion: str = "success"
+            quota_reset_at: str | None = None
+        else:
+            # Scan all agent_message / agent_result events for the signature.
+            full_text = " ".join(
+                str(evt.data.get("text") or evt.data.get("result") or "")
+                for evt in event_store.get_events(run_id)
+                if evt.event_type in ("agent_message", "agent_result")
+            )
+            if is_session_limit(full_text):
+                conclusion = "awaiting_quota"
+                quota_reset_at = parse_reset_time(full_text)
+                logger.info(
+                    "subprocess run %s: session/usage limit detected; "
+                    "marking awaiting_quota (reset_at=%s)",
+                    run_id,
+                    quota_reset_at,
+                )
+            else:
+                conclusion = "failure"
+                quota_reset_at = None
+
         event_store.set_status(
             run_id,
             RunStatus(
                 state="completed",
-                conclusion="success" if exit_code == 0 else "failure",
+                conclusion=conclusion,  # type: ignore[arg-type]
+                quota_reset_at=quota_reset_at,
             ),
         )
 
@@ -1252,9 +1283,32 @@ class K8sJobBackend:
             if failed > 0:
                 verdict = extract_verdict_from_events(event_store.get_events(run_id))
                 event_store.store_verdict(run_id, verdict)
+                # Session/usage-limit detection for K8s runs (SPEC §14.8):
+                # same logic as SubprocessBackend._watch.
+                full_text = " ".join(
+                    str(evt.data.get("text") or evt.data.get("result") or "")
+                    for evt in event_store.get_events(run_id)
+                    if evt.event_type in ("agent_message", "agent_result")
+                )
+                if is_session_limit(full_text):
+                    k8s_conclusion: str = "awaiting_quota"
+                    k8s_reset_at: str | None = parse_reset_time(full_text)
+                    logger.info(
+                        "k8s run %s: session/usage limit detected; "
+                        "marking awaiting_quota (reset_at=%s)",
+                        run_id,
+                        k8s_reset_at,
+                    )
+                else:
+                    k8s_conclusion = "failure"
+                    k8s_reset_at = None
                 event_store.set_status(
                     run_id,
-                    RunStatus(state="completed", conclusion="failure"),
+                    RunStatus(
+                        state="completed",
+                        conclusion=k8s_conclusion,  # type: ignore[arg-type]
+                        quota_reset_at=k8s_reset_at,
+                    ),
                 )
                 self._cleanup_job(job_name)
                 break

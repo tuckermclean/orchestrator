@@ -7,6 +7,13 @@ const statusColor: Record<string, string> = {
   in_progress: "#58a6ff",
   queued: "#8b949e",
   cancelled: "#f85149",
+  // Session/usage-limit wait: amber badge signals a HOLD, not a failure.
+  awaiting_quota: "#d29922",
+};
+
+// Human-readable label for statuses that need it.
+const statusLabel: Record<string, string> = {
+  awaiting_quota: "quota: waiting",
 };
 
 const card: React.CSSProperties = {
@@ -75,6 +82,7 @@ export default function Runs() {
 
       {runs.map((run) => {
         const color = statusColor[run.status] ?? "#8b949e";
+        const label = statusLabel[run.status] ?? run.status;
         return (
           <Link key={run.run_id} to={`/runs/${run.run_id}`} style={card}>
             <div>
@@ -100,6 +108,11 @@ export default function Runs() {
               <div style={{ fontSize: "12px", color: "#6e7681", marginTop: "4px" }}>
                 Started: {new Date(run.started_at).toLocaleString()}
               </div>
+              {run.status === "awaiting_quota" && run.quota_reset_at && (
+                <div style={{ fontSize: "12px", color: "#d29922", marginTop: "2px" }}>
+                  Retries at: {new Date(run.quota_reset_at).toLocaleString()}
+                </div>
+              )}
             </div>
             <span
               style={{
@@ -111,7 +124,7 @@ export default function Runs() {
                 fontSize: "12px",
               }}
             >
-              {run.status}
+              {label}
             </span>
           </Link>
         );
