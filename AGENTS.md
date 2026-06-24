@@ -596,3 +596,7 @@ restrictions; here the approval signal is the `agent:ready` label, never a forma
 A swallowed/failed terminal action that gets retried by a reconciler is how a single bug becomes
 a storm — make terminal actions idempotent and tolerant of the "already done / not permitted"
 case.
+
+**[Obligatory] An agent's commit is worthless until pushed — guarantee the push in the harness, not the prompt.** A converge fixer committed the right fix but never `git push`ed; the pod died, the commit vanished, the next round cloned the remote and re-flagged the blocker → false escalation. Contract "remember to push" instructions are necessary but insufficient. The durable fix is a deterministic end-of-run push in the harness entry script (write-scoped runs, clean exit, no-op if nothing unpushed). GitHub is the source of truth; ephemeral pod state is not.
+
+**[Obligatory] Merge only on all-green; pending ≠ pass.** A merge gate that blocks on "no *failed* checks" lets a PR through while a required job is still `pending`. Require every check to be `pass`/`skipped` before merging; never treat `pending`/`in_progress` as mergeable. (Failed safe only because branch protection didn't hard-require the check.)
