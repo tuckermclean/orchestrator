@@ -172,6 +172,40 @@ def _patch_clone():  # type: ignore[no-untyped-def]
     )
 
 
+def _patch_git_identity():  # type: ignore[no-untyped-def]
+    """Return a patcher for ClaudeCodeHarnessPort._configure_git_identity (no-op).
+
+    _configure_git_identity runs real 'git config' subprocesses.  In CI, any
+    git command that references a remote URL (url.insteadOf) can trigger a
+    credential helper that blocks on network I/O.  Since the subprocess backend
+    calls _configure_git_identity on every dispatch, all dispatch-based unit
+    tests must suppress it to stay hermetic.
+    """
+    return patch.object(
+        ClaudeCodeHarnessPort,
+        "_configure_git_identity",
+        new=AsyncMock(return_value=None),
+    )
+
+
+def _patch_post_run_push():  # type: ignore[no-untyped-def]
+    """Return a patcher for SubprocessBackend._post_run_push (no-op).
+
+    _post_run_push runs 'git rev-list' and 'git push' on the cloned repo.
+    In CI, even the check ('git rev-list origin/HEAD..HEAD') contacts the
+    remote when origin is set, which can block the event loop in environments
+    where the credential helper has no cached token.  All dispatch-based unit
+    tests must suppress this to stay hermetic.
+    """
+    from src.ports.execution_backend import SubprocessBackend
+
+    return patch.object(
+        SubprocessBackend,
+        "_post_run_push",
+        new=AsyncMock(return_value=None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # dispatch / RunHandle
 # ---------------------------------------------------------------------------
@@ -182,7 +216,7 @@ async def test_harness_dispatch_returns_run_handle() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     assert isinstance(handle, RunHandle)
     assert handle.run_id
@@ -194,7 +228,7 @@ async def test_harness_dispatch_does_not_block() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     # Status may still be queued/in_progress — key is dispatch returned
     assert handle is not None
@@ -208,7 +242,7 @@ async def test_harness_dispatch_spawns_claude_with_correct_flags() -> None:
     runner, captured = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context(model="claude-opus-4-8")
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
     assert captured, "ProcessRunner was never called"
     args = captured[0]["args"]
@@ -231,7 +265,7 @@ async def test_harness_dispatch_prompt_contains_contract_path() -> None:
     runner, captured = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
     args = captured[0]["args"]
     prompt_idx = args.index("-p") + 1
@@ -245,7 +279,7 @@ async def test_harness_dispatch_prompt_contains_issue_ref() -> None:
     runner, captured = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context(issue_number=42)
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
     args = captured[0]["args"]
     prompt = args[args.index("-p") + 1]
@@ -258,7 +292,7 @@ async def test_harness_dispatch_prompt_contains_allowed_refs() -> None:
     runner, captured = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context(allowed_agent_refs=["engineering-code-reviewer.md"])
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
     args = captured[0]["args"]
     prompt = args[args.index("-p") + 1]
@@ -270,7 +304,7 @@ async def test_harness_dispatch_run_handle_round_trip() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         original = await port.dispatch(ctx)
     reconstructed = RunHandle.from_run_id(original.run_id)
     assert reconstructed == original
@@ -299,7 +333,7 @@ async def test_harness_get_run_status_transitions_to_completed() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     # Allow the background watcher to run
     await asyncio.sleep(0.05)
@@ -314,7 +348,7 @@ async def test_harness_get_run_status_failure_on_nonzero_exit() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     await asyncio.sleep(0.05)
     status = await port.get_run_status(handle)
@@ -333,7 +367,7 @@ async def test_harness_cancel_terminates_process() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     # Force status to in_progress so cancel is not a no-op
     port._event_store.set_status(handle.run_id, RunStatus(state="in_progress"))
@@ -349,7 +383,7 @@ async def test_harness_cancel_idempotent_on_completed_run() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     await asyncio.sleep(0.05)  # let watcher mark completed
     # Both cancel calls must not raise
@@ -388,7 +422,7 @@ async def test_harness_events_captured_from_stream() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     await asyncio.sleep(0.1)  # let watcher consume all events
     events = port._event_store.get_events(handle.run_id)
@@ -405,7 +439,7 @@ async def test_harness_events_have_timestamps() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     await asyncio.sleep(0.1)
     for event in port._event_store.get_events(handle.run_id):
@@ -419,7 +453,7 @@ async def test_harness_event_store_queue_signals_completion() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     await asyncio.sleep(0.1)
     queue = port._event_store.get_queue(handle.run_id)
@@ -557,7 +591,12 @@ async def test_security_no_master_creds_in_child_env() -> None:
         forge_token=_REAL_FORGE_TOKEN,
     )
     ctx = _make_context()
-    with _patch_mint("scoped-only-token"), _patch_clone():
+    with (
+        _patch_mint("scoped-only-token"),
+        _patch_clone(),
+        _patch_git_identity(),
+        _patch_post_run_push(),
+    ):
         await port.dispatch(ctx)
 
     env_str = json.dumps(captured_env)
@@ -613,7 +652,7 @@ async def test_security_prompt_i9_no_contributor_text() -> None:
     # The context carries only structural data — no contributor text
     ctx = _make_context(allowed_agent_refs=["engineering-code-reviewer.md"])
 
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
 
     # The contributor_text must not appear anywhere in the CLI args
@@ -736,7 +775,7 @@ async def test_security_token_not_in_clone_argv() -> None:
         ClaudeCodeHarnessPort,
         "_clone_repo",
         side_effect=_capture_clone,
-    ):
+    ), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(_make_context())
 
     # Verify clone was called with the scoped token
@@ -804,7 +843,7 @@ async def test_harness_cancel_asserts_terminate_called() -> None:
     runner, _ = await _build_fake_runner(fp)
     port = _make_port(runner)
     ctx = _make_context()
-    with _patch_mint(), _patch_clone():
+    with _patch_mint(), _patch_clone(), _patch_git_identity(), _patch_post_run_push():
         handle = await port.dispatch(ctx)
     port._event_store.set_status(handle.run_id, RunStatus(state="in_progress"))
     await port.cancel(handle)
@@ -844,7 +883,7 @@ async def test_harness_dispatch_pr_checks_out_head_branch() -> None:
     )
     with _patch_mint(), patch.object(
         ClaudeCodeHarnessPort, "_clone_repo", side_effect=_spy_clone
-    ):
+    ), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
 
     assert captured_branch, "_clone_repo was never called"
@@ -870,7 +909,7 @@ async def test_harness_dispatch_no_head_branch_uses_default() -> None:
     ctx = _make_context()  # no head_branch
     with _patch_mint(), patch.object(
         ClaudeCodeHarnessPort, "_clone_repo", side_effect=_spy_clone
-    ):
+    ), _patch_git_identity(), _patch_post_run_push():
         await port.dispatch(ctx)
 
     assert captured_branch, "_clone_repo was never called"

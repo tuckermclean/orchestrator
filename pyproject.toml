@@ -57,6 +57,10 @@ testpaths = ["tests"]
 # in <1s; 60s only trips a genuine hang.
 timeout = 60
 timeout_method = "thread"
+# Exclude integration_real tests from the default run; they require live
+# credentials, network access, or a real binary (claude / GitHub App / k8s).
+# Run them explicitly with: pytest -m integration_real
+addopts = "-m 'not integration_real'"
 markers = [
     "covers: mark a test as covering a SPEC §8 truth-table row; args: (section, row_id)",
     "integration_real: marks tests that require live credentials and network access",
