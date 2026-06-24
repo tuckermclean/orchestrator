@@ -345,6 +345,10 @@ async def converge(
         specialist_refs = decide_specialists(changed_paths, r)
         # All reviewer rounds use DEFAULT_SWARM_MODEL (Sonnet).
         # Opus is reserved for the adjudicator (terminal gate, not the reviewer).
+        # converge_round + converge_round_started are injected so the reviewer (and
+        # fixer below) receive the authoritative round from the engine — they must NOT
+        # infer the round by counting "## Converge Review" comments on the PR, because a
+        # re-triggered cycle starts fresh while old-cycle comments remain (SPEC §9.2).
         reviewer_context = DispatchContext(
             pr_ref=pr_ref,
             contract=_CONVERGE_REVIEWER_CONTRACT,
@@ -353,6 +357,8 @@ async def converge(
             forge_token_scope="repo-branch",
             allowed_agent_refs=specialist_refs,
             head_branch=pr_head_branch,
+            converge_round=r,
+            converge_round_started=round_started.isoformat(),
         )
         # AllHarnessesExhausted propagates up to OrchestratorService; no label change
         # so the PR stays CONVERGING and RC-3 re-arms it on the next tick (SPEC §14.5).
@@ -414,6 +420,9 @@ async def converge(
             # R1/R2: dispatch the fixer, await it; on timeout → E11.
             # R1 fixer: blockers + suggestions; R2/R3: blockers only.
             # (The reviewer contract controls what the fixer addresses via its comment.)
+            # converge_round + converge_round_started are injected so the fixer knows
+            # its round authoritatively and can scope comment lookups to the current
+            # cycle (SPEC §9.2; same reasoning as the reviewer context above).
             fixer_context = DispatchContext(
                 pr_ref=pr_ref,
                 contract=_CONVERGE_FIXER_CONTRACT,
@@ -422,6 +431,8 @@ async def converge(
                 forge_token_scope="repo-branch",
                 allowed_agent_refs=specialist_refs,
                 head_branch=pr_head_branch,
+                converge_round=r,
+                converge_round_started=round_started.isoformat(),
             )
             # AllHarnessesExhausted propagates up to OrchestratorService (SPEC §14.5).
             fixer_handle = await engine.harness.dispatch(fixer_context)

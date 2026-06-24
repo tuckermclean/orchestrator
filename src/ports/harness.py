@@ -507,6 +507,12 @@ class ClaudeCodeHarnessPort:
 
         Security (I9): prompt contains ONLY the contract path and structured
         references from the DispatchContext — never raw contributor text.
+
+        For converge reviewer and fixer dispatches, the prompt includes the
+        authoritative ROUND and CONVERGE_ROUND_STARTED values so the agent
+        never needs to infer the round by counting comments on the PR (which
+        breaks when converge is re-triggered: old-cycle comments remain on the
+        PR and the agent would miscount).  See SPEC §9.2.
         """
         lines: list[str] = [
             f"Act as the agent defined in {context.contract}. Read that file first.",
@@ -521,6 +527,14 @@ class ClaudeCodeHarnessPort:
                 f"PR context: PR #{context.pr_ref.number} in "
                 f"{context.pr_ref.repo.owner}/{context.pr_ref.repo.name}."
             )
+        if context.converge_round is not None:
+            # Engine-provided authoritative round for converge reviewer/fixer dispatches.
+            # The agent MUST use this value — never infer the round from comment counts.
+            lines.append(f"ROUND={context.converge_round}")
+        if context.converge_round_started is not None:
+            # ISO-8601 UTC timestamp: scope comment lookups to created_at >= this value
+            # so only comments from the current cycle are considered (not prior cycles).
+            lines.append(f"CONVERGE_ROUND_STARTED={context.converge_round_started}")
         if context.allowed_agent_refs is not None:
             # Allowed refs from decide_specialists output only — never contributor text (I9).
             refs_str = ", ".join(context.allowed_agent_refs)
