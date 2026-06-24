@@ -47,7 +47,7 @@ from src.domain.types import (
     RunHandle,
 )
 from src.ports.base import ConvergeStateStore, CounterStore, ForgePort, HarnessPort, SessionPort
-from src.ports.harness_registry import AllHarnessesExhausted
+from src.ports.harness_registry import AllHarnessesExhausted, SessionLimitHold
 
 if TYPE_CHECKING:
     from src.engine.reconcile import ReconcileReport
@@ -252,16 +252,36 @@ class Engine:
     async def _await_run(self, handle: RunHandle) -> bool:
         """Poll a dispatched run until completed or CI_WAIT_S elapses.
 
-        Returns True if the run completed. On `CI_WAIT_S` timeout, cancels the run
-        (`harness.cancel`) before returning False so a ghost agent cannot complete later
-        and overwrite the next round's init sentinel or verdict file (SPEC §9.2, §10.2
-        step 4b). Idempotent cancel — safe for both reviewer and fixer handles. The fake
-        harness completes synchronously; the real adapter honours the wall-clock budget.
+        Returns True if the run completed successfully (not awaiting_quota).
+
+        On `CI_WAIT_S` timeout, cancels the run (`harness.cancel`) before
+        returning False so a ghost agent cannot complete later and overwrite
+        the next round's init sentinel or verdict file (SPEC §9.2, §10.2
+        step 4b). Idempotent cancel — safe for both reviewer and fixer handles.
+        The fake harness completes synchronously; the real adapter honours the
+        wall-clock budget.
+
+        On ``awaiting_quota`` conclusion, raises ``SessionLimitHold`` (a
+        subclass of ``AllHarnessesExhausted``) instead of returning True
+        (SPEC §14.8). This makes the HOLD deterministic at the await boundary:
+        callers that check the return value (fixer, nitpicker, adjudicator,
+        orchestrator, implementer) are not reached, and existing
+        ``except AllHarnessesExhausted`` handlers in converge.py and
+        reconcile.py treat it as a HOLD — no label change, entity stays
+        CONVERGING / BUILDING / QUEUED.  The harness cooldown is already
+        armed by FailoverHarnessPort's status sink.
         """
         deadline = time.monotonic() + CI_WAIT_S
         while True:
             status = await self.harness.get_run_status(handle)
             if status.state == "completed":
+                if status.conclusion == "awaiting_quota":
+                    # Session/usage limit hit — raise HOLD instead of returning
+                    # True so callers cannot mistake this for a successful run.
+                    raise SessionLimitHold(
+                        run_id=handle.run_id,
+                        quota_reset_at=status.quota_reset_at,
+                    )
                 return True
             if time.monotonic() >= deadline:
                 await self.harness.cancel(handle)

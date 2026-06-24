@@ -479,6 +479,12 @@ class FakeHarnessPort:
         # tests that need the Nth dispatch (e.g. a fixer run) to time out while earlier
         # reviewer runs complete normally.  Each dispatched run decrements this by 1.
         self._timeout_next_n: int = 0
+        # Countdown for dispatches that complete with awaiting_quota (session limit).
+        # Each dispatch decrements this by 1; when it reaches 1 that dispatch gets
+        # awaiting_quota.  0 means no quota injection.
+        self._quota_next_n: int = 0
+        # Optional reset_at ISO string to attach to the awaiting_quota conclusion.
+        self._quota_reset_at: str | None = None
         # Post-trigger CI check overrides: when trigger_ci is called and this is non-empty,
         # the checks at the given index (call count) replace the forge's current check runs.
         self._trigger_ci_check_scripts: list[list[CheckRun]] = []
@@ -532,6 +538,26 @@ class FakeHarnessPort:
         if self._forge is None:
             raise ValueError("script_trigger_ci_checks requires a wired FakeForgePort")
         self._trigger_ci_check_scripts = list(check_lists)
+
+    def script_next_dispatch_quota(
+        self,
+        *,
+        after_n_dispatches: int = 0,
+        quota_reset_at: str | None = None,
+    ) -> None:
+        """Make the next dispatch (after ``after_n_dispatches`` normal completions)
+        complete with ``conclusion="awaiting_quota"`` so ``Engine._await_run`` raises
+        ``SessionLimitHold`` (SPEC §14.8 await-boundary HOLD).
+
+        ``after_n_dispatches=0`` (default) injects the quota on the very next dispatch.
+        ``after_n_dispatches=1`` lets one dispatch complete normally then injects it on
+        the second.
+
+        ``quota_reset_at`` is attached to the ``RunStatus.quota_reset_at`` field and
+        carried by ``SessionLimitHold`` for structured logging.
+        """
+        self._quota_next_n = after_n_dispatches + 1
+        self._quota_reset_at = quota_reset_at
 
     def _emit_verdict(self, run_id: str, context: DispatchContext) -> None:
         """Store the next queued verdict by run_id for reviewer or adjudicator dispatches.
@@ -615,10 +641,25 @@ class FakeHarnessPort:
             self._timeout_next_n -= 1
             should_timeout = self._timeout_next_n == 0
 
+        # Determine whether this dispatch should complete with awaiting_quota.
+        # `_quota_next_n` is a countdown: when it reaches 1, this dispatch gets
+        # awaiting_quota and the counter is reset to 0.
+        should_quota = False
+        if self._quota_next_n > 0:
+            self._quota_next_n -= 1
+            should_quota = self._quota_next_n == 0
+
         # Default: immediately completed/success (overridable via seed_run). When
         # timeout flag is set, the run stays in_progress to force a timeout/cancel.
+        # When quota flag is set, complete with awaiting_quota to trigger SessionLimitHold.
         if should_timeout:
             self._runs[run_id] = RunStatus(state="in_progress")
+        elif should_quota:
+            self._runs[run_id] = RunStatus(
+                state="completed",
+                conclusion="awaiting_quota",
+                quota_reset_at=self._quota_reset_at,
+            )
         else:
             self._runs[run_id] = RunStatus(state="completed", conclusion="success")
 

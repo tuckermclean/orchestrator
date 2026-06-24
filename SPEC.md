@@ -1733,6 +1733,46 @@ entry.set_cooldown(now, reset_at=status.quota_reset_at)
 This prevents any re-dispatch before the quota resets — the cooldown makes the
 harness unavailable to `decide_harness` until the deadline.
 
+#### HOLD at the await boundary (deterministic)
+
+`Engine._await_run` raises `SessionLimitHold` (a subclass of
+`AllHarnessesExhausted`) immediately when it polls a run whose
+`state == "completed" AND conclusion == "awaiting_quota"`, **instead of
+returning `True`**.  This makes the quota HOLD deterministic at the await
+boundary — the converge or dispatch sub-machine is interrupted before it
+can read a verdict the agent never wrote or make a terminal decision (escalate
+/ approve) based on a phantom success.
+
+`SessionLimitHold` is a subclass of `AllHarnessesExhausted` so all five
+existing `except AllHarnessesExhausted` catch sites
+(`dispatch.py` 110/169/203/225, `reconcile.py` 330) treat it as a HOLD
+without any code change: no label mutation, entity stays in its current
+forge-label state.
+
+#### Round-neutral HOLD for converge reviewer/fixer runs
+
+The HOLD must not consume a converge round or burn `RECONVERGE_CAP`.
+
+- **Reviewer quota HOLD**: `_await_run(reviewer_handle)` raises before
+  `set_converge_round(r)` is called.  The durable round is unchanged.
+  RC-3 re-arms and `start = get_converge_round() + 1` returns the same
+  round `r` — the reviewer re-runs.
+
+- **Fixer quota HOLD**: `set_converge_round(r)` has already been written
+  before the fixer is dispatched.  `converge.py` catches `SessionLimitHold`
+  from `_await_run(fixer_handle)` and immediately writes
+  `set_converge_round(r - 1)` (rolling back the persisted round), then
+  re-raises.  RC-3 re-arms, `start = r`, and the fixer re-runs for the
+  same round — round-neutral.
+
+#### In-flight guard and re-arm
+
+The per-PR `_converge_tasks` entry in `OrchestratorService` is a live
+asyncio task.  When `SessionLimitHold` propagates out of `engine.converge`,
+the task exits with an exception, the `_done` callback drops the key, and
+the entry is cleared.  RC-3 can therefore spawn a new converge task on the
+next tick without being blocked by a dangling in-flight entry.
+
 #### Entity lifecycle
 
 The entity (issue/PR) **remains in its current forge-label state**:

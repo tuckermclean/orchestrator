@@ -744,6 +744,18 @@
   "session-limit-execution-backend-detection":
     tests: ["test_subprocess_sets_awaiting_quota_on_session_limit", "test_subprocess_failure_without_session_limit_stays_failure"]
 
+"§14.8":  # Session/Usage-Limit Wait-and-Retry — await-boundary HOLD (SPEC §14.8)
+  "session-limit-await-boundary-raises-hold":
+    tests: ["test_await_run_raises_session_limit_hold_on_awaiting_quota", "test_await_run_returns_true_for_normal_success", "test_await_run_raises_session_limit_hold_without_reset_at"]
+  "session-limit-converge-reviewer-hold":
+    tests: ["test_converge_reviewer_quota_hold_does_not_escalate", "test_converge_reviewer_quota_hold_is_round_neutral"]
+  "session-limit-converge-fixer-hold":
+    tests: ["test_converge_fixer_quota_hold_does_not_escalate", "test_converge_fixer_quota_hold_is_round_neutral", "test_converge_fixer_r2_quota_hold_is_round_neutral"]
+  "session-limit-inflight-guard-clear":
+    tests: ["test_rc3_does_not_skip_awaiting_quota_run_handle"]
+  "session-limit-rc3-rearm-same-round":
+    tests: ["test_converge_resumes_from_same_round_after_reviewer_quota_hold", "test_converge_resumes_from_same_round_after_fixer_quota_hold"]
+
 "§9.2-agent-transcript":  # Live agent transcript streaming — JSONL → RunEvent mapping
   "agent-transcript-assistant-text":
     tests: ["test_parse_assistant_text_returns_agent_message", "test_parse_assistant_empty_text_returns_none", "test_parse_assistant_whitespace_only_text_returns_none"]

@@ -106,6 +106,37 @@ class AllHarnessesExhausted(Exception):
     """
 
 
+class SessionLimitHold(AllHarnessesExhausted):
+    """Raised by Engine._await_run when a run concludes with ``awaiting_quota``.
+
+    This is a subclass of AllHarnessesExhausted so every existing
+    ``except AllHarnessesExhausted`` handler (dispatch.py 110/169/203/225,
+    reconcile.py 330) catches it as a HOLD — no label change, entity stays
+    in its current forge state.
+
+    The harness cooldown is already armed by the FailoverHarnessPort status sink
+    when the run completes (SPEC §14.8).  This exception propagates the HOLD
+    deterministically through the await boundary so the converge/dispatch sub-
+    machine never mistakes a quota-concluded run for success.
+
+    Attributes
+    ----------
+    run_id:
+        The run_id of the run that hit the session/usage limit.
+    quota_reset_at:
+        ISO-8601 UTC timestamp from the run status (may be None).  Carried
+        for structured logging so operators can see the reset deadline.
+    """
+
+    def __init__(self, run_id: str, quota_reset_at: str | None = None) -> None:
+        self.run_id = run_id
+        self.quota_reset_at = quota_reset_at
+        super().__init__(
+            f"run {run_id!r} hit session/usage limit (awaiting_quota); "
+            f"HOLD until quota resets at {quota_reset_at or 'unknown'}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # HarnessConfig (SPEC §14.2)
 # ---------------------------------------------------------------------------

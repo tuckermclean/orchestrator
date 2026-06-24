@@ -90,10 +90,14 @@ from src.domain.types import (
 if TYPE_CHECKING:
     from src.engine.dispatch import Engine
 
-# AllHarnessesExhausted propagates naturally through the converge dispatcher
-# (SPEC §14.5: all-exhausted → stay CONVERGING, let RC-3 re-arm).
-# No explicit import needed here; it is raised by FailoverHarnessPort and
-# propagates to OrchestratorService.handle_event without label mutation.
+# AllHarnessesExhausted and SessionLimitHold propagate naturally through the
+# converge dispatcher (SPEC §14.5: all-exhausted → stay CONVERGING, let RC-3
+# re-arm).  SessionLimitHold is a subclass of AllHarnessesExhausted so all
+# existing except AllHarnessesExhausted handlers catch it automatically.
+# SessionLimitHold is explicitly caught in the fixer branch to roll back the
+# persisted converge round so RC-3 re-arms at the correct round (SPEC §14.8
+# round-neutral quota HOLD).
+from src.ports.harness_registry import SessionLimitHold
 
 _CONVERGE_REVIEWER_CONTRACT = "agents/converge-reviewer.md"
 _CONVERGE_FIXER_CONTRACT = "agents/converge-fixer.md"
@@ -436,7 +440,16 @@ async def converge(
             )
             # AllHarnessesExhausted propagates up to OrchestratorService (SPEC §14.5).
             fixer_handle = await engine.harness.dispatch(fixer_context)
-            completed = await engine._await_run(fixer_handle)
+            try:
+                completed = await engine._await_run(fixer_handle)
+            except SessionLimitHold:
+                # Fixer hit session/usage limit.  set_converge_round(r) was already
+                # called above (before the fix branch), so the persisted round is r.
+                # Roll it back to r-1 so RC-3 re-arms at round r (round-neutral
+                # quota HOLD, SPEC §14.8).  The fixer for round r will re-run on
+                # the next converge invocation.
+                await converge_state.set_converge_round(pr_ref, r - 1)
+                raise
             if not completed:
                 # Fixer timed out — cancel already happened inside _await_run.
                 return await _terminal_escalate(engine, pr_ref)
