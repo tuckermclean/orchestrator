@@ -437,6 +437,30 @@
     tests: ["test_real_kube_log_client_retries_log_open_on_api_exception", "test_real_kube_log_client_log_open_all_retries_exhausted_logs_warning"]
   "k8s-log-client-pod-never-starts-deadline":
     tests: ["test_real_kube_log_client_pod_never_starts_returns_cleanly"]
+  # Deterministic end-of-run push safety net (#52 regression lock + #155 complement)
+  # K8s entry script — write-scoped runs push unpushed commits on clean exit
+  "k8s-end-of-run-push-write-scoped":
+    tests: ["test_k8s_entry_script_write_scoped_has_push_block"]
+  "k8s-end-of-run-push-read-only":
+    tests: ["test_k8s_entry_script_read_only_no_push_block"]
+  "k8s-end-of-run-push-exit-code-preserved":
+    tests: ["test_k8s_entry_script_exit_code_preserved_write_scoped"]
+  "k8s-end-of-run-push-branch-quoting":
+    tests: ["test_k8s_entry_script_branch_is_shell_quoted_in_push_block"]
+  "k8s-end-of-run-push-no-branch-uses-head":
+    tests: ["test_k8s_entry_script_no_branch_uses_origin_head_in_push_check"]
+  # SubprocessBackend — end-of-run push behaviour
+  "subprocess-end-of-run-push-write-scoped":
+    tests: ["test_subprocess_backend_write_scoped_push_called_on_success"]
+  "subprocess-end-of-run-push-read-only":
+    tests: ["test_subprocess_backend_read_only_push_not_called"]
+  "subprocess-end-of-run-push-failure-no-push":
+    tests: ["test_subprocess_backend_failed_run_no_push"]
+  "subprocess-end-of-run-push-exit-code-preserved":
+    tests: ["test_subprocess_backend_push_failure_does_not_flip_run_to_failed"]
+  # Harness passes forge_token_scope through to the backend
+  "k8s-harness-dispatch-passes-forge-token-scope":
+    tests: ["test_harness_dispatch_passes_forge_token_scope_to_backend"]
 
 "§11.3":  # OrchestratorService advisory lock — promote and deescalate_pr (SPEC §11.3 step 1)
   "lock-promote-serializes":

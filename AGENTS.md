@@ -14,7 +14,7 @@ A forge-agnostic, harness-agnostic autonomous SWE-agent orchestration pipeline. 
 specs are complete and treated as source of truth. Your job is to implement them
 faithfully.
 
-Three facts that govern everything:
+Four facts that govern everything:
 
 - **Entity lifecycle state** (QUEUED, BUILDING, CONVERGING, …) lives in **forge labels**.
   Entity counters (`redispatch_count`, `retry_count`) and service-level data (repo
@@ -28,6 +28,14 @@ Three facts that govern everything:
   elapses).  The dispatch sub-machine runs the orchestrator run and then the implementer run
   sequentially, both awaited inside the same background task (`SPEC.md §10.1 amended`).
 - **Decision functions are pure and synchronous.** The async boundary is at I/O only.
+- **Harness guarantees commit durability for write-scoped runs.** After claude
+  exits cleanly (rc == 0), write-scoped runs (`forge_token_scope == "repo-branch"`)
+  get a deterministic end-of-run `git push origin HEAD` from the harness itself.
+  This is guarded by `git rev-list origin/<branch>..HEAD` (no-op when nothing to
+  push) and is belt-and-suspenders with the agent-contract reminder (#155 / SPEC
+  §9.2).  A forgotten `git push` can never silently lose committed work (PR #52
+  regression lock).  Push failure is non-fatal and does NOT flip a successful run
+  to failed.  Read-only runs (`forge_token_scope == "repo-comment"`) never push.
 
 ---
 

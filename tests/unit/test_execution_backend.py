@@ -159,6 +159,7 @@ async def test_subprocess_backend_dispatch_calls_runner() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -186,6 +187,7 @@ async def test_subprocess_backend_clones_repo_before_running() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -214,6 +216,7 @@ async def test_subprocess_backend_writes_hook_when_refs_set() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=["engineering-code-reviewer.md"],
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -239,6 +242,7 @@ async def test_subprocess_backend_no_hook_when_refs_none() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -264,6 +268,7 @@ async def test_subprocess_backend_clone_failure_marks_failed() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -295,6 +300,7 @@ async def test_subprocess_backend_sets_in_progress() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -323,6 +329,7 @@ async def test_subprocess_backend_success_on_zero_exit() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -351,6 +358,7 @@ async def test_subprocess_backend_failure_on_nonzero_exit() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -379,6 +387,7 @@ async def test_subprocess_backend_captures_json_events() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -413,6 +422,7 @@ async def test_subprocess_backend_cancel_marks_cancelled() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -445,6 +455,7 @@ async def test_subprocess_backend_queue_sentinel_on_completion() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -763,6 +774,7 @@ async def test_k8s_backend_dispatch_creates_job() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -801,6 +813,7 @@ async def test_k8s_dispatch_does_not_clone_in_control_plane() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -834,6 +847,7 @@ async def test_k8s_backend_watch_success() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -869,6 +883,7 @@ async def test_k8s_backend_watch_failure() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -902,6 +917,7 @@ async def test_k8s_backend_watch_timeout() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -949,6 +965,7 @@ async def test_k8s_backend_watch_read_error_retries() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -985,6 +1002,7 @@ async def test_k8s_backend_cancel_deletes_job() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1028,6 +1046,7 @@ async def test_k8s_backend_dispatch_emits_job_created_event() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1064,6 +1083,7 @@ async def test_k8s_backend_cleanup_job_on_success() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1244,6 +1264,7 @@ async def test_fake_backend_dispatch_records_call() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1270,6 +1291,7 @@ async def test_fake_backend_configure_fail() -> None:
         child_env={},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1438,6 +1460,7 @@ async def test_subprocess_backend_materialises_contract() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/orchestrator.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1467,6 +1490,7 @@ async def test_subprocess_backend_no_materialise_when_contract_empty() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1498,6 +1522,7 @@ async def test_subprocess_backend_contract_failure_marks_failed() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/missing.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1577,6 +1602,7 @@ async def test_subprocess_backend_calls_configure_git_identity() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh-token"},
         allowed_agent_refs=None,
         contract="agents/orchestrator.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -1622,6 +1648,7 @@ async def test_subprocess_backend_git_identity_called_before_hook() -> None:
         child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
         allowed_agent_refs=["engineering-code-reviewer.md"],
         contract="agents/orchestrator.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -2450,6 +2477,7 @@ async def test_multiple_concurrent_streamers_all_receive_events() -> None:
             child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
             allowed_agent_refs=None,
             contract="agents/implementer.md",
+            forge_token_scope="repo-comment",
             event_store=store,
             harness=harness,
         )
@@ -2907,3 +2935,375 @@ async def test_real_kube_log_client_events_land_in_store_after_retry() -> None:
         "Expected at least one agent_result event after log-open retry; "
         f"got event types: {[e.event_type for e in events]}"
     )
+
+
+# ===========================================================================
+# Deterministic end-of-run push safety net (#52)
+# SPEC §10.1/§9.2 — write-scoped runs push unpushed commits on clean exit.
+# ===========================================================================
+
+
+@pytest.mark.covers("§9.2", "k8s-end-of-run-push-write-scoped")
+def test_k8s_entry_script_write_scoped_has_push_block() -> None:
+    """K8s entry script for write-scoped runs contains the conditional push block.
+
+    Regression lock for PR #52 loss scenario: a converge-fixer committed locally
+    in its pod and never git-pushed; when the pod died the fix was lost.  The
+    harness now adds a deterministic end-of-run push safety net for write-scoped
+    runs so a forgotten push can never silently lose work.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme",
+        "myrepo",
+        "feature/pr-52-fix",
+        ["claude", "-p", "hello"],
+        forge_token_scope="repo-branch",
+    )
+    # Must run claude as a normal child (not exec) to allow post-run push.
+    assert "exec " not in script or "exec \"$rc\"" in script, (
+        "Write-scoped entry script must NOT use 'exec' to run claude (use normal child)"
+    )
+    # Must capture exit code.
+    assert "rc=$?" in script, (
+        "Write-scoped entry script must capture claude's exit code into rc"
+    )
+    # Must have conditional push block gated on rc==0.
+    assert "\"$rc\" -eq 0" in script, (
+        "Write-scoped entry script must only push when rc==0"
+    )
+    # Must check for unpushed commits before pushing (no-op guard).
+    assert "rev-list" in script, (
+        "Write-scoped entry script must guard push with rev-list (no-op when nothing to push)"
+    )
+    # Must push origin HEAD.
+    assert "push origin HEAD" in script, (
+        "Write-scoped entry script must push to origin HEAD"
+    )
+    # Must preserve claude's exit code as the script's exit code.
+    assert "exit \"$rc\"" in script, (
+        "Write-scoped entry script must exit with claude's exit code (not push exit code)"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-end-of-run-push-read-only")
+def test_k8s_entry_script_read_only_no_push_block() -> None:
+    """K8s entry script for read-only runs contains NO push block.
+
+    Triager, reviewer, and adjudicator runs have forge_token_scope="repo-comment"
+    — they have no write token and make no commits.  The push step must be
+    absent entirely so there is no accidental git push on a read-only scope.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme",
+        "myrepo",
+        None,
+        ["claude", "-p", "hello"],
+        forge_token_scope="repo-comment",
+    )
+    # read-only scope: NO push step.
+    assert "push origin HEAD" not in script, (
+        "Read-only entry script must NOT contain 'push origin HEAD'"
+    )
+    assert "rev-list" not in script, (
+        "Read-only entry script must NOT contain rev-list (no push no-op guard needed)"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-end-of-run-push-exit-code-preserved")
+def test_k8s_entry_script_exit_code_preserved_write_scoped() -> None:
+    """K8s write-scoped entry script: exit $rc preserves claude's exit code.
+
+    A push failure must NOT flip a successful run to failed.  The script must
+    exit with claude's rc, not the push command's exit code.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme",
+        "myrepo",
+        "main",
+        ["claude", "-p", "hello"],
+        forge_token_scope="repo-branch",
+    )
+    # The LAST exit must use $rc (claude's exit code), not a bare `exit`.
+    lines = script.strip().splitlines()
+    last_exit_line = ""
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped.startswith("exit"):
+            last_exit_line = stripped
+            break
+    assert last_exit_line == 'exit "$rc"', (
+        f"Last exit in write-scoped script must be 'exit \"$rc\"', got: {last_exit_line!r}"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-end-of-run-push-branch-quoting")
+def test_k8s_entry_script_branch_is_shell_quoted_in_push_block() -> None:
+    """K8s entry script shell-quotes the branch name in the push block.
+
+    A branch name could theoretically contain characters that require quoting.
+    shlex.quote ensures no shell injection from a maliciously crafted branch name.
+    """
+    backend = _make_k8s_backend()
+    # Use a branch name with a space in it to confirm quoting.
+    script = backend._build_entry_script(
+        "acme",
+        "myrepo",
+        "feature/with space",
+        ["claude", "-p", "hello"],
+        forge_token_scope="repo-branch",
+    )
+    # The branch must be shell-quoted: shlex.quote("feature/with space") → "'feature/with space'"
+    assert "'feature/with space'" in script, (
+        "Branch name must be shell-quoted in the push block to prevent injection"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-end-of-run-push-no-branch-uses-head")
+def test_k8s_entry_script_no_branch_uses_origin_head_in_push_check() -> None:
+    """K8s write-scoped entry script uses origin/HEAD when no branch is specified.
+
+    When branch is None (default-branch checkout), the rev-list comparison target
+    must fall back to origin/HEAD so the no-op guard still works.
+    """
+    backend = _make_k8s_backend()
+    script = backend._build_entry_script(
+        "acme",
+        "myrepo",
+        None,  # no explicit branch
+        ["claude", "-p", "hello"],
+        forge_token_scope="repo-branch",
+    )
+    assert "origin/HEAD" in script, (
+        "When branch is None, push check must use origin/HEAD for rev-list comparison"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-end-of-run-push-write-scoped")
+async def test_subprocess_backend_write_scoped_push_called_on_success() -> None:
+    """SubprocessBackend issues a post-run git push for write-scoped runs on success.
+
+    This is the deterministic safety net complementary to the K8s entry-script
+    push block.  The SubprocessBackend calls _post_run_push when:
+      - forge_token_scope == "repo-branch" (write-scoped)
+      - claude exits with rc == 0 (clean exit)
+    The post-run push must NOT be called on non-zero exit.
+    """
+    push_calls: list[dict[str, object]] = []
+
+    runner, _, _ = _make_runner(exit_code=0)
+    backend = SubprocessBackend(process_runner=runner)
+
+    # Patch _post_run_push to track calls without actually running git.
+    async def _spy_push(
+        run_id: str, repo_dir: str, branch: str | None, child_env: dict[str, str]
+    ) -> None:
+        push_calls.append({"run_id": run_id, "repo_dir": repo_dir, "branch": branch})
+
+    backend._post_run_push = _spy_push  # type: ignore[method-assign]
+
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch="feature/pr-52",
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/implementer.md",
+        forge_token_scope="repo-branch",
+        event_store=store,
+        harness=harness,
+    )
+    await asyncio.sleep(0.1)
+
+    assert push_calls, (
+        "SubprocessBackend must call _post_run_push for write-scoped runs on success"
+    )
+    assert push_calls[0]["branch"] == "feature/pr-52", (
+        "Post-run push must receive the correct branch name"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-end-of-run-push-read-only")
+async def test_subprocess_backend_read_only_push_not_called() -> None:
+    """SubprocessBackend does NOT call post-run push for read-only (repo-comment) runs.
+
+    Triager, reviewer, and adjudicator runs use forge_token_scope='repo-comment'.
+    The push step must be skipped entirely — no git operation attempted.
+    """
+    push_calls: list[dict[str, object]] = []
+
+    runner, _, _ = _make_runner(exit_code=0)
+    backend = SubprocessBackend(process_runner=runner)
+
+    async def _spy_push(
+        run_id: str, repo_dir: str, branch: str | None, child_env: dict[str, str]
+    ) -> None:
+        push_calls.append({"run_id": run_id})
+
+    backend._post_run_push = _spy_push  # type: ignore[method-assign]
+
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch=None,
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
+        event_store=store,
+        harness=harness,
+    )
+    await asyncio.sleep(0.1)
+
+    assert not push_calls, (
+        "SubprocessBackend must NOT call _post_run_push for read-only (repo-comment) runs"
+    )
+
+
+@pytest.mark.covers("§9.2", "subprocess-end-of-run-push-failure-no-push")
+async def test_subprocess_backend_failed_run_no_push() -> None:
+    """SubprocessBackend does NOT push when claude exits non-zero.
+
+    A failed claude exit means the run produced potentially broken state —
+    the engine will re-dispatch/escalate.  Never push a mid-state from a failed run.
+    """
+    push_calls: list[dict[str, object]] = []
+
+    runner, _, _ = _make_runner(exit_code=1)  # non-zero exit
+    backend = SubprocessBackend(process_runner=runner)
+
+    async def _spy_push(
+        run_id: str, repo_dir: str, branch: str | None, child_env: dict[str, str]
+    ) -> None:
+        push_calls.append({"run_id": run_id})
+
+    backend._post_run_push = _spy_push  # type: ignore[method-assign]
+
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch="feature/fix",
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/implementer.md",
+        forge_token_scope="repo-branch",
+        event_store=store,
+        harness=harness,
+    )
+    await asyncio.sleep(0.1)
+
+    assert not push_calls, (
+        "SubprocessBackend must NOT call _post_run_push when claude exits non-zero"
+    )
+    # Run must still be marked as failure.
+    status = store.get_status(run_id)
+    assert status.conclusion == "failure"
+
+
+@pytest.mark.covers("§9.2", "subprocess-end-of-run-push-exit-code-preserved")
+async def test_subprocess_backend_push_failure_does_not_flip_run_to_failed() -> None:
+    """SubprocessBackend: push failure must NOT flip a successful run to failed.
+
+    The post-run push is belt-and-suspenders — its failure is logged but the run
+    outcome is always determined by claude's exit code.
+    """
+    runner, _, _ = _make_runner(exit_code=0)
+    backend = SubprocessBackend(process_runner=runner)
+
+    # Simulate a push that raises an exception.
+    async def _failing_push(
+        run_id: str, repo_dir: str, branch: str | None, child_env: dict[str, str]
+    ) -> None:
+        raise RuntimeError("simulated push failure")
+
+    backend._post_run_push = _failing_push  # type: ignore[method-assign]
+
+    store = RunEventStore()
+    run_id = _run_id()
+    store.register(run_id)
+    harness = _make_fake_harness()
+
+    await backend.dispatch(
+        run_id=run_id,
+        repo_owner="acme",
+        repo_name="myrepo",
+        branch="main",
+        claude_args=["claude", "-p", "hello"],
+        child_env={"CLAUDE_CODE_OAUTH_TOKEN": "tok", "GH_TOKEN": "gh"},
+        allowed_agent_refs=None,
+        contract="agents/implementer.md",
+        forge_token_scope="repo-branch",
+        event_store=store,
+        harness=harness,
+    )
+    await asyncio.sleep(0.1)
+
+    # Run must still be success despite push failure.
+    status = store.get_status(run_id)
+    assert status.state == "completed"
+    assert status.conclusion == "success", (
+        "Run conclusion must be 'success' even when post-run push raises — "
+        "run outcome is determined by claude's exit code, not the push"
+    )
+
+
+@pytest.mark.covers("§9.2", "k8s-harness-dispatch-passes-forge-token-scope")
+async def test_harness_dispatch_passes_forge_token_scope_to_backend() -> None:
+    """ClaudeCodeHarnessPort.dispatch() passes forge_token_scope to the backend.
+
+    The backend uses forge_token_scope to determine whether to include the
+    end-of-run push safety net.  The harness must forward DispatchContext.forge_token_scope
+    to the backend's dispatch() call.
+    """
+    fake_backend = FakeExecutionBackend()
+
+    port = ClaudeCodeHarnessPort(
+        claude_oauth_token="tok",
+        app_id="app",
+        private_key_pem="pem",
+        installation_id="inst",
+        repo_owner="acme",
+        repo_name="myrepo",
+        execution_backend=fake_backend,
+    )
+
+    for scope in ("repo-branch", "repo-comment"):
+        ctx = DispatchContext(
+            contract="agents/implementer.md",
+            model="claude-sonnet-4-6",
+            max_turns=30,
+            forge_token_scope=scope,
+        )
+        with patch(
+            "src.ports.harness._mint_scoped_installation_token",
+            new=AsyncMock(return_value="scoped-token"),
+        ):
+            await port.dispatch(ctx)
+
+    assert len(fake_backend.dispatched) == 2, "Backend must have been called twice"
+    scopes_passed = [d["forge_token_scope"] for d in fake_backend.dispatched]
+    assert "repo-branch" in scopes_passed, "repo-branch scope must be forwarded to backend"
+    assert "repo-comment" in scopes_passed, "repo-comment scope must be forwarded to backend"

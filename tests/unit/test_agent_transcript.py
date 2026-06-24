@@ -586,6 +586,7 @@ async def test_subprocess_backend_emits_agent_message_events() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -662,6 +663,7 @@ async def test_subprocess_backend_drops_system_noise() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -734,6 +736,7 @@ async def test_k8s_backend_streams_agent_messages_via_log_client() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -794,6 +797,7 @@ async def test_k8s_backend_without_log_client_no_transcript_events() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )
@@ -860,6 +864,7 @@ async def test_k8s_log_stream_redacts_secrets() -> None:
         child_env={"GH_TOKEN": "gh"},
         allowed_agent_refs=None,
         contract="agents/implementer.md",
+        forge_token_scope="repo-comment",
         event_store=store,
         harness=harness,
     )

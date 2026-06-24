@@ -900,6 +900,17 @@ DispatchContext {
 
 **Triager dispatch:** use `forge_token_scope: "repo-comment"`. **All others:** `"repo-branch"`.
 
+**Harness commit-durability guarantee (end-of-run push safety net).** For
+write-scoped runs (`forge_token_scope == "repo-branch"`) that exit cleanly
+(claude rc == 0), the harness performs an end-of-run `git push origin HEAD`
+*after* claude returns, guarded by `git rev-list origin/<branch>..HEAD` so
+it is a clean no-op when the agent already pushed or made no commits.  This
+is a deterministic complement to the agent-contract reminder (#155): a
+forgotten `git push` can never silently lose committed work (PR #52 regression
+lock).  Push failure is logged to stderr and does NOT flip the run to failed —
+the run outcome is always determined by claude's exit code.  Read-only runs
+(`forge_token_scope == "repo-comment"`) never attempt a push.
+
 **Allowlist injection for the triager.** The harness injects the allowlist via an `ALLOWLIST`
 environment variable in the sandbox (comma-separated). `DispatchContext` does not carry it
 directly (to prevent confusion with an instruction); the harness reads it from `RepoConfig`
