@@ -148,6 +148,50 @@ function handle401(): never {
 }
 
 /**
+ * Auth endpoints that must NOT trigger re-auth redirect on failure — they
+ * surface their own error messages (e.g. "Invalid credentials").
+ */
+const AUTH_ENDPOINTS = ["/api/auth/login", "/api/auth/refresh"];
+
+/**
+ * Classify a fetch Response as an auth-expiry signal.
+ *
+ * Covers all the ways an authentik ForwardAuth proxy can indicate a session
+ * has expired, not just the plain HTTP 401 the app's own backend emits:
+ *
+ *   - 401 — app JWT expired (existing case)
+ *   - 503 — proxy returned a gateway error while the session was being
+ *            re-established; seen in practice as the symptom that sent users
+ *            to the manual logout/login recovery loop
+ *   - opaqueredirect — fetch(redirect:"manual") made the ForwardAuth 302
+ *            surface as a type="opaqueredirect" response instead of being
+ *            silently followed to the login HTML page
+ *   - resp.redirected — browser followed a redirect before we could catch it
+ *            with redirect:"manual" (defensive; should not occur with the flag)
+ *   - HTML content-type on an /api/ path — the HTML login page leaked through
+ *            (e.g. redirect:"manual" not honoured in some browsers, or a proxy
+ *            returned 200 with a login page body)
+ *
+ * Auth endpoints themselves are excluded so login/refresh failures surface
+ * their own errors rather than bouncing to the login page in a loop.
+ */
+function isAuthExpiry(resp: Response, path: string): boolean {
+  if (AUTH_ENDPOINTS.some((ep) => path.startsWith(ep))) return false;
+  if (resp.status === 401) return true;
+  if (resp.status === 503) return true;
+  if (resp.type === "opaqueredirect") return true;
+  if (resp.redirected) return true;
+  if (
+    path.startsWith("/api/") &&
+    !resp.ok &&
+    (resp.headers.get("content-type") ?? "").startsWith("text/html")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Single in-flight refresh promise shared across all concurrent callers.
  *
  * When multiple requests 401 simultaneously (e.g. on Dashboard mount), they
@@ -180,20 +224,33 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
     headers["Authorization"] = `Bearer ${token}`;
   }
 
-  let resp = await fetch(`${BASE}${path}`, { ...init, headers });
+  // Use redirect:"manual" so a ForwardAuth 302 to the authentik login page
+  // surfaces as an opaqueredirect response instead of being transparently
+  // followed to an HTML login page that json() would choke on.
+  let resp = await fetch(`${BASE}${path}`, { ...init, headers, redirect: "manual" });
 
-  // Attempt a concurrency-safe silent refresh on 401.
-  // All concurrent 401s share the same refresh promise; only one network
-  // request is made, and all callers retry with the new token once it lands.
-  if (resp.status === 401 && token) {
+  // Attempt a concurrency-safe silent refresh on any auth-expiry signal.
+  // All concurrent auth-expiry responses share the same refresh promise; only
+  // one network request is made, and all callers retry with the new token once
+  // it lands.  This preserves the existing 401+refresh happy path and extends
+  // it to cover the ForwardAuth 503/redirect/HTML cases.
+  if (isAuthExpiry(resp, path) && token) {
     const newToken = await getOrStartRefresh();
     if (newToken) {
       headers["Authorization"] = `Bearer ${newToken}`;
-      resp = await fetch(`${BASE}${path}`, { ...init, headers });
+      resp = await fetch(`${BASE}${path}`, { ...init, headers, redirect: "manual" });
     }
   }
 
-  if (resp.status === 401) {
+  // If still auth-expiry after the refresh attempt (or there was no token to
+  // refresh with), trigger a full-page re-auth navigation.  This is the same
+  // recovery the original code applied to a naked 401 — a top-level
+  // window.location navigation re-auths through authentik and re-establishes
+  // the session, automating the user's former manual logout/login step.
+  // Note: a genuine backend-down 503 (not auth-related) will also land here
+  // and bounce to /login; after re-auth the user returns to their original
+  // page, where the backend will either have recovered or show the real error.
+  if (isAuthExpiry(resp, path)) {
     handle401();
   }
 
