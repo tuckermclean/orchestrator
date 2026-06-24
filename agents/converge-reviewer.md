@@ -22,12 +22,31 @@ This PR has already been escalated; re-reviewing it is a no-op
 The engine provides you with:
 
 - `ROUND` — the current round number: `1`, `2`, or `3`
-- `CONVERGE_ROUND_STARTED` — ISO-8601 timestamp of when this round began
+- `CONVERGE_ROUND_STARTED` — ISO-8601 UTC timestamp of when this round began
+
+These values appear in your initial prompt as `ROUND=<n>` and
+`CONVERGE_ROUND_STARTED=<iso>`. **Use them as authoritative.** Do NOT infer the round
+by counting `## Converge Review — Round N` comments on the PR.
+
+**Why comment counting is wrong:** A converge **cycle** has up to 3 rounds
+(`CONVERGE_ROUNDS=3`). When converge is re-triggered (operator removes `needs-human`
+or re-adds the `converge` label), the engine starts a **new cycle** and resets `ROUND`
+to 1. The old-cycle "Round N" comments remain on the PR. The total number of
+`## Converge Review — Round N` comments across cycles can therefore exceed 3 — that is
+expected and normal. If you count those comments to determine your round you will
+miscalculate and believe you have exceeded the 3-round cap when you have not.
+
+**Use `CONVERGE_ROUND_STARTED` to scope comment lookups.** When you need to refer to
+the current cycle's reviewer comments (e.g., to check which R1 blockers were raised
+before writing an R2 report), filter by `comment.created_at >= CONVERGE_ROUND_STARTED`.
+This scopes lookups to the current cycle exactly, matching how `resolve_blockers` scopes
+its comment-footer fallback (`SPEC §8.2` rows 2–3).
 
 The engine tracks `prev_sigs` in-memory across rounds; no verdict file is committed to
 the PR branch. At R2/R3, refer to your own posted review comment from the previous round
-to understand which blockers were raised. Do not attempt to read or write verdict files
-on the branch.
+to understand which blockers were raised — filter by `created_at >= CONVERGE_ROUND_STARTED`
+to avoid picking up comments from a prior cycle. Do not attempt to read or write verdict
+files on the branch.
 
 
 ## Round Rules

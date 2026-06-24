@@ -18,24 +18,29 @@ dispatches you. That comment is your authoritative source of blockers. There is 
 file on the branch — the verdict channel is structured output captured by the harness, not
 a file commit (`SPEC.md §5`).
 
-**Find the latest review comment:**
+**Find the current-cycle review comment using `CONVERGE_ROUND_STARTED`:**
 
 1. List all comments on this PR (`gh pr view <PR_NUMBER> --comments` or
    `gh api repos/<owner>/<repo>/issues/<PR_NUMBER>/comments`).
-2. Select the most recent comment whose body starts with `## Converge Review — Round`.
-   This is guaranteed to be from the current round: the engine awaited the reviewer's run
-   before dispatching you, so the comment already exists.
-3. Extract the blockers section — look for `### 🔴 Blockers` entries. Each blocker has a
+2. Filter to comments with `created_at >= CONVERGE_ROUND_STARTED` (the ISO-8601 UTC
+   timestamp in your prompt). This scopes the search to the current converge cycle.
+   **Do NOT simply pick the most recent `## Converge Review` comment without checking
+   this timestamp** — when converge is re-triggered, old-cycle comments remain on the
+   PR and a naive "pick the latest" will find a comment from a previous cycle.
+3. Among the filtered comments, select the most recent one whose body starts with
+   `## Converge Review — Round`. This is guaranteed to be from the current round: the
+   engine awaited the reviewer's run before dispatching you, so the comment already exists.
+4. Extract the blockers section — look for `### 🔴 Blockers` entries. Each blocker has a
    `BLOCKER: <signature>` line followed by a description. The `### 🔴 Blockers` section
    immediately precedes the footer line `🔴 N blockers | 🟡 ...`.
 
 **Guard — no review comment or nothing to fix:**
 
-If no `## Converge Review` comment exists on the PR, terminate immediately without making
-any changes.
+If no `## Converge Review` comment exists within the current cycle window
+(`created_at >= CONVERGE_ROUND_STARTED`), terminate immediately without making any changes.
 
-If the latest such comment exists, read the round from its header (`## Converge Review —
-Round N`) and apply the round-aware termination rule:
+Apply the round-aware termination rule using the engine-provided `ROUND` value from your
+prompt (not from reading the comment header — see Step 2):
 
 - **R1**: Terminate immediately (nothing to do) only if BOTH `blockers == 0` AND
   `suggestions == 0`. If blockers are zero but suggestions remain, do NOT terminate —
@@ -54,7 +59,19 @@ Do not read or write any `.converge-verdict*.json` file. Those files no longer e
 
 ## Step 2 — Determine the Current Round
 
-The engine provides `ROUND` in your environment. Act accordingly:
+The engine provides `ROUND=<n>` in your prompt. Use it as authoritative. Do NOT infer
+the round by counting `## Converge Review — Round N` comment headers on the PR.
+
+**Why comment counting is wrong:** A converge **cycle** has up to 3 rounds. When converge
+is re-triggered (operator re-adds the `converge` label), the engine starts a **new cycle**
+and resets `ROUND` to 1. Old-cycle comments remain on the PR. The total number of
+`## Converge Review — Round N` comments can exceed 3 across cycles — that is expected.
+Counting them to determine your round will produce a wrong answer after a re-trigger.
+
+**Always use the engine-provided `ROUND` value. Always scope comment lookups with
+`CONVERGE_ROUND_STARTED`.**
+
+Act according to `ROUND`:
 
 **R1**: Fix ALL blockers AND all suggestions. Both categories are in scope this round
 (`SPEC.md §5`).

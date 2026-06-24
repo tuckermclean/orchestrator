@@ -161,6 +161,25 @@ Each round: Seed → Review → Check-CI → Decide → Fix (or early-exit to ad
 | R2 | Blockers only | Yes (unless spotless) |
 | R3 | Blockers only — final review | **No** |
 
+### Cycle vs. round — re-trigger semantics
+
+A converge **cycle** is one invocation of the 3-round loop: R1 → R2 → R3, ending in
+APPROVED or ESCALATED.  A **round** is one step within a cycle.
+
+When converge is re-triggered (operator removes `needs-human` and the `converge` label
+is still present, or re-adds `converge` → RC-3 re-arms → a new converge job starts),
+the engine starts a **new cycle** from R1 and resets the round counter.  Old-cycle
+`## Converge Review — Round N` comments remain on the PR; the total number of such
+comments across all cycles on a single PR can therefore exceed `CONVERGE_ROUNDS = 3`.
+That is expected and normal.
+
+**The authoritative round is always the engine-injected `converge_round` field in the
+reviewer's and fixer's `DispatchContext`** (surfaced as `ROUND=<n>` in the agent's
+prompt).  Agents must never infer the round by counting comment headers — that
+inference is wrong after any re-trigger.  `converge_round_started` (ISO-8601 UTC
+timestamp) is injected alongside `converge_round` so agents can scope comment lookups
+to the current cycle (`comment.created_at >= converge_round_started`).
+
 ### Spotless early-exit
 
 If at **any round** `blockers == 0 AND ci_green AND suggestions == 0` (fully clean),
@@ -895,6 +914,23 @@ DispatchContext {
   #         by agent contract instead). list → reject out-of-set spawns (converge dispatches,
   #         where contributor-controlled diff content could inject adversarial AgentRefs).
   allowed_agent_refs: list[AgentRef] | None
+
+  # Authoritative round number for converge reviewer and fixer dispatches (1/2/3).
+  # None for all other roles (implementer, orchestrator, triager, nitpicker, adjudicator).
+  # The agent MUST use this value and MUST NOT infer the round by counting
+  # "## Converge Review — Round N" comments on the PR: when converge is re-triggered
+  # the engine starts a new cycle with ROUND=1 but old-cycle comments remain on the PR,
+  # making comment-count inference produce a wrong answer after a re-trigger (live bug,
+  # PR #52).  I3-safe: this is a typed integer field, not a free-form dict.
+  converge_round: int | None
+
+  # ISO-8601 UTC timestamp of when the current converge round began.  Set alongside
+  # converge_round for reviewer and fixer dispatches; None for all other roles.
+  # Agents use this to scope comment lookups to the current cycle via
+  # comment.created_at >= converge_round_started, matching how resolve_blockers already
+  # scopes its comment-footer fallback (§8.2 rows 2–3).  A re-triggered cycle starts a
+  # fresh timestamp, so old-cycle comments are naturally excluded.
+  converge_round_started: string | None
 }
 ```
 

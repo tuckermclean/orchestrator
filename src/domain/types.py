@@ -157,6 +157,18 @@ class DispatchContext(BaseModel):
     # Set by converge() from forge.get_pr(pr_ref).head_branch so the reviewer/fixer
     # operates on the actual PR diff rather than the default branch.
     head_branch: str | None = None
+    # converge_round: the current round number (1/2/3) for converge reviewer and fixer
+    # dispatches.  None for all other dispatches (implementer, orchestrator, triager,
+    # nitpicker, adjudicator).  The agent uses this as the authoritative round — it must
+    # NOT infer the round by counting "## Converge Review" comments on the PR, because a
+    # re-triggered converge cycle starts a fresh cycle and the old comments remain.
+    converge_round: int | None = None
+    # converge_round_started: ISO-8601 UTC timestamp of when the current round began,
+    # set alongside converge_round.  The agent uses this to scope comment lookups to the
+    # current cycle via created_at >= converge_round_started, matching how resolve_blockers
+    # scopes its comment-footer fallback (SPEC §8.2 rows 2–3).  None for non-converge
+    # dispatches.
+    converge_round_started: str | None = None
 
 
 # ---------------------------------------------------------------------------
