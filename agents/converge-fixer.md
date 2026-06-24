@@ -221,6 +221,25 @@ For example:
 Commits should be in logical units. Do not squash all fixes into one commit.
 
 
+## Step 7.5 — PUSH your commits to the remote branch (REQUIRED)
+
+**This step is mandatory and must not be skipped.** Your commits are worthless until
+they are on the remote — the agent pod is ephemeral, and any commits that exist only
+locally are destroyed when the pod terminates. The next reviewer round clones the
+*remote* branch; if your fixes were never pushed, it will see the pre-fix state,
+re-flag every blocker as unresolved, and converge will falsely escalate.
+
+After committing all fixes and confirming the gate is green, push:
+
+```sh
+git push origin HEAD
+```
+
+Wait for the push to succeed before proceeding. On push failure (network error,
+rejected push): retry once. If the push still fails, post a comment on the PR
+explaining the push failure and then terminate — do not silently swallow push errors.
+
+
 ## Step 8 — Do Not Re-Open Deferred Suggestions in R2
 
 In R2, blockers only. Do not re-open R1 suggestions, address non-blocker suggestions,
@@ -229,8 +248,9 @@ or expand scope. Unaddressed suggestions appear in the nit follow-up issue at fi
 
 ## Step 9 — Terminate
 
-After committing all fixes and confirming the gate is green, terminate. The engine will
-re-invoke the converge reviewer for the next round.
+After committing all fixes, confirming the gate is green, and **pushing to the remote
+branch (Step 7.5)**, terminate. The engine will re-invoke the converge reviewer for the
+next round.
 
 Do not:
 - Write any verdict file to the PR branch (the verdict channel is the harness run output, not a file)
