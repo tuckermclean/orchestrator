@@ -240,6 +240,23 @@ The comment body should include: a brief summary of findings, grouped lists of b
 (with slugs), suggestions, and nits, and (in R2+) which R1 blockers were resolved.
 Include the round number in the header (e.g., `## Converge Review — Round 2`).
 
+**Shell-safe comment posting — REQUIRED.** Review bodies contain backticks (blocker
+slugs like `` `security:no-csp-meta` ``) and `$(...)`-like patterns that bash expands
+inside double-quoted `--body "..."`, stripping every backtick-wrapped token and corrupting
+the human-readable record and the comment-footer fallback. Always use a **single-quoted
+heredoc** piped to `--body-file -` so no shell expansion occurs:
+
+```sh
+gh pr comment <PR_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+## Converge Review — Round N
+... `security:no-csp-meta` ...  ← backticks and $() are safe inside single-quoted heredoc
+🔴 N blockers | 🟡 M suggestions | 💬 K nits
+EOF
+```
+
+Never use `--body "..."` (double-quoted) for comment bodies. The single-quoted `<<'EOF'`
+delimiter is mandatory — `<<EOF` (without quotes) still performs variable expansion.
+
 
 ## Step 5 — Emit the Verdict as Structured Output (Your Final Act)
 

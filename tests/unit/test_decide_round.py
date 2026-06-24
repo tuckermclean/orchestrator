@@ -40,6 +40,7 @@ def test_decide_round_adjudicate_r3_with_residual_suggestions() -> None:
     """R3 with 0 blockers, CI green, but residual suggestions → adjudicate (row 1b).
 
     Suggestions may remain at R3 — the nitpicker handles them in the adjudication phase.
+    Row 1b now covers round>=2 (was round==3), so this remains adjudicate.
     """
     assert decide_round(3, 0, True, [], [], suggestions=2) == "adjudicate"
 
@@ -62,18 +63,52 @@ def test_decide_round_r1_suggestions_present_not_spotless() -> None:
     assert decide_round(1, 0, True, [], [], suggestions=1) == "fix"
 
 
-@pytest.mark.covers("§8.3", "row-1-adjudicate")
-def test_decide_round_r2_suggestions_present_not_spotless() -> None:
-    """R2 with suggestions > 0 is NOT spotless (row 1 requires suggestions==0).
+@pytest.mark.covers("§8.3", "row-1b-adjudicate-r2-suggestions")
+def test_decide_round_r2_suggestions_present_adjudicates() -> None:
+    """R2 with 0 blockers, CI green, suggestions > 0 → adjudicate (row 1b, regression lock).
 
-    Row 1b requires round==3. So R2 with suggestions falls to row 4 (fix).
+    R2/R3 fixer is blockers-only; dispatching it with 0 blockers is a no-op.
+    Row 1b (round>=2 AND blockers==0 AND ci_green) fires before row 4 (round==2 fix).
+    Residual suggestions go to the nitpicker in the adjudication phase.
     """
     # Row 1: blockers==0, ci_green, suggestions==1 → NO (suggestions!=0)
-    # Row 1b: blockers==0, ci_green → NO (round!=3)
-    # Row 2: round==1 → NO
-    # Row 3: curr_sigs==prev_sigs==[] → NO (empty)
-    # Row 4: round==2 → fix
-    assert decide_round(2, 0, True, [], [], suggestions=1) == "fix"
+    # Row 1b: round>=2 AND blockers==0 AND ci_green → YES → adjudicate
+    assert decide_round(2, 0, True, [], [], suggestions=1) == "adjudicate"
+
+
+# ---------------------------------------------------------------------------
+# Fix-2 regression locks — no-op fixer prevention (SPEC §8.3 row 1b amended)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.covers("§8.3", "row-1b-r2-0-blockers-suggestions-adjudicates")
+@pytest.mark.covers("§8.3", "row-1b-adjudicate-r2-suggestions")
+def test_decide_round_r2_0_blockers_with_suggestions_adjudicates_regression() -> None:
+    """Regression: R2 + 0 blockers + suggestions > 0 must adjudicate, NOT fix.
+
+    Pre-fix (row 1b was round==3 only): would have returned 'fix' (row 4), dispatching
+    a no-op R2 fixer that can't touch suggestions. Post-fix (row 1b is round>=2): returns
+    'adjudicate' so residual suggestions go to the nitpicker, not a no-op fixer run.
+    """
+    assert decide_round(2, 0, True, [], [], suggestions=6) == "adjudicate"
+
+
+@pytest.mark.covers("§8.3", "row-2-r1-0-blockers-suggestions-fix")
+@pytest.mark.covers("§8.3", "row-2-r1-fix")
+def test_decide_round_r1_0_blockers_with_suggestions_fix() -> None:
+    """R1 + 0 blockers + suggestions > 0 → fix (row 2), NOT adjudicate.
+
+    R1 fixer handles BOTH blockers and suggestions (SPEC §5). Row 1 (spotless) requires
+    suggestions==0; row 1b requires round>=2 (R1 fails that). R1 with suggestions must
+    route to fix so the fixer can address the suggestions.
+    """
+    assert decide_round(1, 0, True, [], [], suggestions=3) == "fix"
+
+
+@pytest.mark.covers("§8.3", "row-1-adjudicate")
+def test_decide_round_spotless_r1_adjudicates() -> None:
+    """Spotless R1 (0 blockers, 0 suggestions, CI green) → adjudicate (row 1 early-exit)."""
+    assert decide_round(1, 0, True, [], [], suggestions=0) == "adjudicate"
 
 
 # ---------------------------------------------------------------------------

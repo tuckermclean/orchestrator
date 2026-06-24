@@ -6,8 +6,9 @@ Updated for the 3-tier adjudication model (SPEC §5/§8.3/§251):
   Opus adjudicator) rather than directly to APPROVED.
 - Spotless early-exit: ``blockers == 0 AND suggestions == 0 AND ci_green`` at
   any round → ``adjudicate`` (skip remaining fix rounds).
-- R3 terminal: ``blockers == 0 AND ci_green`` (suggestions may remain) → ``adjudicate``
-  (residual suggestions handled by the nitpicker in the adjudication phase).
+- R2/R3 with 0 blockers + CI green (any suggestions) → ``adjudicate``: the R2/R3
+  fixer is blockers-only and would be a no-op; residual suggestions go to the
+  nitpicker in the adjudication phase.
 """
 
 from __future__ import annotations
@@ -56,18 +57,21 @@ def decide_round(
 
     **Amended truth table (SPEC §5/§8.3 — 3-tier model):**
 
-    Row 1: ``blockers==0 AND ci_green AND suggestions==0`` (any round) → ``adjudicate``
-    Row 1b: ``round==3 AND blockers==0 AND ci_green`` (suggestions may remain) → ``adjudicate``
-    Row 2: ``round==1`` → ``fix``
-    Row 3: ``curr_sigs==prev_sigs AND curr_sigs!=[] AND blockers not in (0,"unknown")``
-           → ``escalate:no-progress``
-    Row 4: ``round==2`` → ``fix``
-    Row 5: ``round==3 AND blockers=="unknown"`` → ``escalate:no-verdict``
-    Row 6: ``round==3 AND blockers==0`` (ci not green) → ``escalate:ci-red``
-    Row 7: ``round==3`` else (blockers ≥ 1) → ``escalate:cap-reached``
+    Row 1:  ``blockers==0 AND ci_green AND suggestions==0`` (any round) → ``adjudicate``
+    Row 1b: ``round>=2 AND blockers==0 AND ci_green`` (suggestions may remain) → ``adjudicate``
+            (R2/R3 fixer is blockers-only; dispatching it with 0 blockers is a no-op;
+            residual suggestions go to the nitpicker in the adjudication phase)
+    Row 2:  ``round==1`` → ``fix``
+    Row 3:  ``curr_sigs==prev_sigs AND curr_sigs!=[] AND blockers not in (0,"unknown")``
+            → ``escalate:no-progress``
+    Row 4:  ``round==2`` → ``fix``
+    Row 5:  ``round==3 AND blockers=="unknown"`` → ``escalate:no-verdict``
+    Row 6:  ``round==3 AND blockers==0`` (ci not green) → ``escalate:ci-red``
+    Row 7:  ``round==3`` else (blockers ≥ 1) → ``escalate:cap-reached``
 
-    Key: ``"unknown"`` never produces ``adjudicate``. Spotless (rows 1/1b) takes priority
-    over all other rows — it is evaluated before R1 fix, no-progress, R2 fix, etc.
+    Key: ``"unknown"`` never produces ``adjudicate``. Spotless (row 1) takes priority
+    over all other rows. Row 1b catches R2/R3 with 0 blockers regardless of suggestions —
+    this prevents a no-op fixer run when only suggestions remain at R2.
     """
     # Runtime validation — the static Literal is not enforced at runtime, so guard the
     # call site explicitly (SPEC §8.3). bool is a subclass of int; reject it for `round`
@@ -84,9 +88,10 @@ def decide_round(
     if blockers == 0 and ci_green and suggestions == 0:
         return "adjudicate"
 
-    # Row 1b — R3 terminal with 0 blockers + CI green (suggestions may remain).
+    # Row 1b — R2/R3 with 0 blockers + CI green (suggestions may remain).
+    # The R2/R3 fixer addresses blockers only; dispatching it with 0 blockers is a no-op.
     # Residual suggestions are handed to the nitpicker in the adjudication phase.
-    if round == 3 and blockers == 0 and ci_green:
+    if round >= 2 and blockers == 0 and ci_green:
         return "adjudicate"
 
     # Row 2 — R1 always advances to a fix step (when not adjudicate).

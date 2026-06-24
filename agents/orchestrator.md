@@ -66,6 +66,23 @@ If the issue as described would require changing any of these files:
 2. Close the draft PR with a comment referencing the protected path.
 3. Terminate. Do not proceed to implementation.
 
+**Shell-safe comment posting — REQUIRED.** Use a **single-quoted heredoc** piped to
+`--body-file -` for all issue and PR comments. Comments can contain backticks and
+`$()`-like patterns that bash expands inside double-quoted `--body "..."`, corrupting
+the message. The single-quoted delimiter `<<'EOF'` disables all shell expansion:
+
+```sh
+gh issue comment <ISSUE_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+This issue requires modifying a protected path and needs human implementation.
+EOF
+
+gh pr comment <PR_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+Closing: protected-path change required — see issue comment.
+EOF
+```
+
+Never use `--body "..."` (double-quoted) for comment bodies.
+
 This check happens before any code is written. `Engine.converge` also checks the
 resulting diff — both exist to catch protected-path changes at the earliest possible
 moment (`SECURITY.md §2 T6`, `SPEC.md §6 E1`).
