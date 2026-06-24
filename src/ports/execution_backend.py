@@ -157,6 +157,7 @@ class ExecutionBackend(Protocol):
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
         contract: str,
+        forge_token_scope: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -176,6 +177,9 @@ class ExecutionBackend(Protocol):
           contract:           DispatchContext.contract path (e.g. "agents/orchestrator.md").
                               Passed to the backend so it can materialise the contract
                               into the workspace before running the agent (#111).
+          forge_token_scope:  "repo-branch" (write-scoped) or "repo-comment" (read-only).
+                              Write-scoped runs receive the deterministic end-of-run push
+                              safety net; read-only runs never push.
           event_store:        receives run events and status updates.
           harness:            ClaudeCodeHarnessPort instance (provides _clone_repo,
                               _write_spawn_hook, and _materialize_contract helpers
@@ -224,6 +228,7 @@ class FakeExecutionBackend:
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
         contract: str,
+        forge_token_scope: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -237,6 +242,7 @@ class FakeExecutionBackend:
                 "child_env": child_env,
                 "allowed_agent_refs": allowed_agent_refs,
                 "contract": contract,
+                "forge_token_scope": forge_token_scope,
             }
         )
         if self._fail_dispatch:
@@ -296,6 +302,7 @@ class SubprocessBackend:
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
         contract: str,
+        forge_token_scope: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -361,7 +368,16 @@ class SubprocessBackend:
         self._processes[run_id] = (process, work_dir)
 
         watcher = asyncio.create_task(
-            self._watch(run_id, process, work_dir, event_store),
+            self._watch(
+                run_id,
+                process,
+                work_dir,
+                event_store,
+                repo_dir=repo_dir,
+                branch=branch,
+                forge_token_scope=forge_token_scope,
+                child_env=child_env,
+            ),
             name=f"subprocess-watch-{run_id[:8]}",
         )
         self._background_tasks.add(watcher)
@@ -375,6 +391,11 @@ class SubprocessBackend:
         process: ProcessResult,
         work_dir: str,
         event_store: RunEventStore,
+        *,
+        repo_dir: str = "",
+        branch: str | None = None,
+        forge_token_scope: str = "repo-comment",
+        child_env: dict[str, str] | None = None,
     ) -> None:
         """Background: stream JSONL events from stdout and update status on exit.
 
@@ -385,6 +406,15 @@ class SubprocessBackend:
 
         Security (I3): parse_jsonl_line() redacts secret-like strings and
         truncates large payloads before they reach the event store.
+
+        Deterministic end-of-run push (safety net for PR #52 loss scenario):
+        After claude exits cleanly (rc==0), write-scoped runs (forge_token_scope
+        == "repo-branch") attempt a git push for any local commits not yet on the
+        remote.  This is belt-and-suspenders with the agent contracts (#155) —
+        a forgotten git push can never silently lose committed work.
+        Push failure is logged to stderr but does NOT flip a successful run to
+        failed — the run's exit code is always determined by claude, not the push.
+        Read-only runs (forge_token_scope == "repo-comment") never push.
         """
         event_store.set_status(run_id, RunStatus(state="in_progress"))
 
@@ -398,6 +428,25 @@ class SubprocessBackend:
                     event_store.append(run_id, event)
 
         exit_code = await process.wait()
+
+        # Deterministic end-of-run push safety net (SPEC §10.1/§9.2, #52).
+        # Only push when:
+        #   1. claude exited cleanly (rc == 0)
+        #   2. Run is write-scoped ("repo-branch") — read-only roles never push
+        #   3. There are local commits not yet on the remote (no-op guard)
+        # Push failure is non-fatal: logged to stderr, run still recorded as success.
+        if exit_code == 0 and forge_token_scope == "repo-branch" and repo_dir:
+            try:
+                await self._post_run_push(run_id, repo_dir, branch, child_env or {})
+            except Exception as exc:
+                # Push failure must NEVER flip a successful run to failed.
+                # _post_run_push already catches internally; this outer guard
+                # defends against monkey-patching in tests or future overrides.
+                logger.warning(
+                    "entry: end-of-run push raised unexpectedly for run %s: %r — ignored",
+                    run_id,
+                    exc,
+                )
 
         # Extract the reviewer verdict from the collected events before marking
         # completion — the verdict is needed by Engine.converge before it polls
@@ -419,6 +468,93 @@ class SubprocessBackend:
             pass
 
         self._processes.pop(run_id, None)
+
+    async def _post_run_push(
+        self,
+        run_id: str,
+        repo_dir: str,
+        branch: str | None,
+        child_env: dict[str, str],
+    ) -> None:
+        """Push any unpushed local commits to the remote (deterministic safety net).
+
+        Checks git rev-list origin/<branch>..HEAD first so this is a no-op when
+        the agent already pushed or made no commits.  The upstream ref used for
+        the comparison is "origin/<branch>" when branch is known, otherwise
+        "origin/HEAD" which resolves to the remote's default branch.
+
+        Push failure is logged but never propagates — claude's exit code remains
+        the authoritative run outcome (the engine decides success/failure, not the
+        post-run push).
+        """
+        base_env = {
+            "GIT_TERMINAL_PROMPT": "0",
+            "PATH": child_env.get("PATH", os.environ.get("PATH", "/usr/bin:/bin")),
+            "HOME": child_env.get("HOME", os.environ.get("HOME", "/root")),
+        }
+        # Use upstream ref for comparison.
+        # "origin/<branch>" when we know the branch; fall back to "origin/HEAD"
+        # (points to the remote default branch) when no specific branch was checked out.
+        upstream_ref = f"origin/{branch}" if branch else "origin/HEAD"
+
+        # Step 1: check whether there are local commits not yet on the remote.
+        try:
+            check_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-C",
+                repo_dir,
+                "rev-list",
+                f"{upstream_ref}..HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=base_env,
+            )
+            stdout_bytes, _ = await check_proc.communicate()
+            unpushed_output = stdout_bytes.decode(errors="replace").strip()
+        except Exception as exc:
+            logger.warning(
+                "entry: end-of-run push check failed for run %s: %r — skipping push",
+                run_id,
+                exc,
+            )
+            return
+
+        if not unpushed_output:
+            # No unpushed commits — push is a clean no-op.
+            return
+
+        # Step 2: push HEAD to the remote.
+        try:
+            push_proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-C",
+                repo_dir,
+                "push",
+                "origin",
+                "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=base_env,
+            )
+            _, push_stderr = await push_proc.communicate()
+            if push_proc.returncode != 0:
+                logger.warning(
+                    "entry: end-of-run push failed for run %s (exit %s): %s",
+                    run_id,
+                    push_proc.returncode,
+                    push_stderr.decode(errors="replace").strip(),
+                )
+            else:
+                logger.info(
+                    "entry: end-of-run push succeeded for run %s",
+                    run_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "entry: end-of-run push failed for run %s: %r",
+                run_id,
+                exc,
+            )
 
     async def cancel(
         self,
@@ -716,6 +852,7 @@ class K8sJobBackend:
         branch: str | None,
         claude_args: list[str],
         contract: str = "",
+        forge_token_scope: str = "repo-comment",
     ) -> str:
         """Build the shell script that runs inside the agent-runner pod.
 
@@ -737,7 +874,15 @@ class K8sJobBackend:
              Adds /.agents/** to .git/info/exclude — pack must never be committed.
           6. When ORCHESTRATOR_ALLOWED_AGENT_REFS is set, installs the I9
              hook (baked at _BAKED_HOOK_PATH) into /workspace/repo/.claude/.
-          7. cd into /workspace/repo and exec the claude invocation.
+          7. cd into /workspace/repo and run the claude invocation (NOT exec —
+             so the post-run push safety net can execute after claude exits).
+          8. For write-scoped runs (forge_token_scope == "repo-branch"):
+             Deterministic end-of-run push safety net (SPEC §10.1/§9.2, #52):
+             on clean claude exit (rc==0) push any local commits not yet on the
+             remote.  Guard with git rev-list so this is a no-op when the agent
+             already pushed.  Push failure is logged to stderr but does NOT flip
+             a successful run to failed — exit $rc preserves claude's exit code.
+             Read-only runs (forge_token_scope == "repo-comment") never push.
 
         I3 security: GH_TOKEN is referenced as ${GH_TOKEN} in the shell
         command — it is NEVER interpolated as a literal string here.  The
@@ -745,10 +890,14 @@ class K8sJobBackend:
 
         Shell quoting: claude_args elements are individually shell-quoted via
         shlex.quote so argument injection from model or prompt is impossible.
+        Branch name is shell-quoted via shlex.quote — no shell injection from
+        a maliciously crafted branch name.
 
         contract: the DispatchContext.contract value (e.g. "agents/orchestrator.md").
           When non-empty, the basename is used to copy the baked contract file from
           _BAKED_CONTRACT_DIR into the cloned workspace so the agent can read it.
+        forge_token_scope: "repo-branch" (write-scoped) or "repo-comment" (read-only).
+          Only write-scoped runs receive the deterministic end-of-run push step.
         """
         import shlex
 
@@ -825,6 +974,37 @@ class K8sJobBackend:
             "fi\n"
         )
 
+        # Deterministic end-of-run push safety net (SPEC §10.1/§9.2, #52).
+        # Only emitted for write-scoped runs ("repo-branch").  Read-only runs
+        # ("repo-comment": triager, reviewer, adjudicator) have no write token
+        # and never make commits — skip the push step entirely.
+        # Guard with git rev-list so this is a no-op when the agent already
+        # pushed or made no commits.  Push failure is logged but does NOT flip
+        # a successful run to failed: exit $rc preserves claude's exit code.
+        if forge_token_scope == "repo-branch":
+            # Shell-quote the branch name for safe interpolation.
+            # When branch is None (default branch checkout) we use "HEAD" so
+            # git push origin HEAD always refers to the checked-out branch.
+            quoted_upstream = (
+                shlex.quote(f"origin/{branch}") if branch else "origin/HEAD"
+            )
+            # The repo path is a constant inside the pod — always /workspace/repo.
+            quoted_repo = shlex.quote("/workspace/repo")
+            post_run_push_step = (
+                # Step 8a: conditional push block — only on clean claude exit.
+                "if [ \"$rc\" -eq 0 ]; then\n"
+                # Step 8b: check for unpushed commits before attempting push.
+                f"  if [ -n \"$(git -C {quoted_repo} rev-list "
+                f"{quoted_upstream}..HEAD 2>/dev/null)\" ]; then\n"
+                f"    git -C {quoted_repo} push origin HEAD"
+                f" || echo 'entry: end-of-run push failed' >&2\n"
+                "  fi\n"
+                "fi\n"
+            )
+        else:
+            # Read-only scope: no push step.
+            post_run_push_step = ""
+
         script = (
             "set -e\n"
             # HOME must be writable: the agent-runner user has no home dir
@@ -863,8 +1043,16 @@ class K8sJobBackend:
             "\"\n"
             "fi\n"
             # Step 7: run claude in the cloned working tree.
+            # NOT exec — we must run claude as a child so the post-run push step
+            # executes after claude exits.  Capture the exit code with $?.
             f"cd /workspace/repo\n"
-            f"exec {quoted_claude}\n"
+            f"{quoted_claude}\n"
+            "rc=$?\n"
+            # Step 8: deterministic end-of-run push safety net (write-scoped runs only).
+            + post_run_push_step
+            # Preserve claude's exit code as the script's exit code — run success/failure
+            # is always determined by claude, not by the post-run push.
+            + "exit \"$rc\"\n"
         )
         return script
 
@@ -955,6 +1143,7 @@ class K8sJobBackend:
         child_env: dict[str, str],
         allowed_agent_refs: list[str] | None,
         contract: str,
+        forge_token_scope: str,
         event_store: RunEventStore,
         harness: Any,
     ) -> None:
@@ -962,11 +1151,12 @@ class K8sJobBackend:
 
         The control-plane does NOT clone the repo here — the entry script
         (built by _build_entry_script) does the clone inside the pod.
-        The entry script also materialises the agent contract (#111) and
-        configures git identity / push auth (#112) inside the pod.
+        The entry script also materialises the agent contract (#111),
+        configures git identity / push auth (#112), and performs the
+        deterministic end-of-run push safety net for write-scoped runs (#52).
         """
         entry_script = self._build_entry_script(
-            repo_owner, repo_name, branch, claude_args, contract
+            repo_owner, repo_name, branch, claude_args, contract, forge_token_scope
         )
         job_spec = self._build_job_spec(run_id, entry_script, child_env)
         job_name: str = job_spec["metadata"]["name"]

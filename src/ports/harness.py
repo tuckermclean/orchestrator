@@ -922,6 +922,7 @@ class ClaudeCodeHarnessPort:
             child_env=child_env,
             allowed_agent_refs=context.allowed_agent_refs,
             contract=context.contract,
+            forge_token_scope=context.forge_token_scope,
             event_store=self._event_store,
             harness=self,
         )
