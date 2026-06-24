@@ -5,14 +5,20 @@ from __future__ import annotations
 import pytest
 
 from src.domain.types import (
+    _IMPLEMENTER_MAX_TURNS,
+    ADJUDICATION_MODEL,
+    DEFAULT_SWARM_MODEL,
+    IMPLEMENTER_CONTRACT,
     LABEL_AGENT_WORK,
     LABEL_CONVERGE,
     LABEL_IMPLEMENTING,
     LABEL_READY,
     LABEL_TRIAGE,
+    DispatchContext,
     IssueRef,
     PRRef,
     RepoRef,
+    RunHandle,
 )
 from src.engine.dispatch import Engine
 from src.ports.fakes import FakeForgePort, FakeHarnessPort, FakeSessionPort
@@ -316,3 +322,196 @@ async def test_fake_forge_allows_create_pr_after_seed_branch_commits() -> None:
         draft=True,
     )
     assert ref is not None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch sub-machine: model-tier split (SPEC §10.1 amended, §251)
+#
+# These tests exercise the two-run sequential sub-machine introduced by the
+# "Opus orchestrator plans / Sonnet implementer implements" change.  Each test
+# calls Engine.dispatch() directly (not via OrchestratorService) so it can
+# inspect harness.dispatch_calls without the background-task indirection.
+# ---------------------------------------------------------------------------
+
+
+class _HarnessWithPRSideEffect(FakeHarnessPort):
+    """FakeHarnessPort variant that seeds an implementing PR after the first dispatch.
+
+    Simulates the orchestrator agent opening a draft PR and adding
+    LABEL_IMPLEMENTING during its run, so the dispatch sub-machine can find it
+    and proceed to the implementer step.
+    """
+
+    def __init__(
+        self,
+        forge: FakeForgePort,
+        issue_ref: IssueRef,
+        pr_ref: PRRef,
+        pr_body: str,
+    ) -> None:
+        super().__init__()
+        self._side_effect_forge = forge
+        self._issue_ref = issue_ref
+        self._pr_ref = pr_ref
+        self._pr_body = pr_body
+
+    async def dispatch(self, context: DispatchContext) -> RunHandle:  # type: ignore[override]
+        handle = await super().dispatch(context)
+        # After the first dispatch (orchestrator), seed the implementing PR into
+        # the forge so the engine finds it when it looks for `Closes #N`.
+        if len(self.dispatch_calls) == 1:
+            self._side_effect_forge.seed_pr(
+                self._pr_ref,
+                draft=True,
+                labels=[LABEL_IMPLEMENTING],
+                body=self._pr_body,
+            )
+        return handle
+
+
+@pytest.mark.covers("§10.1", "dispatch-sub-machine-model-split")
+async def test_dispatch_sub_machine_orchestrator_gets_opus() -> None:
+    """Orchestrator (first) run uses ADJUDICATION_MODEL (Opus, 40 turns).
+
+    SPEC §10.1 amended: the dispatch sub-machine fires the orchestrator on
+    route_entry('issues') which returns ADJUDICATION_MODEL/40 turns/
+    agents/orchestrator.md — same as before the split.
+    """
+    forge = FakeForgePort()
+    repo = RepoRef(owner="acme", name="service")
+    issue_ref = IssueRef(repo=repo, number=42)
+    pr_ref = PRRef(repo=repo, number=1)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    harness: _HarnessWithPRSideEffect = _HarnessWithPRSideEffect(
+        forge=forge,
+        issue_ref=issue_ref,
+        pr_ref=pr_ref,
+        pr_body="Closes #42",
+    )
+    session = FakeSessionPort()
+    engine = Engine(forge=forge, harness=harness, session=session)
+
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    # Two dispatches: orchestrator (Opus) then implementer (Sonnet)
+    assert len(harness.dispatch_calls) == 2
+    assert handle is not None
+
+    orch_ctx = harness.dispatch_calls[0]
+    assert orch_ctx.model == ADJUDICATION_MODEL, (
+        f"Orchestrator must use ADJUDICATION_MODEL ({ADJUDICATION_MODEL!r}), "
+        f"got {orch_ctx.model!r}"
+    )
+    assert orch_ctx.max_turns == 40
+    assert orch_ctx.issue_ref == issue_ref
+
+
+@pytest.mark.covers("§10.1", "dispatch-sub-machine-model-split")
+@pytest.mark.covers("§251", "implementer-uses-sonnet")
+async def test_dispatch_sub_machine_implementer_gets_sonnet() -> None:
+    """Implementer (second) run uses DEFAULT_SWARM_MODEL (Sonnet) with IMPLEMENTER_CONTRACT.
+
+    SPEC §251: the implementer — the heaviest code-writing workload — must NOT
+    run on Opus.  After the dispatch sub-machine split, the engine dispatches the
+    implementer on DEFAULT_SWARM_MODEL (Sonnet) as its own separate run.
+    """
+    forge = FakeForgePort()
+    repo = RepoRef(owner="acme", name="service")
+    issue_ref = IssueRef(repo=repo, number=43)
+    pr_ref = PRRef(repo=repo, number=2)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    harness = _HarnessWithPRSideEffect(
+        forge=forge,
+        issue_ref=issue_ref,
+        pr_ref=pr_ref,
+        pr_body="Closes #43",
+    )
+    session = FakeSessionPort()
+    engine = Engine(forge=forge, harness=harness, session=session)
+
+    await engine.dispatch("issues", issue_ref=issue_ref)
+
+    assert len(harness.dispatch_calls) == 2
+
+    impl_ctx = harness.dispatch_calls[1]
+    assert impl_ctx.model == DEFAULT_SWARM_MODEL, (
+        f"Implementer must use DEFAULT_SWARM_MODEL ({DEFAULT_SWARM_MODEL!r}), "
+        f"got {impl_ctx.model!r} — model-tier bug: implementer must NOT run on Opus"
+    )
+    assert impl_ctx.contract == IMPLEMENTER_CONTRACT, (
+        f"Implementer must use IMPLEMENTER_CONTRACT ({IMPLEMENTER_CONTRACT!r}), "
+        f"got {impl_ctx.contract!r}"
+    )
+    assert impl_ctx.max_turns == _IMPLEMENTER_MAX_TURNS
+    assert impl_ctx.issue_ref == issue_ref
+    assert impl_ctx.pr_ref == pr_ref
+
+
+@pytest.mark.covers("§10.1", "dispatch-sub-machine-no-pr-skips-implementer")
+async def test_dispatch_sub_machine_no_pr_skips_implementer() -> None:
+    """If the orchestrator opens no implementing PR, the implementer is NOT dispatched.
+
+    SPEC §10.1 amended: the engine looks for an open PR with LABEL_IMPLEMENTING
+    and `Closes #N` in the body after the orchestrator completes.  If none is
+    found (orchestrator crashed, aborted, or wrote no PR), the sub-machine stops
+    and returns the orchestrator handle.  RC-4 handles the orphaned issue.
+    """
+    forge = FakeForgePort()
+    repo = RepoRef(owner="acme", name="service")
+    issue_ref = IssueRef(repo=repo, number=44)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    # Plain FakeHarnessPort — no side-effect, so no implementing PR appears.
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+    engine = Engine(forge=forge, harness=harness, session=session)
+
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    # Only the orchestrator run — no implementer
+    assert len(harness.dispatch_calls) == 1
+    assert handle is not None  # orchestrator handle returned
+
+
+@pytest.mark.covers("§10.1", "dispatch-sub-machine-orchestrator-timeout-skips-implementer")
+async def test_dispatch_sub_machine_orchestrator_timeout_skips_implementer() -> None:
+    """If the orchestrator run times out, the implementer is NOT dispatched.
+
+    SPEC §10.1 error policy: orchestrator fails → skip implementer; issue stays
+    QUEUED; RC-4 re-dispatches on the next reconciler tick.
+
+    We subclass Engine and override _await_run to return False on the first call
+    (orchestrator timeout), True on subsequent calls — avoiding the 480s wall-clock
+    budget entirely.
+    """
+    forge = FakeForgePort()
+    repo = RepoRef(owner="acme", name="service")
+    issue_ref = IssueRef(repo=repo, number=45)
+    forge.seed_issue(issue_ref, labels=[LABEL_AGENT_WORK])
+
+    harness = FakeHarnessPort()
+    session = FakeSessionPort()
+
+    class _OrchestratorTimeoutEngine(Engine):
+        """Engine where the first _await_run (orchestrator) always times out."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+            self._await_count = 0
+
+        async def _await_run(self, handle: RunHandle) -> bool:
+            self._await_count += 1
+            if self._await_count == 1:
+                # Simulate orchestrator timeout: cancel and return False.
+                await self.harness.cancel(handle)
+                return False
+            return True
+
+    engine = _OrchestratorTimeoutEngine(forge=forge, harness=harness, session=session)
+    handle = await engine.dispatch("issues", issue_ref=issue_ref)
+
+    # Orchestrator was dispatched (1 call), then timed out → implementer skipped.
+    assert len(harness.dispatch_calls) == 1
+    assert handle is not None  # returns orchestrator handle on timeout

@@ -21,9 +21,12 @@ Three facts that govern everything:
   registry, operator accounts, dedup cache) live in the service DB with atomic increment.
   A process crash leaves every entity in its last-written forge label state; the reconciler
   recovers it on the next tick.
-- **Harness dispatch is fire-and-forget.** `HarnessPort.dispatch` returns immediately; the
-  control plane never blocks awaiting an agent. The converge job may legitimately await its
-  own spawned sub-agents within a single execution.
+- **Harness dispatch is fire-and-forget at the webhook boundary.** `OrchestratorService.handle_event`
+  returns a JSON response immediately; the dispatch sub-machine (`_spawn_dispatch`) and
+  converge sub-machine (`_spawn_converge`) run as background asyncio tasks.  Within each
+  sub-machine, `Engine._await_run` polls until the harness run completes (or CI_WAIT_S
+  elapses).  The dispatch sub-machine runs the orchestrator run and then the implementer run
+  sequentially, both awaited inside the same background task (`SPEC.md §10.1 amended`).
 - **Decision functions are pure and synchronous.** The async boundary is at I/O only.
 
 ---

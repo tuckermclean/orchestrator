@@ -446,7 +446,13 @@ async def test_handle_event_issues_opened_no_intake_when_disabled() -> None:
 
 
 async def test_handle_event_issues_labeled_agent_work_dispatches() -> None:
-    """issues:labeled with label==LABEL_AGENT_WORK → Engine.dispatch, not intake."""
+    """issues:labeled with label==LABEL_AGENT_WORK triggers Engine.dispatch, not intake.
+
+    Dispatch runs as a background sub-machine (orchestrator->implementer);
+    we drain it before asserting on dispatch_calls.
+    """
+    import asyncio
+
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
@@ -467,8 +473,15 @@ async def test_handle_event_issues_labeled_agent_work_dispatches() -> None:
     }
     result = await service.handle_event("issues", payload)
 
+    # Drain the background dispatch sub-machine before checking dispatch_calls.
+    tasks = list(service._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     assert result["handled"] is True
-    # Engine.dispatch was called (implementer agent dispatched), not intake
+    # Engine.dispatch was called (at least the orchestrator run), not intake.
+    # No implementing PR was seeded so the implementer is not dispatched;
+    # the test verifies dispatch routing, not the full sub-machine.
     assert len(harness.dispatch_calls) == 1
 
 
@@ -545,9 +558,11 @@ async def test_handle_event_labeled_agent_work_does_not_re_run_intake() -> None:
     Previously the issues branch ran intake for every action, so a newly
     labeled LABEL_AGENT_WORK event would re-run intake (dispatching a second
     triager + setting labels again).  This test confirms that labeled:agent-work
-    triggers Engine.dispatch and that the intake idempotency guard prevents
-    double-triager even if intake were somehow reached.
+    triggers Engine.dispatch (as a background sub-machine) and that the intake
+    idempotency guard prevents double-triager even if intake were somehow reached.
     """
+    import asyncio
+
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     session = FakeSessionPort()
@@ -570,7 +585,13 @@ async def test_handle_event_labeled_agent_work_does_not_re_run_intake() -> None:
     }
     await service.handle_event("issues", payload)
 
-    # Should call dispatch exactly once (the implementer), NOT re-run intake
+    # Drain the background dispatch sub-machine before checking dispatch_calls.
+    tasks = list(service._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Should call dispatch exactly once (the orchestrator run), NOT re-run intake.
+    # No implementing PR is seeded so the implementer is not dispatched.
     assert len(harness.dispatch_calls) == 1
     # No audit intake:admit or intake:queue from this re-delivery
     entries = await audit.list_entries(_REPO, issue_ref)

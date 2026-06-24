@@ -352,6 +352,16 @@ class OrchestratorService:
         # concurrent converges for the same PR.
         self._converge_tasks: dict[str, asyncio.Task[PRState]] = {}
 
+        # In-flight dispatch sub-machine tasks, keyed by issue (owner/name#number).
+        # The dispatch sub-machine now runs TWO sequential agent runs:
+        #   1. Orchestrator (Opus) — plans, opens PR; awaited via Engine._await_run
+        #   2. Implementer (Sonnet) — writes code + tests; awaited via Engine._await_run
+        # This mirrors how _spawn_converge decouples the webhook response from the
+        # long-running converge sub-machine.  The guard closes the race window
+        # between "first dispatch event" and "orchestrator labels the PR" (Layer A,
+        # SPEC §10.1 step 2) while the task itself holds the sub-machine in flight.
+        self._dispatch_tasks: dict[str, asyncio.Task[RunHandle | None]] = {}
+
         # In-flight dispatch guard, keyed by issue (owner/name#number).
         # Defense-in-depth guard for the race described in SPEC §10.1 step 2:
         # two issues:labeled agent-work events arrive ~73 s apart (GitHub
@@ -423,6 +433,18 @@ class OrchestratorService:
             except (asyncio.CancelledError, Exception):
                 pass
         self._converge_tasks.clear()
+
+        # Drain in-flight dispatch sub-machine tasks.  A cancelled dispatch leaves
+        # the issue QUEUED (agent-work label intact); RC-4 handles the orphan issue
+        # on the next reconciler tick.
+        for dtask in list(self._dispatch_tasks.values()):
+            dtask.cancel()
+        for dtask in list(self._dispatch_tasks.values()):
+            try:
+                await dtask
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._dispatch_tasks.clear()
 
         # Cancel in-flight dispatch guard TTL tasks so they don't fire after shutdown.
         for gtask in list(self._dispatch_guards.values()):
@@ -558,7 +580,11 @@ class OrchestratorService:
                 )
                 if label_name == LABEL_AGENT_WORK:
                     if self._try_claim_dispatch(issue_ref):
-                        await self.engine.dispatch("issues", issue_ref=issue_ref)
+                        # Dispatch sub-machine runs as a background task: orchestrator
+                        # (Opus) followed by implementer (Sonnet), both awaited inside
+                        # the task.  Mirrors _spawn_converge so the webhook returns
+                        # immediately (SPEC §10.1 amended).
+                        self._spawn_dispatch(issue_ref)
             # All other issues actions (labeled:other, closed, edited, assigned, …) → no-op
         elif event_name == "pull_request" and pr_ref is not None:
             # SPEC §11.1 event routing table — pull_request actions:
@@ -859,6 +885,41 @@ class OrchestratorService:
         def _done(t: asyncio.Task[str]) -> None:
             if self._triager_reconcile_tasks.get(key) is t:
                 del self._triager_reconcile_tasks[key]
+
+        task.add_done_callback(_done)
+        return True
+
+    def _spawn_dispatch(self, issue_ref: IssueRef) -> bool:
+        """Run ``engine.dispatch`` for an issues:labeled agent-work event as a background task.
+
+        The dispatch sub-machine is long-running: it awaits the orchestrator (Opus) run,
+        locates the PR the orchestrator opened, then awaits the implementer (Sonnet) run.
+        Awaiting it inline in the webhook handler would blow GitHub's ~10 s delivery
+        timeout, causing redelivery and duplicate dispatches.  Spawning it as a background
+        task decouples the HTTP response from the work.
+
+        De-duplicated per issue: if a dispatch sub-machine for this issue is already in
+        flight, this is a no-op (returns False) so duplicate labeled events or webhook
+        redeliveries do not stack concurrent dispatch sub-machines on the same issue.
+
+        Returns True if a new task was spawned, False if one was already running.
+        SPEC §10.1 amended.
+        """
+        key = f"{issue_ref.repo.owner}/{issue_ref.repo.name}#{issue_ref.number}"
+        existing = self._dispatch_tasks.get(key)
+        if existing is not None and not existing.done():
+            return False
+
+        task: asyncio.Task[RunHandle | None] = asyncio.create_task(
+            self.engine.dispatch("issues", issue_ref=issue_ref)
+        )
+        self._dispatch_tasks[key] = task
+
+        def _done(t: asyncio.Task[RunHandle | None]) -> None:
+            if self._dispatch_tasks.get(key) is t:
+                del self._dispatch_tasks[key]
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                _log.error("Background dispatch for %s failed: %r", key, exc)
 
         task.add_done_callback(_done)
         return True

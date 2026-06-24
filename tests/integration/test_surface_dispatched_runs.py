@@ -11,6 +11,8 @@ Verifies:
 
 from __future__ import annotations
 
+import asyncio
+
 from src.db.run_store import FakeRunStore
 from src.domain.types import (
     LABEL_AGENT_WORK,
@@ -49,7 +51,11 @@ def _make_service(
 
 
 async def test_dispatched_run_appears_in_list_runs() -> None:
-    """After dispatching an issue event, the run appears in list_runs for that repo."""
+    """After dispatching an issue event, the run appears in list_runs for that repo.
+
+    The dispatch sub-machine (orchestrator→implementer) runs in the background;
+    we drain it before asserting on list_runs.
+    """
     forge = FakeForgePort()
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
@@ -68,13 +74,22 @@ async def test_dispatched_run_appears_in_list_runs() -> None:
         "repository": {"name": "service", "owner": {"login": "acme"}},
     })
 
+    # Drain background dispatch sub-machine before asserting.
+    tasks = list(service._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     runs = await service.list_runs(repo)
     assert len(runs) >= 1
     assert any(r.repo.owner == "acme" and r.repo.name == "service" for r in runs)
 
 
 async def test_dispatched_run_not_visible_for_other_repo() -> None:
-    """Runs dispatched for repo-A must NOT appear in list_runs for repo-B."""
+    """Runs dispatched for repo-A must NOT appear in list_runs for repo-B.
+
+    The dispatch sub-machine (orchestrator→implementer) runs in the background;
+    we drain it before asserting on list_runs.
+    """
     forge = FakeForgePort()
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
@@ -94,6 +109,11 @@ async def test_dispatched_run_not_visible_for_other_repo() -> None:
         "repository": {"name": "alpha", "owner": {"login": "acme"}},
     })
 
+    # Drain background dispatch sub-machine before asserting.
+    tasks = list(service._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     runs_a = await service.list_runs(repo_a)
     runs_b = await service.list_runs(repo_b)
 
@@ -107,7 +127,12 @@ async def test_dispatched_run_not_visible_for_other_repo() -> None:
 
 
 async def test_get_run_returns_dispatched_run() -> None:
-    """get_run(run_id) returns the run detail populated at dispatch time."""
+    """get_run(run_id) returns the run detail populated at dispatch time.
+
+    The dispatch sub-machine (orchestrator→implementer) runs in the background;
+    we drain it before asserting.  Only the orchestrator is dispatched here
+    (no implementing PR is seeded), so exactly 1 dispatch_call is expected.
+    """
     forge = FakeForgePort()
     session = FakeSessionPort()
     harness = FakeHarnessPort(session=session)
@@ -127,7 +152,13 @@ async def test_get_run_returns_dispatched_run() -> None:
         "repository": {"name": "service", "owner": {"login": "acme"}},
     })
 
-    # One dispatch should have happened
+    # Drain background dispatch sub-machine before asserting.
+    tasks = list(service._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Only the orchestrator run is dispatched — no implementing PR was seeded,
+    # so the sub-machine stops after the orchestrator (see Engine.dispatch §10.1).
     assert len(harness.dispatch_calls) == 1
     runs = await service.list_runs(repo)
     assert len(runs) == 1

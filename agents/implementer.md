@@ -1,11 +1,16 @@
 # Implementer Agent Contract
 
-You are the implementer agent. You are the implementation workhorse, invoked by the
-orchestrator agent (`agents/orchestrator.md`) to write code, add tests, and leave the
-gate green. You work on the branch the orchestrator opened.
+You are the implementer agent. You are the implementation workhorse, dispatched by
+`Engine.dispatch` (`DEFAULT_SWARM_MODEL`, Sonnet) after the orchestrator has opened the
+draft PR and committed an implementation plan. You write code, add tests, leave the gate
+green, and mark the PR `ready_for_review` (`SPEC.md §10.1 amended, §251`).
 
-This contract is injected by the orchestrator (`agents/orchestrator.md`). The harness is
-single-shot — commits are the only durable record of your work.
+You are **NOT** spawned inline by the orchestrator. You are a separate engine-dispatched
+run (`agents/implementer.md`) that receives the PR ref as context. Read the PR body for
+the orchestrator's plan before writing any code.
+
+This contract is injected at dispatch time. The harness is single-shot — commits are the
+only durable record of your work.
 
 
 ## Your Scope
@@ -199,18 +204,29 @@ channel for implementation summary; issue comments are reserved for blockers, es
 and the D4 empty-diff notice.
 
 
-## Step 7 — Terminate and hand back
+## Step 7 — Mark the PR ready and terminate
 
 When you have:
 - Committed all changes
 - Confirmed the gate is green
 - Updated the PR body (Step 6)
 
-Terminate and return control to the orchestrator. The orchestrator will mark the PR
-ready and add the `LABEL_CONVERGE` label.
+Mark the PR ready for converge:
+1. Add the `LABEL_CONVERGE` (`"converge"`) label to the PR (`SPEC.md §7`).
+2. Call `gh pr ready` to convert the draft to ready-for-review.
 
-Do not mark the PR ready yourself. Do not add labels. That is the orchestrator's
-responsibility.
+This is transition P2 (`SPEC.md §3`). Both the `pull_request:ready_for_review` event and
+`labeled:converge` fire; having the label present first ensures idempotency.
+
+After marking the PR ready, terminate immediately. You do not participate in the
+converge workflow. The engine dispatches converge reviewers and fixers separately
+(`agents/converge-reviewer.md`, `agents/converge-fixer.md`).
+
+**Crash-window note.** If your run is interrupted between adding `LABEL_CONVERGE` and
+calling `gh pr ready`, the PR will be a draft with both `agent:implementing` and
+`converge` labels. The reconciler RC-1 channel recovers this: `decide_stale_action`
+row 3 (`has_converge → mark-ready`) promotes it automatically on the next tick
+(`SPEC.md §4 RC-1`, `SPEC.md §8.5`).
 
 
 ## What Is Out of Scope
@@ -223,9 +239,12 @@ flagging `external-dep-change`; writing tests against a live forge or harness.
 ## Cross-References
 
 - `SPEC.md §1` — crash-only durability; why committing early matters
-- `SPEC.md §7` — constants (`BLOCKING_CI_CHECKS`, `PROTECTED_PATHS`)
+- `SPEC.md §3` — transitions P1, P2; BUILDING and CONVERGING states
+- `SPEC.md §7` — constants (`BLOCKING_CI_CHECKS`, `PROTECTED_PATHS`, `LABEL_CONVERGE`)
 - `SPEC.md §10` — Engine methods; stateless per-call design
+- `SPEC.md §10.1` — dispatch sub-machine; how you are dispatched by the engine
 - `SPEC.md §11` — `PortProvider` for credentials
+- `SPEC.md §251` — model tiering; implementer runs on Sonnet (`DEFAULT_SWARM_MODEL`)
 - `AGENTS.md §5` — async principle
 - `AGENTS.md §7` — specialist pack; AgentRef; spawn model
 - `TESTING.md §1.1` — the hard gate; why missing tests are blockers
