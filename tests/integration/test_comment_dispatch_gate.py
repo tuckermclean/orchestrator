@@ -28,6 +28,7 @@ from src.domain.types import (
     LABEL_AGENT_WORK,
     LABEL_AWAITING_PROMOTION,
     LABEL_IMPLEMENTING,
+    LABEL_READY,
     IssueRef,
     PRRef,
     RepoRef,
@@ -805,16 +806,26 @@ async def test_issue_comment_on_pr_dispatches_as_pr(
 
 
 @pytest.mark.asyncio
-async def test_issue_comment_on_pr_without_implementing_no_dispatch(
+async def test_issue_comment_on_pr_without_agent_label_no_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An issue_comment on a PR NOT carrying agent:implementing → no dispatch."""
+    """An issue_comment on a PR carrying NO agent label → no dispatch.
+
+    A PR that carries neither agent:implementing nor agent:ready (e.g. only
+    needs-human, or a plain PR with no orchestrator labels) must not be dispatched
+    just because someone @-mentions the bot.  The gate requires one of the two
+    known agent labels; arbitrary PRs are never hijacked.
+
+    Note: a PR carrying agent:ready IS now re-engaged per SPEC §11.1 (the old
+    broken behaviour was to no-op it; that was PR #52's bug).  This test covers
+    the case where NEITHER label is present.
+    """
     monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
 
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     pr_ref = _pr(46)
-    forge.seed_pr(pr_ref, labels=["agent:ready"], draft=True)
+    forge.seed_pr(pr_ref, labels=["some-other-label"], draft=False)
 
     svc = _make_service(forge=forge, harness=harness)
     await svc._audit.init()
@@ -822,7 +833,7 @@ async def test_issue_comment_on_pr_without_implementing_no_dispatch(
     payload = _issue_comment_on_pr_payload(
         pr_n=46,
         body="@orecchiette1111 do something",
-        labels=["agent:ready"],  # no agent:implementing
+        labels=["some-other-label"],  # no agent:implementing, no agent:ready
     )
 
     result = await svc.handle_event("issue_comment", payload, delivery_id="d-046")
@@ -830,7 +841,7 @@ async def test_issue_comment_on_pr_without_implementing_no_dispatch(
 
     assert result["handled"] is True
     assert len(harness.dispatch_calls) == 0, (
-        "issue_comment on a PR without agent:implementing must not dispatch"
+        "issue_comment on a PR with no agent label must not dispatch"
     )
 
 
@@ -947,3 +958,243 @@ async def test_issues_labeled_agent_work_dispatch_unaffected(
     ctx = harness.dispatch_calls[0]
     assert ctx.model == "claude-opus-4-8"
     assert ctx.max_turns == 40
+
+
+# ---------------------------------------------------------------------------
+# Re-engage loop — agent:ready PR + owner @mention → label swap + dispatch
+# SPEC §11.1 address-review-feedback loop (PR #52 evidence: approved PR ignored
+# owner comment because the old gate required LABEL_IMPLEMENTING only).
+# ---------------------------------------------------------------------------
+
+
+def _issue_comment_on_ready_pr_payload(
+    pr_n: int,
+    body: str = "@orecchiette1111 fix the missing images",
+    action: str = "created",
+    author_login: str = "tuckermclean",
+    author_type: str = "User",
+    labels: list[str] | None = None,
+    state: str = "open",
+) -> dict[str, object]:
+    """Payload for an issue_comment on a PR in APPROVED (agent:ready) state.
+
+    GitHub delivers PR-conversation comments as issue_comment events with
+    payload.issue.pull_request present and the PR's label set (agent:ready,
+    never agent-work).
+    """
+    label_objs = [{"name": n} for n in (labels if labels is not None else [LABEL_READY])]
+    return {
+        "repository": {"owner": {"login": "acme"}, "name": "service"},
+        "issue": {
+            "number": pr_n,
+            "labels": label_objs,
+            "state": state,
+            "pull_request": {
+                "url": f"https://api.github.com/repos/acme/service/pulls/{pr_n}"
+            },
+        },
+        "action": action,
+        "comment": {
+            "body": body,
+            "user": {"login": author_login, "type": author_type},
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_ready_pr_owner_mention_swaps_label_and_dispatches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression lock: @mention on an agent:ready PR swaps label and dispatches.
+
+    Live evidence — PR #52 (agent:ready): owner commented '@claude fix the
+    missing images'; webhook returned 200 but no agent ran.  The old gate
+    required LABEL_IMPLEMENTING and returned a no-op for LABEL_READY PRs.
+
+    Fix: when all base gates pass AND the PR is agent:ready (not implementing):
+      1. Atomically swap agent:ready → agent:implementing (I7 — the two labels
+         must never coexist).
+      2. Dispatch to address the comment.
+
+    SPEC §11.1 re-engage / address-review-feedback loop.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(52)
+    forge.seed_pr(pr_ref, labels=[LABEL_READY], draft=False)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_ready_pr_payload(
+        pr_n=52,
+        body="@orecchiette1111 fix the missing images",
+        labels=[LABEL_READY],
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="re-052")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    # Must dispatch exactly once (re-engage dispatched the agent).
+    assert len(harness.dispatch_calls) == 1, (
+        "@mention on agent:ready PR must dispatch (was a no-op — PR #52 regression lock)"
+    )
+    ctx = harness.dispatch_calls[0]
+    assert ctx.pr_ref == pr_ref
+    assert ctx.issue_ref is None
+
+    # I7: agent:ready must be swapped out; agent:implementing must be in.
+    # The set_labels call is the atomic swap (PUT semantics).
+    assert len(forge.set_labels_calls) == 1, (
+        "Label swap (agent:ready → agent:implementing) must use set_labels"
+    )
+    swapped_ref, new_labels = forge.set_labels_calls[0]
+    assert swapped_ref == pr_ref
+    assert LABEL_IMPLEMENTING in new_labels, "agent:implementing must be in new label set"
+    assert LABEL_READY not in new_labels, "agent:ready must be removed (I7 — no coexistence)"
+
+
+@pytest.mark.asyncio
+async def test_implementing_pr_mention_dispatches_no_label_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An @mention on an agent:implementing PR dispatches without swapping labels.
+
+    A PR already in BUILDING state (agent:implementing) is not APPROVED; the
+    label swap step must be skipped entirely.  Behaviour unchanged from before.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(53)
+    forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_pr_payload(
+        pr_n=53,
+        body="@orecchiette1111 address those blockers",
+        labels=[LABEL_IMPLEMENTING],
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="re-053")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 1, "implementing PR @mention must dispatch"
+    # No label swap: set_labels must NOT have been called for this path.
+    assert len(forge.set_labels_calls) == 0, (
+        "agent:implementing PR must NOT trigger a label swap"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_pr_bot_author_no_reengagement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Loop prevention: a Bot author on an agent:ready PR must not re-engage it.
+
+    The orchestrator itself posts comments as a Bot; its own comments on an
+    approved PR must not re-engage the PR back into implementing state.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(54)
+    forge.seed_pr(pr_ref, labels=[LABEL_READY], draft=False)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_ready_pr_payload(
+        pr_n=54,
+        body="@orecchiette1111 I've addressed the feedback",
+        author_login="orecchiette1111[bot]",
+        author_type="Bot",
+        labels=[LABEL_READY],
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="re-054")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 0, (
+        "Bot author on agent:ready PR must NOT re-engage — self-trigger loop prevention"
+    )
+    assert len(forge.set_labels_calls) == 0, "No label swap must occur for bot author"
+
+
+@pytest.mark.asyncio
+async def test_pr_with_neither_label_no_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PR carrying neither agent:implementing nor agent:ready → no-op.
+
+    Arbitrary PRs (e.g. needs-human, no agent label) must not be dispatched
+    just because someone @-mentions the bot in their comments.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(55)
+    forge.seed_pr(pr_ref, labels=["needs-human"], draft=False)
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_ready_pr_payload(
+        pr_n=55,
+        body="@orecchiette1111 any update?",
+        labels=["needs-human"],  # no agent:implementing, no agent:ready
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="re-055")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 0, (
+        "PR with neither agent:implementing nor agent:ready must not dispatch"
+    )
+    assert len(forge.set_labels_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_closed_ready_pr_no_reengagement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed/merged PR must never be re-engaged, even if it has agent:ready.
+
+    Once a PR is closed or merged, comments on it must produce a no-op.
+    """
+    monkeypatch.setenv("GITHUB_BOT_LOGIN", "orecchiette1111")
+
+    forge = FakeForgePort()
+    harness = FakeHarnessPort()
+    pr_ref = _pr(56)
+    forge.seed_pr(pr_ref, labels=[LABEL_READY], state="closed")
+
+    svc = _make_service(forge=forge, harness=harness)
+    await svc._audit.init()
+
+    payload = _issue_comment_on_ready_pr_payload(
+        pr_n=56,
+        body="@orecchiette1111 follow up on this closed PR",
+        labels=[LABEL_READY],
+        state="closed",
+    )
+
+    result = await svc.handle_event("issue_comment", payload, delivery_id="re-056")
+    await asyncio.sleep(0)
+
+    assert result["handled"] is True
+    assert len(harness.dispatch_calls) == 0, (
+        "Closed/merged PR must never be re-engaged"
+    )
+    assert len(forge.set_labels_calls) == 0, "No label swap for a closed PR"

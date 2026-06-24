@@ -1313,10 +1313,10 @@ adds exactly one of `LABEL_AGENT_WORK` or `LABEL_AWAITING_PROMOTION` onto `[LABE
 |---|---|---|---|
 | `issues` | `opened` / `reopened` | `intake_enabled == true` | `Engine.intake` (Gate 1: trust check + triager dispatch; Gate 2 runs deferred — see §10.4) |
 | `issues` | `labeled` | `label == LABEL_AGENT_WORK` | `Engine.dispatch` (fires when Gate 2 applies `LABEL_AGENT_WORK` after actionable triager verdict, or when a human promotes via `promote()`) |
-| `issue_comment` on a **PR** | `created` | base gates AND `payload.issue.pull_request` present AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` (routed as a PR — `pr_ref` synthesized from the issue/PR number) |
+| `issue_comment` on a **PR** | `created` | base gates AND `payload.issue.pull_request` present AND PR carries `LABEL_IMPLEMENTING` OR `LABEL_READY` AND PR is not closed/merged | `Engine.dispatch` (routed as a PR — `pr_ref` synthesized from the issue/PR number); if `LABEL_READY` and not `LABEL_IMPLEMENTING`, first swaps `LABEL_READY` → `LABEL_IMPLEMENTING` (re-engage, I7) |
 | `issue_comment` on an **issue** | `created` | base gates AND issue carries `LABEL_AGENT_WORK` | `Engine.dispatch` |
 | `issue_comment` on an **issue** | `created` | base gates AND issue NOT `closed` AND issue does NOT carry `LABEL_AGENT_WORK` | **`promote()`** — human override applies `LABEL_AGENT_WORK` (I7 swap) → `Engine.dispatch` |
-| `pull_request_review_comment` | `created` | base gates AND PR carries `LABEL_IMPLEMENTING` | `Engine.dispatch` |
+| `pull_request_review_comment` | `created` | base gates AND PR carries `LABEL_IMPLEMENTING` OR `LABEL_READY` AND PR is not closed/merged | `Engine.dispatch`; if `LABEL_READY` and not `LABEL_IMPLEMENTING`, first swaps `LABEL_READY` → `LABEL_IMPLEMENTING` (re-engage, I7) |
 | `pull_request` | `ready_for_review` | — | `Engine.converge` |
 | `pull_request` | `labeled` | `label == LABEL_CONVERGE` | `Engine.converge` |
 | `pull_request` | `synchronize` | — | `Engine.converge` |
@@ -1336,11 +1336,24 @@ bot mention AND author is not a bot AND (`repo.allowlist` empty OR `event.actor 
 
 **`issue_comment` on a PR.** GitHub delivers a comment on a PR's *conversation* as an
 `issue_comment` event whose `payload.issue` carries a `pull_request` key and the PR's
-labels (e.g. `LABEL_IMPLEMENTING`, never `LABEL_AGENT_WORK`). `handle_event` detects this
-`pull_request` key and treats the subject as a PR: it requires `LABEL_IMPLEMENTING` (not
-`LABEL_AGENT_WORK`) and routes the dispatch as a PR — synthesizing `pr_ref` from the
-issue/PR number and dispatching via the `pull_request_review_comment` engine path so the
-orchestrator iterates on the PR. Without this detection, every `@mention` on a PR
+labels (e.g. `LABEL_IMPLEMENTING` or `LABEL_READY`, never `LABEL_AGENT_WORK`).
+`handle_event` detects this `pull_request` key and treats the subject as a PR. The
+dispatch fires when the PR carries `LABEL_IMPLEMENTING` (in-progress) OR `LABEL_READY`
+(approved, awaiting merge) — and the PR is not closed or merged. PRs carrying neither
+label (e.g. `needs-human`, or no orchestrator label at all) are a no-op.
+
+**Re-engage / address-review-feedback loop (I7).** When the PR is `LABEL_READY` (not
+`LABEL_IMPLEMENTING`), the gate first atomically swaps `LABEL_READY` → `LABEL_IMPLEMENTING`
+using `set_labels` (PUT semantics) so the two labels never coexist (I7 invariant preserved).
+This transitions the PR from APPROVED back to BUILDING, dispatches an agent to address the
+comment, and lets the PR flow back through converge → adjudicator → `agent:ready` normally.
+Guards: bot authors, closed/merged PRs, non-allowlisted actors, and `_try_claim_dispatch`
+all prevent spurious re-engagement — the same guards as every other comment route.
+Live evidence: PR #52 (`agent:ready`) silently ignored an owner `@claude fix the missing
+images` comment because the old gate required `LABEL_IMPLEMENTING` only.
+
+`handle_event` routes the dispatch via the `pull_request_review_comment` engine path so
+the orchestrator iterates on the PR. Without this detection, every `@mention` on a PR
 conversation was wrongly gated out (PRs never carry `agent-work`).
 
 **Comment-to-promote (human override).** An authorized, non-bot `created` `@mention`

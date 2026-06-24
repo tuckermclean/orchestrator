@@ -19,6 +19,7 @@ from src.domain.types import (
     LABEL_CONVERGE,
     LABEL_IMPLEMENTING,
     LABEL_NEEDS_HUMAN,
+    LABEL_READY,
     LABEL_TRIAGE,
     RECONCILER_CRON,
     DispatchContext,
@@ -678,8 +679,21 @@ class OrchestratorService:
             )
 
             if event_name == "pull_request_review_comment" or issue_comment_on_pr:
-                # PR route — require LABEL_IMPLEMENTING and dispatch as a PR.
-                if LABEL_IMPLEMENTING not in subject_label_names:
+                # PR route — accept LABEL_IMPLEMENTING (already in-progress) or
+                # LABEL_READY (APPROVED, awaiting merge) but nothing else.
+                # A PR without either label (needs-human, no agent label, closed)
+                # is a no-op: we never hijack arbitrary PRs.
+                pr_is_implementing = LABEL_IMPLEMENTING in subject_label_names
+                pr_is_ready = LABEL_READY in subject_label_names
+                if not pr_is_implementing and not pr_is_ready:
+                    return {"handled": True}
+
+                # Closed/merged PRs → no-op regardless of label state.
+                # GitHub delivers merged PRs as state=="closed" (or merged==True on
+                # pull_request payloads); either signals a terminal PR we must not re-engage.
+                subject_state = str(subject.get("state", ""))
+                subject_merged = bool(subject.get("merged", False))
+                if subject_state == "closed" or subject_merged:
                     return {"handled": True}
 
                 # For an issue_comment-on-PR the payload has no pull_request object,
@@ -697,6 +711,19 @@ class OrchestratorService:
                 )
                 if not self._try_claim_dispatch(guard_ref):
                     return {"handled": True}
+
+                # Re-engage: when the PR is APPROVED (agent:ready) but not yet
+                # implementing, swap agent:ready → agent:implementing (I7 — the
+                # two labels must never coexist; use set_labels for atomic swap).
+                # SPEC §11.1 re-engage / address-review-feedback loop.
+                if pr_is_ready and not pr_is_implementing:
+                    # Derive the current labels minus LABEL_READY, plus LABEL_IMPLEMENTING.
+                    # We cannot rely on the payload label list being complete, so we
+                    # compute the swap from what we know: remove ready, add implementing.
+                    new_labels = (
+                        subject_label_names - {LABEL_READY} | {LABEL_IMPLEMENTING}
+                    )
+                    await self.forge.set_labels(effective_pr_ref, sorted(new_labels))
 
                 # Route via the pull_request_review_comment engine path: it reads the
                 # PR's live labels (LABEL_IMPLEMENTING guard) and iterates on the PR.
