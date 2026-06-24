@@ -51,6 +51,9 @@ files = ["src", "tools"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Exclude tests requiring live credentials/network by default.
+# Run with -m integration_real explicitly to include them.
+addopts = "-m 'not integration_real'"
 # Hard per-test timeout so a test that hangs in CI fails (with a thread-stack dump
 # naming it) instead of stalling the whole job indefinitely. thread method works for
 # asyncio/threaded hangs and dumps all thread stacks on timeout. All real tests run
