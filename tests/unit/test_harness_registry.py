@@ -75,8 +75,13 @@ def _make_port(*, quota_exhausted: bool = False, run_id: str = "run-1") -> Async
     port.trigger_ci.return_value = None
     port.trigger_workflow.return_value = None
     port.get_run_verdict.return_value = None
-    # has_run is synchronous — override the AsyncMock's default async behaviour.
+    # has_run, register_run_status_sink, and get_live_status are synchronous
+    # methods — override AsyncMock's default async behaviour for each.
     port.has_run = MagicMock(return_value=False)
+    port.register_run_status_sink = MagicMock(return_value=None)
+    port.get_live_status = MagicMock(
+        return_value=RunStatus(state="in_progress")
+    )
     return port
 
 

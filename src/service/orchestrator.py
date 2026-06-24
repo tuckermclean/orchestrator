@@ -126,6 +126,10 @@ class RunRecordingHarness:
                     "success": "completed",
                     "failure": "failed",
                     "cancelled": "cancelled",
+                    # Session/usage-limit wait-and-retry (SPEC §14.8).
+                    # Stored as "awaiting_quota" so the UI can render the
+                    # dedicated status badge and reset-time display.
+                    "awaiting_quota": "awaiting_quota",
                 }
                 store_status: str
                 if status.state == "completed":
@@ -136,7 +140,12 @@ class RunRecordingHarness:
                     store_status = status.state
                     completed_at = None
                 try:
-                    run_store.set_status(rid, store_status, completed_at)
+                    run_store.set_status(
+                        rid,
+                        store_status,
+                        completed_at,
+                        quota_reset_at=status.quota_reset_at,
+                    )
                 except Exception:
                     _log.exception(
                         "RunRecordingHarness status sink failed for run_id=%s status=%s",

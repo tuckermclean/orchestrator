@@ -34,15 +34,20 @@ _log = logging.getLogger(__name__)
 
 _CREATE_RUNS = """
 CREATE TABLE IF NOT EXISTS runs (
-    run_id       TEXT    PRIMARY KEY,
-    repo_owner   TEXT    NOT NULL,
-    repo_name    TEXT    NOT NULL,
-    type         TEXT    NOT NULL DEFAULT 'dispatch',
-    status       TEXT    NOT NULL DEFAULT 'queued',
-    model        TEXT    NOT NULL DEFAULT '',
-    started_at   TEXT    NOT NULL,
-    completed_at TEXT
+    run_id          TEXT    PRIMARY KEY,
+    repo_owner      TEXT    NOT NULL,
+    repo_name       TEXT    NOT NULL,
+    type            TEXT    NOT NULL DEFAULT 'dispatch',
+    status          TEXT    NOT NULL DEFAULT 'queued',
+    model           TEXT    NOT NULL DEFAULT '',
+    started_at      TEXT    NOT NULL,
+    completed_at    TEXT,
+    quota_reset_at  TEXT
 )
+"""
+
+_MIGRATE_QUOTA_RESET_AT = """
+ALTER TABLE runs ADD COLUMN quota_reset_at TEXT
 """
 
 _CREATE_EVENTS = """
@@ -106,14 +111,21 @@ class FakeRunStore:
         )
         self._events[run_id] = []
 
-    def set_status(self, run_id: str, status: str, completed_at: datetime | None = None) -> None:
+    def set_status(
+        self,
+        run_id: str,
+        status: str,
+        completed_at: datetime | None = None,
+        quota_reset_at: str | None = None,
+    ) -> None:
         """Update run status (called by harness event-store integration, sync)."""
         existing = self._summaries.get(run_id)
         if existing is None:
             return
-        self._summaries[run_id] = existing.model_copy(
-            update={"status": status, "completed_at": completed_at}
-        )
+        update: dict[str, object] = {"status": status, "completed_at": completed_at}
+        if quota_reset_at is not None:
+            update["quota_reset_at"] = quota_reset_at
+        self._summaries[run_id] = existing.model_copy(update=update)
 
     def append_event(self, run_id: str, event: RunEvent) -> None:
         """Append a run event (sync)."""
@@ -215,6 +227,14 @@ class SQLiteRunStore:
         wc.row_factory = aiosqlite.Row
         await wc.execute(_CREATE_RUNS)
         await wc.execute(_CREATE_EVENTS)
+        # Additive migration: add quota_reset_at column if absent (existing DBs
+        # lack this column; SQLite ignores the ADD COLUMN when already present
+        # only if we guard with a try/except — the duplicate-column error is
+        # benign and we swallow it here).
+        try:
+            await wc.execute(_MIGRATE_QUOTA_RESET_AT)
+        except Exception:
+            pass  # column already exists — ignore
         await wc.commit()
         self._shared.read.row_factory = aiosqlite.Row
         self._initialized = True
@@ -271,9 +291,15 @@ class SQLiteRunStore:
         )
         await self._conn.commit()
 
-    def set_status(self, run_id: str, status: str, completed_at: datetime | None = None) -> None:
+    def set_status(
+        self,
+        run_id: str,
+        status: str,
+        completed_at: datetime | None = None,
+        quota_reset_at: str | None = None,
+    ) -> None:
         """Schedule async UPDATE for the run status."""
-        self._spawn(self._set_status_async(run_id, status, completed_at))
+        self._spawn(self._set_status_async(run_id, status, completed_at, quota_reset_at))
 
     @serialized_write
     async def _set_status_async(
@@ -281,11 +307,12 @@ class SQLiteRunStore:
         run_id: str,
         status: str,
         completed_at: datetime | None,
+        quota_reset_at: str | None = None,
     ) -> None:
         completed_str = completed_at.isoformat() if completed_at is not None else None
         await self._conn.execute(
-            "UPDATE runs SET status = ?, completed_at = ? WHERE run_id = ?",
-            (status, completed_str, run_id),
+            "UPDATE runs SET status = ?, completed_at = ?, quota_reset_at = ? WHERE run_id = ?",
+            (status, completed_str, quota_reset_at, run_id),
         )
         await self._conn.commit()
 
@@ -354,6 +381,7 @@ class SQLiteRunStore:
                     started_at=datetime.fromisoformat(str(row["started_at"])).replace(tzinfo=UTC),
                     completed_at=completed_at,
                     model=_model_or_none(row["model"]),
+                    quota_reset_at=str(row["quota_reset_at"]) if row["quota_reset_at"] else None,
                 )
             )
         return result
@@ -391,6 +419,7 @@ class SQLiteRunStore:
             completed_at=completed_at,
             model=_model_or_none(row["model"]),
             events=events,
+            quota_reset_at=str(row["quota_reset_at"]) if row["quota_reset_at"] else None,
         )
 
     async def close(self) -> None:

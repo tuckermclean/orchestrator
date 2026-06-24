@@ -386,9 +386,23 @@ Used by `HarnessPort.get_run_status` (§9.2) and consumed by `decide_rearm_actio
 
 ```
 RunState    ∈ { "queued", "in_progress", "completed" }
-RunConclusion ∈ { "success", "failure", "cancelled" }  # present only when state=="completed"
-RunStatus   = { state: RunState, conclusion: RunConclusion | None }
+RunConclusion ∈ { "success", "failure", "cancelled", "awaiting_quota" }
+                # present only when state=="completed"
+RunStatus   = {
+  state:          RunState,
+  conclusion:     RunConclusion | None,
+  quota_reset_at: str | None   # ISO-8601 UTC; set when conclusion=="awaiting_quota"
+}
 ```
+
+`awaiting_quota` — the run's agent process hit the Anthropic session/usage limit
+("You've hit your session/usage limit · resets \<time\>").  The run is **not failed**;
+it is a **HOLD** that will be retried automatically by the reconciler once the
+limit resets.  When the reset timestamp is present in Claude's output it is stored
+in `quota_reset_at`; the harness cooldown is extended to that time (with a floor of
+`SESSION_LIMIT_COOLDOWN_FLOOR_S` = 60 s) so no re-dispatch occurs before the quota
+is replenished.  When `quota_reset_at` is absent the fixed `HARNESS_COOLDOWN_S`
+(300 s) cooldown applies.  See §14.8 for the full wait-and-retry specification.
 
 ### CI green definition — trust the repo's actual checks
 
@@ -1661,6 +1675,90 @@ Each entry's `id` must map to a set of credential env vars that `PortProvider` r
 - **§10.2 `Engine.converge`:** reviewer and fixer dispatch calls may raise `AllHarnessesExhausted`; propagate to the event handler (no label change — entity stays CONVERGING, reconciler re-arms).
 - **§10.3 `Engine.reconcile` (RC-4):** `decide_redispatch_action` returns `redispatch` when appropriate; the channel calls `harness.dispatch`; if this raises `AllHarnessesExhausted`, the issue is not re-countered (counter.increment is not called) and remains QUEUED for the next tick.
 - **§9.2 `HarnessPort`:** `HarnessQuotaExhausted` is the normative exhaustion signal. `FailoverHarnessPort` satisfies the `HarnessPort` Protocol.
+
+### §14.8 Session/Usage-Limit Wait-and-Retry
+
+When an agent run is terminated because the operator's Anthropic account has reached
+its session or usage limit, the run must **not** be marked `failed`.  Instead it must
+enter a **waiting state** (`conclusion == "awaiting_quota"`) and be retried
+automatically once the limit resets.
+
+#### Detection
+
+The harness execution backend (`SubprocessBackend._watch` / `K8sJobBackend._watch`)
+scans the run's collected event text (all `agent_message` and `agent_result` events)
+after the process exits with a non-zero code.  Detection matches any of:
+
+- Claude's own message: `"You've hit your session/usage limit"`
+- HTTP-level signals: `"429 Too Many Requests"`, `"quota exhausted"`,
+  `"rate limit exceeded"` / `"rate limit hit"`
+
+The function `src.ports.session_limit.is_session_limit(text)` implements this check
+(pure, synchronous).
+
+#### Reset-time extraction
+
+When the session-limit message contains `"resets <time> [<tz>]"` (e.g.
+`"resets 4:30 PM PDT"`), `src.ports.session_limit.parse_reset_time(text)` extracts
+the timestamp and returns it as an ISO-8601 UTC string.  Relative forms
+(`"resets in 5 minutes"`) are also handled.  Returns `None` on parse failure.
+
+#### New `RunStatus` fields
+
+```
+RunStatus.conclusion  = "awaiting_quota"   # not "failure"
+RunStatus.quota_reset_at = "<ISO-8601 UTC>" | None
+```
+
+The `quota_reset_at` timestamp is also persisted in `RunSummary.quota_reset_at`
+(run_store column) and surfaced in the API response so the UI can display it.
+
+#### Harness cooldown
+
+`FailoverHarnessPort.dispatch` registers a post-completion status sink on the
+dispatched run (via `ClaudeCodeHarnessPort.register_run_status_sink`).  When the
+sink fires with `conclusion == "awaiting_quota"`, it calls:
+
+```python
+entry.set_cooldown(now, reset_at=status.quota_reset_at)
+```
+
+`HarnessRegistryEntry.set_cooldown` with `reset_at` set:
+- Parses the ISO-8601 timestamp.
+- Applies a floor of `SESSION_LIMIT_COOLDOWN_FLOOR_S` = 60 s above `now` to handle
+  clock skew.
+- Falls back to the fixed `HARNESS_COOLDOWN_S` cooldown when `reset_at` is `None`
+  or unparseable.
+
+This prevents any re-dispatch before the quota resets — the cooldown makes the
+harness unavailable to `decide_harness` until the deadline.
+
+#### Entity lifecycle
+
+The entity (issue/PR) **remains in its current forge-label state**:
+- CONVERGING PRs: stay CONVERGING (`converge` label unchanged).
+- BUILDING / QUEUED issues: stay in their current state.
+
+The reconciler (RC-3 / RC-4) picks up the entity on its next tick.  By that
+time the harness cooldown will have expired (reset time passed), so the next
+`decide_harness` call selects the harness again and the dispatch succeeds.
+
+`AllHarnessesExhausted` is raised during the cooldown window (if the reconciler
+fires before the reset); this is caught and logged as INFO — no label change,
+no escalation (§14.5 HOLD semantics).
+
+#### UI rendering
+
+The run appears in the Runs list and Run Detail page with:
+- Status badge: amber `"quota: waiting"` (not red "failed").
+- When `quota_reset_at` is set: `"Retries at <localized time>"` sub-label.
+
+#### Constants
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `SESSION_LIMIT_COOLDOWN_FLOOR_S` | `60` | Minimum cooldown when reset time is in the past |
+| `HARNESS_COOLDOWN_S` | `300` | Fallback when reset time is absent |
 
 ---
 

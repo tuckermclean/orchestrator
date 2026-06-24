@@ -30,7 +30,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from src.domain.types import HARNESS_COOLDOWN_S, HARNESSES_JSON_ENV, RunEvent, RunStatus
+from src.domain.types import (
+    HARNESS_COOLDOWN_S,
+    HARNESSES_JSON_ENV,
+    SESSION_LIMIT_COOLDOWN_FLOOR_S,
+    RunEvent,
+    RunStatus,
+)
 from src.ports.base import HarnessPort
 
 _log = logging.getLogger(__name__)
@@ -70,11 +76,23 @@ class HarnessQuotaExhausted(Exception):
         The id of the harness that signalled exhaustion (from HarnessConfig.id).
     detail:
         Human-readable description of the underlying provider error.
+    reset_at:
+        ISO-8601 UTC timestamp at which the quota is expected to reset,
+        parsed from Claude's "resets <time>" output.  None when the reset
+        time could not be determined; the cooldown then falls back to the
+        fixed HARNESS_COOLDOWN_S.  Set by SubprocessBackend / K8sJobBackend
+        when they detect a session-limit in the run output (SPEC §14.8).
     """
 
-    def __init__(self, harness_id: str, detail: str = "") -> None:
+    def __init__(
+        self,
+        harness_id: str,
+        detail: str = "",
+        reset_at: str | None = None,
+    ) -> None:
         self.harness_id = harness_id
         self.detail = detail
+        self.reset_at = reset_at
         super().__init__(f"harness {harness_id!r} quota exhausted: {detail}")
 
 
@@ -145,8 +163,34 @@ class HarnessRegistryEntry:
         """Return True when this harness is not currently on cooldown."""
         return self.cooled_until is None or self.cooled_until <= now
 
-    def set_cooldown(self, now: datetime, duration_s: int = HARNESS_COOLDOWN_S) -> None:
-        """Mark this harness as cooled-down from now for duration_s seconds."""
+    def set_cooldown(
+        self,
+        now: datetime,
+        duration_s: int = HARNESS_COOLDOWN_S,
+        reset_at: str | None = None,
+    ) -> None:
+        """Mark this harness as cooled-down until a computed deadline.
+
+        When ``reset_at`` is provided (ISO-8601 UTC from Claude's "resets <T>"
+        message), the cooldown expires at that time.  A floor of
+        ``SESSION_LIMIT_COOLDOWN_FLOOR_S`` seconds is applied in case the
+        parsed time is already in the past (clock skew) or imminent.
+
+        When ``reset_at`` is None (no parseable reset time), falls back to the
+        fixed ``duration_s`` cooldown from ``now`` (SPEC §14.2 default).
+        """
+        if reset_at is not None:
+            try:
+                reset_dt = datetime.fromisoformat(reset_at)
+                # Ensure timezone-aware.
+                if reset_dt.tzinfo is None:
+                    reset_dt = reset_dt.replace(tzinfo=UTC)
+                floor = now + timedelta(seconds=SESSION_LIMIT_COOLDOWN_FLOOR_S)
+                self.cooled_until = max(reset_dt, floor)
+                return
+            except (ValueError, TypeError):
+                # Unparseable — fall through to fixed cooldown.
+                pass
         self.cooled_until = now + timedelta(seconds=duration_s)
 
     def reset_cooldown(self) -> None:
@@ -348,11 +392,50 @@ class FailoverHarnessPort:
             try:
                 handle = await entry.port.dispatch(context)
                 _log.debug("dispatch succeeded via harness %r", entry.id)
+                # Register a post-completion status sink that arms the cooldown
+                # when the run finishes with conclusion="awaiting_quota"
+                # (SPEC §14.8 — session-limit wait-and-retry).
+                # The sink is synchronous (RunEventStore contract), captures
+                # ``entry`` by closure, and is only called once (the RunEventStore
+                # guards against double-completion).
+                live_entry = entry  # capture for closure
+
+                def _quota_sink(run_id: str, status: RunStatus) -> None:
+                    if (
+                        status.state == "completed"
+                        and status.conclusion == "awaiting_quota"
+                    ):
+                        live_entry.set_cooldown(
+                            now=datetime.now(UTC),
+                            reset_at=status.quota_reset_at,
+                        )
+                        _log.warning(
+                            "harness %r: run %s hit session/usage limit; "
+                            "cooled until %s (reset_at=%s)",
+                            live_entry.id,
+                            run_id,
+                            live_entry.cooled_until,
+                            status.quota_reset_at,
+                        )
+
+                port_any: Any = entry.port
+                if hasattr(port_any, "register_run_status_sink"):
+                    port_any.register_run_status_sink(handle.run_id, _quota_sink)
+                    # Catch-up: if the run already completed synchronously
+                    # (e.g. FakeExecutionBackend), apply the sink now.
+                    if hasattr(port_any, "get_live_status"):
+                        live_status: RunStatus = port_any.get_live_status(handle.run_id)
+                        if live_status.state == "completed":
+                            _quota_sink(handle.run_id, live_status)
+
                 return handle
 
             except HarnessQuotaExhausted as exc:
                 # Arm cooldown on the live registry entry (persists across calls).
-                entry.set_cooldown(now=datetime.now(UTC))
+                # When exc.reset_at is set (parsed from Claude's "resets <T>"
+                # output), the cooldown expires at that specific time rather
+                # than the fixed HARNESS_COOLDOWN_S offset (SPEC §14.8).
+                entry.set_cooldown(now=datetime.now(UTC), reset_at=exc.reset_at)
                 _log.warning(
                     "harness %r quota exhausted (%s); cooled until %s; trying next",
                     entry.id,
