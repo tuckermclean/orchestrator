@@ -174,12 +174,20 @@ Entered whenever `decide_round` returns `adjudicate` (row 1 spotless OR row 1b R
 **Step 1 — Nitpicker (`NITPICKER_MODEL`, `agents/nitpicker.md`):**
 If accumulated nits or residual suggestions exist, dispatch the nitpicker to apply
 light-touch polish (rename, reword, minor style). Nitpicker is depth-1: it may NOT
-spawn sub-agents. After nitpicker commits, poll CI until green (up to `CI_WAIT_S`).
-If CI fails → `terminal_escalate` (human investigates). If no nits/suggestions → skip.
+spawn sub-agents. After the nitpicker commits its polish, it **must `git push origin HEAD`**
+to the remote branch before terminating (the pod is ephemeral — local-only commits are
+lost on pod teardown). After the nitpicker push, poll CI until green (up to `CI_WAIT_S`).
+If CI fails → `terminal_escalate` (human investigates). If no nits/suggestions → skip
+(no push needed).
 
 **Step 2 — Adjudicator (`ADJUDICATION_MODEL`, `agents/adjudicator.md`):**
 Dispatch Opus to read the PR + CI state and emit a `Verdict`. Adjudicator may spawn
 read-only specialists from its allow-set (I9/D2) but does NOT fix code.
+Before emitting its verdict JSON, the adjudicator **must post a COMMENT-event PR review**
+(`gh pr review <PR> --comment`) with the ship/no-ship rationale (human-visible record).
+`--approve`/`--request-changes` are forbidden — GitHub 422 self-author restriction (#140);
+`--comment` is permitted. On failure, fall back to `gh pr comment`. Post failure must
+never abort the run — the verdict JSON is the engine's source of truth.
 - `blockers == 0` → FINALIZE → `APPROVED` (P8).
 - `blockers >= 1` (reject) → bounded re-converge:
   - Check `counter("adjudicator-reconverge")`. If `< RECONVERGE_CAP`:
@@ -1106,10 +1114,14 @@ Entry on `pull_request:ready_for_review`, `labeled:converge`, or `synchronize` (
         **Step 1 — Nitpicker** (`NITPICKER_MODEL`, `NITPICKER_CONTRACT`): if
         `accumulated_nits` (deduped) or `residual_suggestions > 0`, dispatch nitpicker;
         await completion (up to `CI_WAIT_S`); on timeout → `terminal_escalate(E11)`;
-        after nitpicker commits, poll CI until all green; if CI fails → `terminal_escalate`.
-        Skip entirely if no nits/suggestions.
+        the nitpicker contract requires it to `git push origin HEAD` after committing
+        (pod is ephemeral — local commits are lost on pod teardown); after push, poll CI
+        until all green; if CI fails → `terminal_escalate`. Skip entirely if no nits/suggestions.
         **Step 2 — Adjudicator** (`ADJUDICATION_MODEL`, `ADJUDICATOR_CONTRACT`): dispatch
-        Opus; await; read verdict; if `blockers == 0` → **FINALIZE**:
+        Opus; await; read verdict. Before emitting its verdict JSON, the adjudicator
+        contract requires it to post a COMMENT-event PR review (`gh pr review --comment`)
+        with the ship/no-ship rationale (human-visible record; `--approve` is forbidden by
+        GitHub self-author restriction §140). If `blockers == 0` → **FINALIZE**:
         `add_label(LABEL_READY)`, `remove_label(LABEL_CONVERGE)`,
         `counter.reset("converge-retry")`, `counter.reset("adjudicator-reconverge")`,
         `clear_converge_state` → `APPROVED` (P8).

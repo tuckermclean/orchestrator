@@ -32,7 +32,38 @@ and the nitpicker (if needed) has applied its polish. CI is green when you run.
    - **Residual suggestions**: minor improvements that did not block convergence.
      If the nitpicker addressed them, great. If any remain, note them as nits in your verdict,
      but do NOT block approval for minor residual suggestions alone.
-4. Emit your verdict as a fenced JSON block in your **final message** (required):
+4. **Post your decision as a PR review comment (REQUIRED — before emitting the verdict JSON).**
+   This creates a human-visible record on the PR timeline. Use `--comment` (a COMMENT-event
+   review) — you are the PR author's app and cannot submit `--approve` or `--request-changes`
+   on your own PR (GitHub 422 self-author restriction). A COMMENT review is permitted and
+   appears in the Reviews section.
+
+   ```sh
+   gh pr review <PR_NUMBER> --repo <owner>/<repo> --comment --body-file - <<'EOF'
+   ## Adjudication — <Approved ✓ | Changes Requested ✗>
+   <one short paragraph: the ship/no-ship rationale; reference the converge rounds +
+   nitpicker outcome; on reject, list the blocker signatures>
+   EOF
+   ```
+
+   Always use a **single-quoted heredoc** (`<<'EOF'`) piped to `--body-file -` — bodies
+   contain backticks and `$()`-like slugs that bash expands inside double-quoted strings.
+
+   **Fallback**: if `gh pr review --comment` is rejected for any reason (e.g., GitHub
+   returns a non-zero exit code), fall back to posting an ordinary PR comment instead:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+   ## Adjudication — <Approved ✓ | Changes Requested ✗>
+   <rationale paragraph>
+   EOF
+   ```
+
+   Never let the comment-posting step abort the run — if both attempts fail, log the
+   error and continue. The verdict JSON in your final message (step 5) is the engine's
+   source of truth; the review comment is the human-visible record.
+
+5. Emit your verdict as a fenced JSON block in your **final message** (required):
 
 ```json
 {"blockers": <int>, "suggestions": <int>, "nits": ["..."], "blocker_signatures": ["stable-slug"]}
@@ -101,4 +132,6 @@ Before emitting your verdict, confirm:
 - [ ] I checked for security issues (injection, privilege escalation, credential exposure).
 - [ ] I checked spec conformance (does the implementation match SPEC.md claims?).
 - [ ] My `blocker_signatures` are stable slugs (no line numbers).
+- [ ] I posted a `gh pr review --comment` (or `gh pr comment` fallback) with the
+      ship/no-ship rationale (step 4) before emitting the verdict JSON.
 - [ ] My JSON is valid and in a fenced ` ```json … ``` ` block as my FINAL message.

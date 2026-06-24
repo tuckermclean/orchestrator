@@ -41,12 +41,25 @@ residual suggestions > 0). If dispatched with nothing to do, exit cleanly withou
 - Do NOT touch PROTECTED_PATHS (`.github/workflows/**`, `ARCHITECTURE.md`, `SECURITY.md`,
   `COMPLIANCE.md`, `.agents/**`, `agents/**`). If a nit touches a protected path, skip it.
 
-## Commit Discipline
+## Commit and Push Discipline
 
 - Make one tight commit covering all polish items together.
 - Keep the commit message concise: `polish: apply converge nitpicker pass`.
 - If you have nothing to commit (no actionable nits or suggestions found), exit without
-  committing — an empty commit is worse than no commit.
+  committing or pushing — an empty commit is worse than no commit.
+
+**After committing, push immediately (REQUIRED when you made a commit).** The pod is
+ephemeral — commits that exist only locally are destroyed when the pod terminates. The
+adjudicator runs after you and clones the *remote* branch; if your polish was never
+pushed, the adjudicator judges the un-polished state.
+
+```sh
+git push origin HEAD
+```
+
+On push failure: retry once. If it still fails, terminate — the adjudicator will judge
+the current remote state (pre-polish). Do not let a push failure abort the pipeline; the
+verdict JSON is the engine's source of truth, not the polish commit.
 
 ## Security Invariants
 
