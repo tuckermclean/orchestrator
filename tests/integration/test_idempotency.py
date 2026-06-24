@@ -69,6 +69,21 @@ def _issue(n: int) -> IssueRef:
     return IssueRef(repo=REPO, number=n)
 
 
+async def _drain_dispatch(svc: OrchestratorService) -> None:
+    """Await all in-flight background dispatch sub-machine tasks.
+
+    handle_event spawns the orchestrator→implementer dispatch sub-machine as a
+    background task (SPEC §10.1 amended); tests asserting on dispatch side-effects
+    must drain it first so that the background coroutine completes before checking
+    harness.dispatch_calls or other observable state.
+    """
+    import asyncio
+
+    tasks = list(svc._dispatch_tasks.values())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # §6 — delivery-ID dedup
 # ---------------------------------------------------------------------------
@@ -688,8 +703,6 @@ async def test_inflight_guard_two_rapid_events_one_dispatch() -> None:
     and returns without dispatching.  The guard fires before any implementing PR
     exists in the forge — the window where the durable list_prs dedup is blind.
     """
-    import asyncio
-
     forge = FakeForgePort()
     harness = FakeHarnessPort()
     issue_ref = _issue(70)
@@ -715,11 +728,14 @@ async def test_inflight_guard_two_rapid_events_one_dispatch() -> None:
     result2 = await svc.handle_event("issues", payload, delivery_id="evt-002")
     assert result2["handled"] is True  # handle_event still returns handled=True
 
-    # Allow background tasks to complete.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
+    # Drain the background dispatch sub-machine so that dispatch_calls is populated.
+    # The dispatch sub-machine runs two sequential agent runs (orchestrator → implementer)
+    # as a background asyncio task; we must await it before asserting on side-effects.
+    await _drain_dispatch(svc)
 
-    # Exactly one harness dispatch despite two events.
+    # Exactly one harness dispatch despite two events.  No implementing PR was seeded
+    # in the forge, so the sub-machine dispatches only the orchestrator (Opus) and
+    # skips the implementer — one dispatch total.
     assert len(harness.dispatch_calls) == 1, (
         f"Expected 1 dispatch, got {len(harness.dispatch_calls)}: "
         "in-flight guard must block the second issues:labeled event"
@@ -753,8 +769,10 @@ async def test_inflight_guard_clears_after_ttl_expires() -> None:
         "label": {"name": LABEL_AGENT_WORK},
     }
 
-    # First dispatch — guard is set and dispatch fires.
+    # First dispatch — guard is set and dispatch sub-machine fires in background.
     await svc.handle_event("issues", payload, delivery_id="evt-A")
+    # Drain the sub-machine task so the orchestrator dispatch is recorded.
+    await _drain_dispatch(svc)
     assert len(harness.dispatch_calls) == 1
 
     # Verify guard is now held (TTL task is running).
@@ -777,6 +795,7 @@ async def test_inflight_guard_clears_after_ttl_expires() -> None:
 
     # Guard cleared — second event must dispatch again.
     await svc.handle_event("issues", payload, delivery_id="evt-B")
+    await _drain_dispatch(svc)
 
     assert len(harness.dispatch_calls) == 2, (
         "Guard must clear so re-dispatch is not permanently blocked"

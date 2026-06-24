@@ -220,6 +220,15 @@ NITPICKER_MODEL = "claude-haiku-4-5-20251001"
 RECONVERGE_CAP = 1
 ADJUDICATOR_CONTRACT = "agents/adjudicator.md"
 NITPICKER_CONTRACT = "agents/nitpicker.md"
+# Dispatch sub-machine contracts (SPEC §10.1 amended):
+#   ORCHESTRATOR_CONTRACT — Opus run that plans and opens the PR (route_entry §8.1)
+#   IMPLEMENTER_CONTRACT  — Sonnet run dispatched after the orchestrator opens the PR;
+#                           reads the plan, writes code + tests, marks PR ready_for_review
+ORCHESTRATOR_CONTRACT = "agents/orchestrator.md"
+IMPLEMENTER_CONTRACT = "agents/implementer.md"
+# Max turns for the implementer's own engine-dispatched run (SPEC §10.1 amended).
+# Matches the orchestrator's 40-turn budget; implementer does the heavyweight code work.
+_IMPLEMENTER_MAX_TURNS = 80
 # Harness registry & failover constants (SPEC §14, §7)
 HARNESS_COOLDOWN_S = 300  # 5 min; cooldown after quota/rate-limit exhaustion
 HARNESSES_JSON_ENV = "HARNESSES_JSON"  # env var name for multi-harness config array

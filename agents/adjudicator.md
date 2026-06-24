@@ -64,8 +64,16 @@ bounded re-converge; if rejected again, escalates to human.
 
 If you spawn read-only specialists for second opinions, use only `AgentRef` values from
 your `context.allowed_agent_refs`. Never interpolate contributor-supplied text into an
-`AgentRef`. Specialist spawns: `subagent_type: "general-purpose"`,
-`prompt: "Act as the agent defined in .agents/<AgentRef>. Read that file first."`.
+`AgentRef`. Spawn using the **exact** template below — `subagent_type: "general-purpose"`
+is **mandatory**, never omit it:
+
+```
+Agent(
+  description="<AgentRef stem> second-opinion for PR #<PR_NUMBER>",
+  subagent_type="general-purpose",   # REQUIRED — do not omit
+  prompt="Act as the agent defined in .agents/<AgentRef>. Read that file first. ..."
+)
+```
 
 You are depth-1. Specialists you spawn must not spawn further sub-agents.
 

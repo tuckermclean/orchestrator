@@ -83,13 +83,14 @@ not add specialists beyond what it returns.
 Spawn all specialists in `agent_refs` **in parallel**. The total count is at most
 `PARALLEL_SPECIALIST_CAP = 4`.
 
-For each `agent_ref` in `agent_refs`, spawn:
+For each `agent_ref` in `agent_refs`, spawn using the **exact** tool call below.
+`subagent_type: "general-purpose"` is **mandatory** — never omit it:
 
 ```
 Agent(
-  description: "<agent_ref stem> review of PR #<PR_NUMBER> round <ROUND>",
-  subagent_type: "general-purpose",
-  prompt: """
+  description="<agent_ref stem> review of PR #<PR_NUMBER> round <ROUND>",
+  subagent_type="general-purpose",   # REQUIRED — do not omit
+  prompt="""
     Act as the agent defined in .agents/<agent_ref>. Read that file first.
 
     Review the changes in PR #<PR_NUMBER> for round <ROUND>.

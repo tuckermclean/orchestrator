@@ -954,17 +954,21 @@ durable in-process state other than the arguments passed to each method.
 Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
 
 1. `route_entry(event.name)` → `{model, max_turns, contract}`.
-2. For `issues:labeled agent-work` — two complementary dedup layers, applied in order:
+2. For `issues:labeled agent-work` — **dispatch sub-machine** (amended):
+
+   The `issues:labeled agent-work` event triggers a **two-run sequential sub-machine**
+   that runs as a background asyncio task (`_spawn_dispatch` in `OrchestratorService`,
+   mirroring `_spawn_converge`). Two complementary dedup layers prevent duplicate
+   sub-machines, applied before the sub-machine is spawned:
 
    **Layer A — in-flight dispatch guard (in `OrchestratorService`, defense-in-depth).**
    `OrchestratorService._spawn_dispatch` maintains an in-memory dict (`_dispatch_tasks`)
-   keyed by issue (`owner/name#number`). Before calling `Engine.dispatch`, it checks
+   keyed by issue (`owner/name#number`). Before spawning the sub-machine, it checks
    whether a dispatch task for this issue is already running. If so, it returns immediately
    (no-op). Otherwise it registers the task and calls `Engine.dispatch` inside it. The key
-   is removed when the task completes (harness.dispatch is fire-and-forget, so the task
-   exits quickly). This guard closes the window between "dispatch decided" and "agent
-   opens+labels its implementing PR" — the interval when Layer B below is blind because no
-   implementing PR exists yet.
+   is removed when the task completes. This guard closes the window between "dispatch
+   decided" and "agent opens+labels its implementing PR" — the interval when Layer B is
+   blind because no implementing PR exists yet.
 
    **Why two events fire ~73 s apart (observed on sandbox-derp issue #18):** GitHub's
    at-least-once webhook delivery can redeliver a `labeled:agent-work` event if the first
@@ -973,7 +977,8 @@ Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
    trigger count or inter-event gap.
 
    **Guard clear conditions (must not permanently block re-dispatch):**
-   - The task completes (normal path — fast, since harness.dispatch is fire-and-forget).
+   - The task completes (both orchestrator + implementer runs finish, or sub-machine aborts
+     early on orchestrator failure).
    - A process restart clears all in-memory state; the durable Layer B backstop then owns
      duplicate prevention until the implementing PR is labeled.
    There is **no explicit TTL timer**: the task lifecycle is the TTL. A failed dispatch
@@ -986,7 +991,37 @@ Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
    webhook replays that arrive after the dispatch task exits and before (or after) the
    agent opens+labels its PR.
 
-   After both guards pass: `harness.dispatch(DispatchContext(issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
+   **Sub-machine steps (after both guards pass, inside the background task):**
+
+   **Step A — Orchestrator run (Opus, `ADJUDICATION_MODEL`, 40 turns, `agents/orchestrator.md`):**
+   `harness.dispatch(DispatchContext(issue_ref, contract=ORCHESTRATOR_CONTRACT, model=ADJUDICATION_MODEL, max_turns=40, forge_token_scope="repo-branch"))`.
+   Await via `Engine._await_run`.  The orchestrator opens the draft PR, adds
+   `LABEL_IMPLEMENTING`, commits a plan skeleton, and terminates — it does NOT write
+   production code and does NOT spawn the implementer inline.
+
+   On orchestrator failure / timeout / no PR opened: log warning, return orchestrator
+   handle, and do NOT dispatch the implementer.  The issue stays QUEUED; RC-4 handles the
+   orphan on the next reconciler tick.
+
+   **Step B — Locate the PR the orchestrator opened:**
+   `forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])` filtered to PRs
+   whose body contains `Closes #{issue_ref.number}`.  If none found, skip implementer and
+   return orchestrator handle.
+
+   **Step C — Implementer run (Sonnet, `DEFAULT_SWARM_MODEL`, 80 turns, `agents/implementer.md`):**
+   `harness.dispatch(DispatchContext(issue_ref, pr_ref=found_pr_ref, contract=IMPLEMENTER_CONTRACT, model=DEFAULT_SWARM_MODEL, max_turns=80, forge_token_scope="repo-branch"))`.
+   Await via `Engine._await_run`.  The implementer reads the plan, writes code + tests,
+   runs the gate, and marks the PR `ready_for_review` (P2, `LABEL_CONVERGE`).
+
+   On implementer failure / timeout: log warning, leave PR draft for RC-1 recovery.
+   On `AllHarnessesExhausted` at either step: return the last handle obtained (HOLD; entity
+   stays QUEUED or BUILDING; RC-4 / RC-3 re-arms as appropriate — §14.5).
+
+   **Model tiering (§251):** The orchestrator (planning, low token count) runs on Opus;
+   the implementer (heavy code-writing) runs on Sonnet.  Spawning the implementer inline
+   from the orchestrator (old behavior) would run the implementer on Opus because
+   general-purpose Task sub-agents inherit the session model.  The engine-dispatch split
+   enforces the model boundary at the `harness.dispatch` call site.
 
 3. For `@claude` comment → `harness.dispatch(DispatchContext(pr_ref or issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
 
@@ -1526,7 +1561,8 @@ A `HarnessPort`-compatible coordinator that wraps a `HarnessRegistry` and implem
 **Critical invariant:** `AllHarnessesExhausted` must **NEVER** be converted to `needs-human`. The entity stays in its current forge-label state. The reconciler re-attempts on its next tick; by that time one or more harness cooldowns may have expired (each cooldown expires after `HARNESS_COOLDOWN_S` seconds), so the next dispatch attempt may succeed.
 
 **Engine / `OrchestratorService` contract:**
-- `Engine.dispatch`: if `harness.dispatch(context)` raises `AllHarnessesExhausted`, return `None` (same as a no-op guard path). The issue stays `QUEUED` (still has `agent-work` label). The reconciler's RC-4 channel picks it up on the next tick.
+- `Engine.dispatch` (orchestrator step A of sub-machine): if `harness.dispatch(context)` raises `AllHarnessesExhausted`, return `None`. The issue stays `QUEUED`. The reconciler's RC-4 channel picks it up on the next tick.
+- `Engine.dispatch` (implementer step C of sub-machine): if `harness.dispatch(context)` raises `AllHarnessesExhausted`, return the orchestrator handle. The PR draft is BUILDING (has `LABEL_IMPLEMENTING`); RC-1 handles stale drafts.
 - `Engine.converge` (reviewer/fixer dispatch paths): if a dispatch raises `AllHarnessesExhausted`, raise it to the `OrchestratorService` event handler which logs it and returns without label mutation. The PR stays `CONVERGING` (retains `converge` label). The reconciler's RC-3 re-arm picks it up.
 - `OrchestratorService.handle_event`: catch `AllHarnessesExhausted`, log at INFO level with the entity reference, and return a `HELD` outcome. No escalation, no label change.
 

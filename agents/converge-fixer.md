@@ -88,13 +88,14 @@ The harness rejects out-of-set spawns at runtime. The routing table below only u
 `AgentRef` values from `CONVERGE_REVIEW_BASE` and `SPECIALIST_ROUTING` — they are
 always a subset of `allowed_agent_refs`.
 
-For each owning `AgentRef` identified in Step 2.5, spawn:
+For each owning `AgentRef` identified in Step 2.5, spawn using the **exact** tool call
+below. `subagent_type: "general-purpose"` is **mandatory** — never omit it:
 
 ```
 Agent(
-  description: "Fix <blocker-signature> via <agent_ref stem>",
-  subagent_type: "general-purpose",
-  prompt: """
+  description="Fix <blocker-signature> via <agent_ref stem>",
+  subagent_type="general-purpose",   # REQUIRED — do not omit
+  prompt="""
     Act as the agent defined in .agents/<agent_ref>. Read that file first.
 
     Fix the following blocker(s) in the current PR branch:

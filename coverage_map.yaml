@@ -185,6 +185,23 @@
   "durable-dedup-backstop-after-pr-labeled":
     tests: ["test_inflight_guard_durable_dedup_still_blocks_after_pr_labeled", "test_dispatch_idempotent_two_calls"]
 
+"§10.1":
+  # Dispatch sub-machine: orchestrator (Opus) then implementer (Sonnet) as separate engine runs
+  # (SPEC §10.1 amended, §251 — model tiering enforcement at the dispatch boundary)
+  "dispatch-sub-machine-model-split":
+    tests: ["test_dispatch_sub_machine_orchestrator_gets_opus", "test_dispatch_sub_machine_implementer_gets_sonnet"]
+  "dispatch-sub-machine-no-pr-skips-implementer":
+    tests: ["test_dispatch_sub_machine_no_pr_skips_implementer"]
+  "dispatch-sub-machine-orchestrator-timeout-skips-implementer":
+    tests: ["test_dispatch_sub_machine_orchestrator_timeout_skips_implementer"]
+
+"§251":
+  # Model tiering: Opus for orchestrator/adjudicator, Sonnet for implementer/reviewers/fixer
+  "implementer-uses-sonnet":
+    tests: ["test_dispatch_sub_machine_implementer_gets_sonnet"]
+  "adjudicator-always-opus":
+    tests: ["test_adjudication_adjudicator_always_uses_opus"]
+
 # I7 invariant: awaiting-promotion and agent-work must never coexist on an issue.
 # Test not yet implemented — belongs in Step 2 security test suite.
 # "I7-invariant-awaiting-and-agent-work-never-coexist":
