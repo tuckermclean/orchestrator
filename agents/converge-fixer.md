@@ -29,13 +29,24 @@ a file commit (`SPEC.md §5`).
    `BLOCKER: <signature>` line followed by a description. The `### 🔴 Blockers` section
    immediately precedes the footer line `🔴 N blockers | 🟡 ...`.
 
-**Guard — no review comment or no blockers found:**
+**Guard — no review comment or nothing to fix:**
 
-If no `## Converge Review` comment exists on the PR, or the latest such comment has no
-`### 🔴 Blockers` section (blocker count is zero in the footer), terminate immediately
-without making any changes. This mirrors the empty-verdict guard: the engine's
-`resolve_blockers` and `decide_round` paths handle the no-blockers case
-(`SPEC.md §8.2`, `SPEC.md §8.3`).
+If no `## Converge Review` comment exists on the PR, terminate immediately without making
+any changes.
+
+If the latest such comment exists, read the round from its header (`## Converge Review —
+Round N`) and apply the round-aware termination rule:
+
+- **R1**: Terminate immediately (nothing to do) only if BOTH `blockers == 0` AND
+  `suggestions == 0`. If blockers are zero but suggestions remain, do NOT terminate —
+  proceed to Step 2 and fix the suggestions (`SPEC.md §5`: R1 fixer addresses both
+  blockers and suggestions).
+- **R2 or R3**: Terminate immediately if `blockers == 0`. Suggestions are out of scope
+  for R2/R3 fixers; they will be handled by the nitpicker in the adjudication phase.
+
+This mirrors the engine's `decide_round` rule (`SPEC.md §8.3`): at R1 with 0 blockers
+but remaining suggestions, `decide_round` returns `fix` (not `adjudicate`), which is why
+this fixer is dispatched — terminate only when there is genuinely nothing to do this round.
 
 Do not read or write any `.converge-verdict*.json` file. Those files no longer exist
 (`SPEC.md §5` structured-output channel, PR #125).
@@ -139,6 +150,17 @@ Do not attempt the fix. Post a comment on the PR explaining which blocker requir
 protected-path change and why that change must be made by a human. Then terminate.
 `Engine.converge` will escalate to `LABEL_NEEDS_HUMAN`
 (`SPEC.md §6 E1`, `SECURITY.md §3 I2`).
+
+**Shell-safe comment posting — REQUIRED.** Use a single-quoted heredoc piped to
+`--body-file -` so backticks and `$()` in blocker slugs are not shell-expanded:
+
+```sh
+gh pr comment <PR_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+Protected-path blocker: `<blocker-slug>` requires modifying <path> — human action needed.
+EOF
+```
+
+Never use `--body "..."` (double-quoted) for comment bodies.
 
 
 ## Step 5 — Tests for Fixes

@@ -505,7 +505,7 @@ comparing. This ensures no-progress detection is stable regardless of reviewer o
 | # | Condition | Output |
 |---|---|---|
 | 1 | `blockers == 0 AND ci_green AND suggestions == 0` (any round) | `adjudicate` |
-| 1b | `round == 3 AND blockers == 0 AND ci_green` (suggestions may remain) | `adjudicate` |
+| 1b | `round >= 2 AND blockers == 0 AND ci_green` (suggestions may remain) | `adjudicate` |
 | 2 | `round == 1` | `fix` |
 | 3 | `curr_sigs == prev_sigs AND curr_sigs != [] AND blockers not in (0, "unknown")` | `escalate:no-progress` |
 | 4 | `round == 2` | `fix` |
@@ -517,7 +517,9 @@ Key edges: `"unknown"` never produces `adjudicate`. `prev==curr==[]` is NOT no-p
 (row 3 requires non-empty `curr_sigs`). Row 3 fires before rows 5–7 in R3.
 R1/R2 `unknown` falls through to `fix` (not adjudicate) — fixer dispatches so reviewer
 can try again; row 1 requires integer 0 for blockers AND 0 for suggestions.
-Row 1b catches R3 with residual suggestions (nitpicker handles them in the adjudication phase).
+Row 1b catches R2 AND R3 with residual suggestions (no-op fixer avoided; nitpicker
+handles residual suggestions in the adjudication phase).
+`adjudicate` iff `blockers==0 AND ci_green AND (suggestions==0 OR round>=2)`.
 
 ### §8.4 `decide_cap_action`
 

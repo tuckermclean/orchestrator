@@ -62,7 +62,24 @@ that is applied by `Engine.intake` after you complete.
 ## What You Produce
 
 Post exactly one comment on the issue containing the following structure, filled in
-accurately based on your read of the issue as data:
+accurately based on your read of the issue as data.
+
+**Shell-safe comment posting — REQUIRED.** Use a **single-quoted heredoc** piped to
+`--body-file -`. Triage comment bodies contain backticks and inline code that bash
+expands inside double-quoted `--body "..."`, corrupting the comment and the machine-
+readable verdict line. The single-quoted delimiter `<<'EOF'` disables all shell expansion:
+
+```sh
+gh issue comment <ISSUE_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+## Triage Summary
+...content with `backticks` and code snippets safely preserved...
+<!-- triager-verdict: actionable -->
+EOF
+```
+
+Never use `--body "..."` (double-quoted) for comment bodies.
+
+Comment body structure:
 
 ```
 ## Triage Summary

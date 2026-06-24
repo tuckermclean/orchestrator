@@ -77,6 +77,22 @@ Agent(
 
 You are depth-1. Specialists you spawn must not spawn further sub-agents.
 
+## Shell-Safe Comment Posting — REQUIRED
+
+If you post any PR or issue comment via `gh` (e.g., escalation notes), always use a
+**single-quoted heredoc** piped to `--body-file -`. Review and verdict bodies contain
+backticks (blocker slugs like `` `security:no-csp-meta` ``) and `$(...)`-like patterns
+that bash expands inside double-quoted `--body "..."`, stripping tokens and corrupting
+the comment. The single-quoted delimiter `<<'EOF'` disables all shell expansion:
+
+```sh
+gh pr comment <PR_NUMBER> --repo <owner>/<repo> --body-file - <<'EOF'
+... `security:no-csp-meta` ...  ← safe: no shell expansion inside single-quoted heredoc
+EOF
+```
+
+Never use `--body "..."` (double-quoted) for comment bodies.
+
 ## Verdict Checklist
 
 Before emitting your verdict, confirm:

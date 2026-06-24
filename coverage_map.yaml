@@ -33,11 +33,17 @@
 
 "§8.3":  # decide_round
   "row-1-adjudicate":  # spotless (blockers==0, ci_green, suggestions==0) at any round
-    tests: ["test_decide_round_adjudicate_r1_spotless", "test_decide_round_adjudicate_r2_spotless", "test_decide_round_adjudicate_r3_spotless", "test_decide_round_zero_blockers_ci_red_not_adjudicate_r1", "test_decide_round_unknown_never_adjudicates_even_ci_green", "test_decide_round_r1_suggestions_present_not_spotless", "test_decide_round_r2_suggestions_present_not_spotless"]
-  "row-1b-adjudicate-r3":  # R3 with 0 blockers + ci_green (suggestions may remain)
+    tests: ["test_decide_round_adjudicate_r1_spotless", "test_decide_round_adjudicate_r2_spotless", "test_decide_round_adjudicate_r3_spotless", "test_decide_round_zero_blockers_ci_red_not_adjudicate_r1", "test_decide_round_unknown_never_adjudicates_even_ci_green", "test_decide_round_r1_suggestions_present_not_spotless", "test_decide_round_spotless_r1_adjudicates"]
+  "row-1b-adjudicate-r3":  # R3 with 0 blockers + ci_green (suggestions may remain) — row 1b now covers round>=2
     tests: ["test_decide_round_adjudicate_r3_with_residual_suggestions"]
+  "row-1b-adjudicate-r2-suggestions":  # R2 with 0 blockers + ci_green + suggestions → adjudicate (no-op fixer prevention)
+    tests: ["test_decide_round_r2_suggestions_present_adjudicates", "test_decide_round_r2_0_blockers_with_suggestions_adjudicates_regression"]
+  "row-1b-r2-0-blockers-suggestions-adjudicates":  # regression lock: R2+0 blockers+suggestions must adjudicate
+    tests: ["test_decide_round_r2_0_blockers_with_suggestions_adjudicates_regression"]
+  "row-2-r1-0-blockers-suggestions-fix":  # R1+0 blockers+suggestions → fix (fixer addresses suggestions at R1)
+    tests: ["test_decide_round_r1_0_blockers_with_suggestions_fix"]
   "row-2-r1-fix":
-    tests: ["test_decide_round_fix_r1_with_blockers", "test_decide_round_fix_r1_unknown"]
+    tests: ["test_decide_round_fix_r1_with_blockers", "test_decide_round_fix_r1_unknown", "test_decide_round_r1_0_blockers_with_suggestions_fix"]
   "row-3-no-progress":
     tests: ["test_decide_round_no_progress_r2", "test_decide_round_no_progress_r3", "test_decide_round_no_progress_sorts_before_compare", "test_decide_round_empty_sigs_not_no_progress", "test_decide_round_sentinel_normalized_not_no_progress", "test_decide_round_no_progress_skipped_when_blockers_zero", "test_decide_round_r3_no_progress_fires_before_cap"]
   "row-4-r2-fix":
