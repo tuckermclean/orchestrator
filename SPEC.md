@@ -1074,10 +1074,19 @@ Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
    handle, and do NOT dispatch the implementer.  The issue stays QUEUED; RC-4 handles the
    orphan on the next reconciler tick.
 
-   **Step B — Locate the PR the orchestrator opened:**
-   `forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])` filtered to PRs
-   whose body contains `Closes #{issue_ref.number}`.  If none found, skip implementer and
-   return orchestrator handle.
+   **Step B — Locate the PR the orchestrator opened (race-proof):**
+   The orchestrator adds `LABEL_IMPLEMENTING` and `Closes #N` in the PR body.  Because
+   GitHub's label index may lag the PR creation by a few seconds, discovery uses a
+   two-path strategy with bounded retry (`_PR_DISCOVERY_RETRIES=3` attempts,
+   `_PR_DISCOVERY_WAIT_S=2.0` s between each):
+   1. **Fast path**: `forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])` filtered
+      to PRs whose body contains `Closes #{issue_ref.number}`.
+   2. **Fallback**: `forge.list_prs(repo, state="open")` (no label filter) filtered to PRs
+      whose body contains `Closes #{issue_ref.number}`.  This catches the label-index lag case.
+   The `Closes #N` body match is the authoritative correctness check in both paths; the agent
+   branch convention (`agent/{N}-{slug}`, per `agents/orchestrator.md Step 1`) is used only
+   as a diagnostic hint for logging.  If neither path finds a match within the retry window,
+   skip the implementer and return the orchestrator handle.
 
    **Step C — Implementer run (Sonnet, `DEFAULT_SWARM_MODEL`, 80 turns, `agents/implementer.md`):**
    `harness.dispatch(DispatchContext(issue_ref, pr_ref=found_pr_ref, contract=IMPLEMENTER_CONTRACT, model=DEFAULT_SWARM_MODEL, max_turns=80, forge_token_scope="repo-branch"))`.
@@ -1085,8 +1094,11 @@ Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
    runs the gate, and marks the PR `ready_for_review` (P2, `LABEL_CONVERGE`).
 
    On implementer failure / timeout: log warning, leave PR draft for RC-1 recovery.
-   On `AllHarnessesExhausted` at either step: return the last handle obtained (HOLD; entity
-   stays QUEUED or BUILDING; RC-4 / RC-3 re-arms as appropriate — §14.5).
+   On `AllHarnessesExhausted` or `SessionLimitHold` (subclass) at **either** `_await_run`
+   call (orchestrator await OR implementer await): catch, log at WARNING with context, return
+   the last handle obtained (HOLD; no label mutation; entity stays QUEUED or BUILDING;
+   RC-4 / RC-3 re-arms as appropriate — §14.5).  `SessionLimitHold` is raised by `_await_run`
+   when a run concludes `awaiting_quota`; it must not escape the sub-machine.
 
    **Model tiering (§251):** The orchestrator (planning, low token count) runs on Opus;
    the implementer (heavy code-writing) runs on Sonnet.  Spawning the implementer inline
@@ -1097,6 +1109,16 @@ Entry from `issues:labeled` (I2, P1) or `@claude` comment (I5).
 3. For `@claude` comment → `harness.dispatch(DispatchContext(pr_ref or issue_ref, contract=..., forge_token_scope="repo-branch", ...))`.
 
 Covers I2, P1, I5.
+
+**§10.1 Observability note — application log configuration:**
+The container starts via `uvicorn src.api.main:app`.  Uvicorn configures only its own
+loggers (`uvicorn`, `uvicorn.access`, `uvicorn.error`).  Application loggers
+(`src.*`, created via `_log = logging.getLogger(__name__)`) have no handler by default and
+their records are silently dropped.  `src/logging_setup.py` installs a `StreamHandler` on the
+`src` package logger at startup (`src/api/main.py` calls `configure_logging()` after all
+imports).  The log level is tunable via the `LOG_LEVEL` env var (default `INFO`).  This makes
+all `_log.info/.warning/.error` calls in `src.service.orchestrator`, `src.engine.dispatch`,
+and related modules visible in `kubectl logs`.
 
 ### §10.2 `Engine.converge`
 

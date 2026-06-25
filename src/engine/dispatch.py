@@ -18,8 +18,14 @@ Dispatch sub-machine (SPEC §10.1 amended, §251):
     - Orchestrator fails or opens no PR → do NOT dispatch the implementer.
       The issue stays QUEUED; RC-4 handles the orphan on the next reconciler tick.
     - Implementer fails → leave the PR draft (BUILDING); RC-1 handles stale drafts.
-    - AllHarnessesExhausted at either dispatch point → HOLD; no label change;
-      RC-4 / RC-3 re-arms as appropriate (SPEC §14.5).
+    - AllHarnessesExhausted / SessionLimitHold at either await point → HOLD; no
+      label change; RC-4 / RC-3 re-arms as appropriate (SPEC §14.5, §14.8).
+
+  PR discovery (Step B) is race-proofed against GitHub label-index lag: the engine
+  first tries the labeled list_prs path; on miss it falls back to scanning all open
+  PRs for ``Closes #N`` and matching the agent branch convention ``agent/{N}-*``.
+  A short bounded retry (``_PR_DISCOVERY_RETRIES`` attempts, ``_PR_DISCOVERY_WAIT_S``
+  between them) absorbs transient lag before giving up (SPEC §10.1 Step B).
 """
 
 from __future__ import annotations
@@ -33,12 +39,15 @@ from src.decisions.route_entry import route_entry
 from src.domain.types import (
     _CLOSING_RE,
     _IMPLEMENTER_MAX_TURNS,
+    _PR_DISCOVERY_RETRIES,
+    _PR_DISCOVERY_WAIT_S,
     CI_WAIT_S,
     DEFAULT_SWARM_MODEL,
     IMPLEMENTER_CONTRACT,
     LABEL_AGENT_WORK,
     LABEL_IMPLEMENTING,
     POLL_INTERVAL_S,
+    PR,  # noqa: TCH001 — used at runtime in _is_implementing_pr_for_issue
     DispatchContext,
     IssueRef,
     PRRef,
@@ -53,6 +62,87 @@ if TYPE_CHECKING:
     from src.engine.reconcile import ReconcileReport
 
 _log = logging.getLogger(__name__)
+
+# Agent branch name prefix (agents/orchestrator.md Step 1):
+#   agent/{issue_number}-{slug}
+# Used as an additional discovery hint when the label-indexed list_prs misses the
+# just-labeled PR due to GitHub label-index lag.
+_AGENT_BRANCH_PREFIX = "agent/"
+
+
+def _is_implementing_pr_for_issue(pr: PR, issue_number: int) -> bool:
+    """Return True when ``pr`` references ``Closes #issue_number`` in its body.
+
+    This is the authoritative link between a PR and an issue regardless of how
+    we located the PR candidate (label filter, branch prefix, or full scan).
+    Security: we always confirm the ``Closes #N`` token — never dispatch the
+    implementer based on branch name alone (branch names are agent-supplied).
+    """
+    matched_nums = {int(m) for m in _CLOSING_RE.findall(pr.body)}
+    return issue_number in matched_nums
+
+
+async def _find_implementing_pr(
+    forge: ForgePort,
+    repo: RepoRef,
+    issue_number: int,
+) -> PRRef | None:
+    """Locate the implementing PR for ``issue_number`` with label-lag resilience.
+
+    Strategy (SPEC §10.1 Step B, race-proof variant):
+    1. Try the fast path: ``list_prs(state="open", labels=[LABEL_IMPLEMENTING])``
+       filtered to PRs whose body contains ``Closes #N``.  This is the primary
+       path and will succeed in the vast majority of cases.
+    2. On miss, fall back to a full open-PR scan: ``list_prs(state="open")``
+       filtered to PRs whose body contains ``Closes #N``.  This catches the
+       label-index lag case where the PR exists but the label is not yet indexed.
+       The branch name ``agent/{N}-*`` is used as an additional hint for logging
+       but the ``Closes #N`` body match is the authoritative correctness check.
+
+    A short bounded retry loop (``_PR_DISCOVERY_RETRIES`` attempts, waiting
+    ``_PR_DISCOVERY_WAIT_S`` between each) absorbs transient API lag before
+    giving up.  The retry resets on each attempt so both paths are retried.
+
+    Returns the ``PRRef`` of the first matching PR, or ``None`` if not found
+    after all attempts.
+    """
+    for attempt in range(1, _PR_DISCOVERY_RETRIES + 1):
+        # --- Fast path: label-filtered query ---
+        labeled_prs = await forge.list_prs(repo, state="open", labels=[LABEL_IMPLEMENTING])
+        for candidate in labeled_prs:
+            if _is_implementing_pr_for_issue(candidate, issue_number):
+                return candidate.ref
+
+        # --- Fallback: full open-PR scan (catches label-index lag) ---
+        all_open_prs = await forge.list_prs(repo, state="open")
+        for candidate in all_open_prs:
+            if _is_implementing_pr_for_issue(candidate, issue_number):
+                # Log at INFO so the operator can see the lag path was taken.
+                if candidate.head_branch.startswith(_AGENT_BRANCH_PREFIX):
+                    _log.info(
+                        "PR #%d for issue #%d found via full-scan (label-index lag; "
+                        "branch=%s, attempt=%d/%d)",
+                        candidate.ref.number,
+                        issue_number,
+                        candidate.head_branch,
+                        attempt,
+                        _PR_DISCOVERY_RETRIES,
+                    )
+                return candidate.ref
+
+        # Neither path found the PR on this attempt.
+        if attempt < _PR_DISCOVERY_RETRIES:
+            _log.info(
+                "Implementing PR for issue #%d not yet visible (attempt %d/%d) "
+                "— retrying in %.0fs",
+                issue_number,
+                attempt,
+                _PR_DISCOVERY_RETRIES,
+                _PR_DISCOVERY_WAIT_S,
+            )
+            await asyncio.sleep(_PR_DISCOVERY_WAIT_S)
+
+    return None
 
 
 class Engine:
@@ -115,7 +205,22 @@ class Engine:
             # the implementer.  This mirrors how Engine.converge awaits reviewers/fixers
             # via _await_run (SPEC §10.1 amended).  Timeout: CI_WAIT_S — same budget
             # as any other harness await; a stale orchestrator is caught by RC-1.
-            orch_completed = await self._await_run(orch_handle)
+            #
+            # SessionLimitHold (subclass of AllHarnessesExhausted) is raised by
+            # _await_run when the run concludes "awaiting_quota" (SPEC §14.8).  Catch
+            # it here so it does not escape the sub-machine: entity stays QUEUED,
+            # RC-4 re-arms on the next tick (SPEC §14.5).  No label mutation.
+            try:
+                orch_completed = await self._await_run(orch_handle)
+            except AllHarnessesExhausted:
+                _log.warning(
+                    "Orchestrator run hit session/harness limit for issue %s#%d "
+                    "— HOLD; entity stays QUEUED; RC-4 re-arms",
+                    issue_ref.repo.owner + "/" + issue_ref.repo.name,
+                    issue_ref.number,
+                )
+                return orch_handle
+
             if not orch_completed:
                 # Orchestrator timed out.  Leave the issue QUEUED; RC-4 re-dispatches.
                 _log.warning(
@@ -125,28 +230,28 @@ class Engine:
                 )
                 return orch_handle
 
-            # --- Locate the PR the orchestrator opened ---
-            # The orchestrator adds LABEL_IMPLEMENTING (Step 2, agents/orchestrator.md)
-            # and includes `Closes #N` in the PR body (Step 1).  We find it by
-            # filtering open implementing PRs for the `Closes #N` token.
-            impl_prs = await self.forge.list_prs(
-                repo, state="open", labels=[LABEL_IMPLEMENTING]
+            # --- Locate the PR the orchestrator opened (Step B — race-proof) ---
+            # The orchestrator adds LABEL_IMPLEMENTING (agents/orchestrator.md Step 2)
+            # and includes ``Closes #N`` in the PR body (Step 1).  We use a
+            # retry-with-fallback strategy to absorb GitHub label-index lag:
+            #   1. Labeled query (fast path) + ``Closes #N`` body match.
+            #   2. Full open-PR scan (fallback) + ``Closes #N`` body match.
+            # See _find_implementing_pr for the full strategy.  The ``Closes #N``
+            # body match is the authoritative correctness check in both paths.
+            found_pr_ref: PRRef | None = await _find_implementing_pr(
+                self.forge, repo, issue_ref.number
             )
-            found_pr_ref: PRRef | None = None
-            for candidate in impl_prs:
-                matched_nums = {int(m) for m in _CLOSING_RE.findall(candidate.body)}
-                if issue_ref.number in matched_nums:
-                    found_pr_ref = candidate.ref
-                    break
 
             if found_pr_ref is None:
-                # Orchestrator did not open a PR (e.g. protected-path abort, crash).
+                # Orchestrator did not open a PR (e.g. protected-path abort, crash)
+                # or the PR never appeared within the retry window.
                 # Leave the issue QUEUED; RC-4 or operator handles re-dispatch.
                 _log.warning(
-                    "Orchestrator opened no implementing PR for issue %s#%d — "
-                    "skipping implementer dispatch",
+                    "Orchestrator opened no implementing PR for issue %s#%d "
+                    "(checked labeled + full-scan, %d attempts) — skipping implementer",
                     issue_ref.repo.owner + "/" + issue_ref.repo.name,
                     issue_ref.number,
+                    _PR_DISCOVERY_RETRIES,
                 )
                 return orch_handle
 
@@ -173,7 +278,22 @@ class Engine:
 
             # Await the implementer.  On timeout the PR stays BUILDING (draft);
             # RC-1 handles stale drafts (SPEC §4 RC-1, SPEC §8.5).
-            impl_completed = await self._await_run(impl_handle)
+            #
+            # SessionLimitHold (subclass of AllHarnessesExhausted) is raised by
+            # _await_run when the run concludes "awaiting_quota" (SPEC §14.8).  Catch
+            # it here so it does not escape the sub-machine: the PR draft stays
+            # BUILDING, RC-1 handles stale drafts (SPEC §14.5).  No label mutation.
+            try:
+                impl_completed = await self._await_run(impl_handle)
+            except AllHarnessesExhausted:
+                _log.warning(
+                    "Implementer run hit session/harness limit for issue %s#%d "
+                    "— HOLD; PR draft stays BUILDING; RC-1 re-arms",
+                    issue_ref.repo.owner + "/" + issue_ref.repo.name,
+                    issue_ref.number,
+                )
+                return impl_handle
+
             if not impl_completed:
                 _log.warning(
                     "Implementer run timed out for issue %s#%d — PR draft left for RC-1",

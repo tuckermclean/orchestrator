@@ -260,6 +260,13 @@ HARNESSES_JSON_ENV = "HARNESSES_JSON"  # env var name for multi-harness config a
 # before the next dispatch attempt (SPEC §14.8).
 SESSION_LIMIT_COOLDOWN_FLOOR_S = 60  # 1 min floor for reset-time-aware cooldown
 
+# PR discovery retry policy for the dispatch sub-machine (SPEC §10.1 Step B).
+# After the orchestrator run completes, its label (LABEL_IMPLEMENTING) may not
+# yet be indexed by the forge API (GitHub label index lag).  We retry a bounded
+# number of times with a short wait before giving up.
+_PR_DISCOVERY_RETRIES = 3   # total attempts (not additional; first attempt is #1)
+_PR_DISCOVERY_WAIT_S = 2.0  # seconds between attempts
+
 # ---------------------------------------------------------------------------
 # Labels
 # ---------------------------------------------------------------------------
