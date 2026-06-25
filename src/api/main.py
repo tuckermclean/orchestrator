@@ -32,6 +32,7 @@ from src.db.operator_store import FakeOperatorStore, SQLiteOperatorStore
 from src.db.push_store import FakePushStore, SQLitePushStore
 from src.db.run_store import FakeRunStore, SQLiteRunStore
 from src.domain.types import LABEL_AWAITING_PROMOTION, RepoRef
+from src.logging_setup import configure_logging as _configure_logging
 from src.ports.fakes import (
     FakeConvergeStateStore,
     FakeCounterStore,
@@ -46,6 +47,12 @@ from src.service.registry import (
     RepoConfig,
     RepoRegistryPort,
 )
+
+# Configure application logging after all imports so the src.* logger tree is
+# fully initialised.  Without this call, uvicorn's startup installs only its
+# own loggers; all src.* _log.info/.warning/.error calls are silently swallowed
+# (no handler).  See src/logging_setup.py for design notes.
+_configure_logging()
 
 _log = logging.getLogger(__name__)
 
