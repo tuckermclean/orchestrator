@@ -253,7 +253,11 @@ async def test_partial_state_recovery_building_pr() -> None:
     harness = FakeHarnessPort()
     pr_ref = _pr(20)
     forge.seed_pr(pr_ref, labels=[LABEL_IMPLEMENTING], draft=True)
-    stale_ago = datetime.now(tz=UTC) - timedelta(seconds=1500)
+    # Seed the last dispatch comfortably beyond the RC-1 stale threshold (import the
+    # constant rather than hardcoding, so this tracks STALE_DRAFT_THRESHOLD_S).
+    from src.domain.types import STALE_DRAFT_THRESHOLD_S
+
+    stale_ago = datetime.now(tz=UTC) - timedelta(seconds=STALE_DRAFT_THRESHOLD_S + 60)
     forge.seed_dispatch_run_at(pr_ref, stale_ago)
     # ci_runs == 0 → trigger-ci
 

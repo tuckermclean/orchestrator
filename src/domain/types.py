@@ -227,10 +227,19 @@ CONVERGE_ROUNDS = 3
 MAX_REDISPATCHES = 2
 RECONCILER_STALE_REDISPATCH_CAP = 3
 ISSUE_REDISPATCH_CAP = 3
-STALE_DRAFT_THRESHOLD_S = 1200
+STALE_DRAFT_THRESHOLD_S = 2400  # 40 min; RC-1 stale-draft trigger. MUST stay > CI_WAIT_S
+# (the agent-run deadline) so the reconciler never treats a run that is still legitimately
+# in flight as a stale draft and re-dispatches it. Invariant: POLL_INTERVAL_S << CI_WAIT_S
+# < _K8S_JOB_TIMEOUT_S, and CI_WAIT_S < STALE_DRAFT_THRESHOLD_S.
 REARM_RECENT_GUARD_S = 300
 ISSUE_COOLDOWN_S = 900
-CI_WAIT_S = 480
+CI_WAIT_S = 1800  # 30 min — _await_run deadline for an agent run (and the CI-poll
+# wait). Was 480 (8 min), which guillotined converge reviewers/fixers mid-run: those
+# spawn 2–4 specialist sub-agents per round and legitimately exceed 8 min on complex
+# PRs, so they were force-cancelled (status=cancelled) at exactly 480 s. 30 min gives
+# real work ample headroom; CI polling still exits early when checks settle. Kept below
+# the K8s-Job backend net (_K8S_JOB_TIMEOUT_S=2100) so the control plane stays the
+# authoritative deadline and the backend never preempts it.
 POLL_INTERVAL_S = 5
 NO_VERDICT_RETRY_CAP = 2
 RECONCILER_CRON = "*/15 * * * *"

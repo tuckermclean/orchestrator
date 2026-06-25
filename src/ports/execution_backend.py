@@ -787,7 +787,9 @@ _BAKED_PACK_DIR = "/app/.agents"
 
 # Default poll interval and timeout (seconds) — module-level so tests can override.
 _K8S_POLL_INTERVAL_S: float = 5.0
-_K8S_JOB_TIMEOUT_S: float = 1800.0  # 30 minutes
+_K8S_JOB_TIMEOUT_S: float = 2100.0  # 35 min — backend poll-loop safety net. Kept ABOVE
+# the control-plane _await_run deadline (CI_WAIT_S=1800) so the engine stays the
+# authoritative timeout (cancel + reconciler re-arm) and the backend never preempts it.
 
 
 class K8sJobBackend:
