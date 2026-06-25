@@ -287,11 +287,12 @@ Single-source home. All implementation code must import from this table; never h
 | `MAX_REDISPATCHES` | `2` | Converge re-dispatch cap. **Was duplicated in 3 places in the reference impl; now single-sourced.** D3 removes the re-dispatch branch from `decide_cap_action`; cap-reached now always escalates. `MAX_REDISPATCHES` is retained for historical reference and `decide_cap_action` tests; do not hardcode `2`. |
 | `RECONCILER_STALE_REDISPATCH_CAP` | `3` | RC-1 stale-PR escalate threshold |
 | `ISSUE_REDISPATCH_CAP` | `3` | RC-4 orphan-issue escalate threshold |
-| `STALE_DRAFT_THRESHOLD_S` | `1200` | 20 min; RC-1 trigger |
+| `STALE_DRAFT_THRESHOLD_S` | `2400` | 40 min; RC-1 stale-draft trigger. **MUST stay `> CI_WAIT_S`** so the reconciler never re-dispatches a run that is still legitimately in flight (see timeout invariant below). |
 | `REARM_RECENT_GUARD_S` | `300` | 5 min; RC-3 skip-recent guard (strict `<`) |
 | `ISSUE_COOLDOWN_S` | `900` | 15 min; RC-4 skip-recent guard (strict `<`) |
-| `CI_WAIT_S` | `480` | 8 min; per-round CI poll timeout |
-| `POLL_INTERVAL_S` | `5` | Seconds between `_await_run` status polls; balances event-loop yielding against CI API call rate. 5 s ≈ 1% of `CI_WAIT_S` budget (≤ 96 polls per round), safely below typical CI API rate limits. |
+| `CI_WAIT_S` | `1800` | 30 min; the `_await_run` deadline for an agent run **and** the per-round CI-poll timeout. On timeout, `_await_run` calls `harness.cancel(handle)` (run → `cancelled`) and the reconciler re-arms. **Was `480` (8 min)**, which force-cancelled converge reviewers/fixers mid-run — they spawn 2–4 specialist sub-agents per round and legitimately exceed 8 min on complex PRs (every cancelled run died at exactly 480 s). CI polling still exits early when checks settle, so the larger budget only adds headroom for slow agent runs. |
+| `_K8S_JOB_TIMEOUT_S` | `2100` | 35 min; K8s-Job backend poll-loop safety net (`src/ports/execution_backend.py`). **MUST stay `> CI_WAIT_S`** so the control plane (`_await_run`) is the authoritative deadline and the backend never preempts it. |
+| `POLL_INTERVAL_S` | `5` | Seconds between `_await_run` status polls; balances event-loop yielding against API call rate. 5 s is well under 1% of the `CI_WAIT_S` budget (≤ 360 polls per round), safely below typical API rate limits. |
 | `NO_VERDICT_RETRY_CAP` | `2` | Converge no-verdict retry cap |
 | `RECONCILER_CRON` | `"*/15 * * * *"` | Reconciler cadence |
 | `PARALLEL_SPECIALIST_CAP` | `4` | Max concurrent specialist agents per converge round |
@@ -305,6 +306,23 @@ Single-source home. All implementation code must import from this table; never h
 | `NITPICKER_CONTRACT` | `"agents/nitpicker.md"` | Agent contract path for the nitpicker (Haiku). Applies light polish; commits; exits. Depth-1. |
 | `HARNESS_COOLDOWN_S` | `300` | 5 min; cooldown duration after a harness signals quota/rate-limit exhaustion. During this window the harness is skipped by `decide_harness`; after expiry it becomes eligible again. Single-sourced here; never hardcode `300`. |
 | `HARNESSES_JSON_ENV` | `"HARNESSES_JSON"` | Name of the environment variable that carries the JSON harness configuration array. Referenced by `PortProvider.from_env`; never hardcode the string `"HARNESSES_JSON"`. |
+
+#### Timeout-ordering invariant
+
+The run-lifecycle timeouts must hold this strict ordering, or a run gets killed or
+re-dispatched while it is still legitimately working:
+
+```
+POLL_INTERVAL_S  ≪  CI_WAIT_S  <  _K8S_JOB_TIMEOUT_S  <  STALE_DRAFT_THRESHOLD_S
+     (5 s)          (1800 s)        (2100 s)              (2400 s)
+```
+
+- `CI_WAIT_S` is the **authoritative** agent-run deadline: the control-plane `_await_run`
+  cancels the run and lets the reconciler re-arm.
+- `_K8S_JOB_TIMEOUT_S` is the backend safety net — strictly **above** `CI_WAIT_S` so the
+  K8s-Job backend never preempts the control-plane deadline.
+- `STALE_DRAFT_THRESHOLD_S` (RC-1) is strictly **above** the run deadline so the
+  reconciler never treats an in-flight run as a stale draft and double-dispatches it.
 
 ### Model tier (§251)
 
@@ -1564,7 +1582,7 @@ stateDiagram-v2
     [*] --> Seed : enter round N (1..3)
     Seed --> Review : dispatch reviewer
     Review --> CheckCI : emit verdict (structured output)
-    CheckCI --> Decide : poll ≤ 480s
+    CheckCI --> Decide : poll ≤ CI_WAIT_S (1800s)
     Decide --> Approved : approve
     Decide --> Fix : fix (R1 always / R2 not stuck)
     Fix --> NextRound : commit + push
