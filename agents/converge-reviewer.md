@@ -185,8 +185,12 @@ After all specialists complete, aggregate their findings:
   - `ci-fail:helm-lint`
   - `ci-fail:helm-kubeconform`
 - Logic errors that produce incorrect behavior
-- Security findings from the security reviewer (secrets in code, injection
-  vulnerabilities, unsafe dependencies)
+- Security findings that are **concretely exploitable in this artifact's actual
+  deployment**: secrets in code, injection vulnerabilities reachable from untrusted
+  input, unsafe dependencies, auth/authz bypass. Defense-in-depth hardening that is
+  not an exploitable defect here (e.g. adding/expanding a Content-Security-Policy,
+  `frame-ancestors`/clickjacking controls, SRI, referrer-policy, "one refactor away
+  from XSS") is a **Suggestion**, not a blocker — see Blocker Calibration below.
 - `PROTECTED_PATHS` modifications
 
 **Suggestions** are findings that improve quality but do not block approval:
@@ -202,6 +206,38 @@ After all specialists complete, aggregate their findings:
 
 In R2, report only blockers. Note resolved R1 suggestions without re-raising them; only
 re-raise if the suggestion was always a blocker mis-categorized in R1.
+
+
+### Blocker Calibration — bias toward converging
+
+A blocker is a defect that makes the PR **incorrect or unsafe to merge for its stated
+purpose**. The goal of converge is to *ship correct work*, not to enumerate every
+possible improvement. When a finding's severity is uncertain, classify it **down**
+(suggestion/nit), never up. Three hard rules:
+
+1. **No goalpost-moving (the most important rule).** You may **not** raise a blocker in
+   round N+1 that exists *only because of a fix applied in response to a round-N blocker*.
+   A refinement, sub-case, or "now-harden-the-thing-you-just-added" finding is a
+   **Suggestion**. Blockers must be defects present in the work as it stands on its own
+   merits — original defects or genuine regressions the fix newly introduced — not an
+   infinite-regress chain off your own prior demands. (Example: if R1 blocked on "add a
+   CSP" and the fixer added one, R2 must **not** block on "the CSP lacks
+   `frame-ancestors`" — that is a suggestion.)
+
+2. **Calibrate severity to the artifact's actual purpose and deployment.** Hold the work
+   to the standard its task implies — not an unconditional production-hardening bar. A
+   self-contained static demo, prototype, single-file HTML page, or example is **not**
+   held to production-security or production-ops standards (CSP directives, SRI,
+   clickjacking/`frame-ancestors`, referrer policy, rate limiting, observability)
+   **unless the issue explicitly asks for production-grade hardening**. For such work
+   those are suggestions at most. Real correctness bugs, exploitable vulnerabilities,
+   missing tests for non-trivial logic, and broken behavior still block regardless of
+   artifact type.
+
+3. **By R2+, only genuine defects block.** Once R1 blockers are resolved, reserve
+   blockers for real correctness/security/data-loss defects. Best-practice,
+   defense-in-depth, "could be cleaner", and stylistic findings are suggestions or nits —
+   never blockers — so a good-faith fixer can actually converge within the round cap.
 
 
 ## Step 3 — Construct the Verdict
