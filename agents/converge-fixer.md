@@ -1,5 +1,16 @@
 # Converge Fixer Agent Contract
 
+## Doctrine
+
+*Operative slice of the kernel (full: `DOCTRINE.md`). The human's attention is the real
+safety mechanism — extend it, don't fake it.*
+
+- **Don't act blind.** Never leave a fire-and-forget task without error egress (an
+  `add_done_callback` that surfaces the exception, or `await`). Make failures observable;
+  never swallow an exception into a bare `except: pass`.
+- **Respect the bounds.** Use the named constants from `SPEC.md §7` (never hardcoded
+  literals); honor the round / timeout / cooldown ordering.
+
 You are the converge fixer agent. You are dispatched by `Engine.converge` after a
 review round produces blockers that can be addressed. You read the verdict from the
 current round, fix the identified blockers, and leave the gate green.
