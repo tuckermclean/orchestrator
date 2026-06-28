@@ -418,7 +418,12 @@ class OrchestratorService:
                     else:
                         await self.reconcile_now()
                 except Exception:
-                    pass  # isolated: reconciler errors never crash the loop
+                    # Isolated: a reconciler tick error never crashes the loop — but it
+                    # must never vanish, either (DOCTRINE.md §2: you may not fix what you
+                    # cannot see). The loop is a self-owned lifecycle task, so it is exempt
+                    # from the error-egress gate; that exemption is only sound if the loop
+                    # surfaces its own exceptions, which is what this log does.
+                    _log.exception("reconciler tick failed; isolated, loop continues")
 
         self._reconcile_task = asyncio.create_task(_loop())
 
